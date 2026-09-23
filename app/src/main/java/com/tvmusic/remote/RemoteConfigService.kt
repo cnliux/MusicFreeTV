@@ -115,7 +115,8 @@ class RemoteConfigService : Service() {
         val parts = requestLine.split(" ")
         if (parts.size < 2) return
         val method = parts[0].uppercase()
-        val path = parts[1]
+        // 去掉查询参数再路由，允许 /?v=xxx 做缓存刷新
+        val path = parts[1].substringBefore('?')
 
         // 读头
         val headers = mutableMapOf<String, String>()
@@ -799,6 +800,9 @@ private val PAGE_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>MusicFree TV 远程管理</title>
 <style>
@@ -885,7 +889,7 @@ private val PAGE_HTML = """<!DOCTYPE html>
   .times { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 2px; }
   .ctrls { display: flex; align-items: center; justify-content: center; gap: 18px; margin: 14px 0 4px; flex-wrap: wrap; }
   .ctrl {
-    flex: none; width: 56px; height: 56px; border-radius: 50%;
+    flex: none; width: 56px !important; height: 56px !important; border-radius: 50%;
     background: radial-gradient(circle at 35% 30%, #333a49, var(--card2) 70%);
     border: none; box-shadow: 0 4px 14px rgba(0,0,0,.45);
     color: var(--text); font-size: 20px; display: flex; align-items: center; justify-content: center; padding: 0;
@@ -960,12 +964,12 @@ private val PAGE_HTML = """<!DOCTYPE html>
         <div class="times"><span id="pPos">0:00</span><span id="pDur">0:00</span></div>
       </div>
       <div class="ctrls">
-        <div class="side"><button class="ctrl" id="pMode" onclick="cycleMode()">↔</button><span id="pModeName">顺序</span></div>
-        <button class="ctrl" onclick="playerCmd('prev')">⏮</button>
-        <button class="ctrl main" id="pToggle" onclick="playerCmd('playpause')">▶</button>
-        <button class="ctrl" onclick="playerCmd('next')">⏭</button>
+        <div class="side"><button class="ctrl" id="pMode" onclick="cycleMode()">⇄</button><span id="pModeName">顺序</span></div>
+        <button class="ctrl" onclick="playerCmd('prev')">⏮︎</button>
+        <button class="ctrl main" id="pToggle" onclick="playerCmd('playpause')">▶︎</button>
+        <button class="ctrl" onclick="playerCmd('next')">⏭︎</button>
         <div class="side"><button class="ctrl" id="pFav" onclick="toggleCurFav()">♡</button><span>收藏</span></div>
-        <div class="side"><button class="ctrl" onclick="showVol()">🔊</button><span>音量</span></div>
+        <div class="side"><button class="ctrl" onclick="showVol()">♪</button><span>音量</span></div>
       </div>
       <div class="volrow" id="volRow" style="display:none;">
         <button class="ghost small" onclick="volume(-0.1)">−</button>
@@ -1125,7 +1129,7 @@ function switchTab(name) {
 /* ---------------- 播放器 ---------------- */
 var MODES = ['ORDER', 'LOOP_ONE', 'SHUFFLE'];
 var MODE_NAMES = { ORDER: '⇅ 顺序', LOOP_ONE: '🔂 单曲', SHUFFLE: '🔀 随机' };
-var MODE_IC = { ORDER: '⇅', LOOP_ONE: '🔂', SHUFFLE: '🔀' };
+var MODE_IC = { ORDER: '⇅', LOOP_ONE: '🔂︎', SHUFFLE: '🔀︎' };
 var curMode = 'ORDER';
 var lastStatus = null;
 var seeking = false;
@@ -1145,7 +1149,7 @@ function loadPlayer() {
       el('pTitle').textContent = '未在播放';
       el('pArtist').textContent = '';
       el('pErr').textContent = '';
-      el('pToggle').textContent = '▶';
+      el('pToggle').textContent = '▶︎';
       renderQueue(d, -1);
       return;
     }
@@ -1156,7 +1160,7 @@ function loadPlayer() {
     var wantSrc = want ? '/api/img?url=' + encodeURIComponent(want) : '';
     if (art.getAttribute('src') !== wantSrc) art.src = wantSrc;
     art.style.visibility = want ? 'visible' : 'hidden';
-    el('pToggle').textContent = d.playing ? '⏸' : '▶';
+    el('pToggle').textContent = d.playing ? '⏸︎' : '▶︎';
     var favBtn = el('pFav');
     if (favBtn) {
       favBtn.textContent = d.favorite ? '♥' : '♡';
