@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -155,7 +156,7 @@ fun HomeScreen(
     }
 }
 
-/** 左侧常驻正在播放面板：大封面 / 歌名歌手 / 当前歌词行 / 进度。 */
+/** 左侧常驻「正在播放」面板：大封面 / 歌名·歌手·专辑分行 / 歌词 / 细进度+时间。 */
 @Composable
 private fun NowPlayingPanel(onOpenPlayer: () -> Unit) {
     val state by PlayerManager.uiState.collectAsState()
@@ -164,21 +165,22 @@ private fun NowPlayingPanel(onOpenPlayer: () -> Unit) {
         modifier = Modifier
             .width(260.dp)
             .fillMaxHeight()
-            .background(MaterialTheme.colorScheme.surface)
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.5f))
             .padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text(
             "正在播放",
-            fontSize = 13.sp,
+            fontSize = 12.sp,
+            letterSpacing = 2.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 12.dp)
+            modifier = Modifier.padding(bottom = 14.dp)
         )
         if (entry == null) {
             Box(
                 modifier = Modifier
                     .size(200.dp)
-                    .clip(RoundedCornerShape(14.dp))
+                    .clip(RoundedCornerShape(16.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
@@ -189,60 +191,91 @@ private fun NowPlayingPanel(onOpenPlayer: () -> Unit) {
         } else {
             Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(14.dp))
-                    .tvFocus(1.04f)
+                    .clip(RoundedCornerShape(16.dp))
+                    .graphicsLayer { shadowElevation = 18f }
+                    .tvFocus(1.03f)
                     .clickable(onClick = onOpenPlayer)
             ) {
                 Artwork(entry.artwork, Modifier.size(200.dp))
             }
+            // 歌名 / 歌手 / 专辑 分行，层级分明
             Text(
                 entry.title,
-                fontSize = 16.sp,
+                fontSize = 17.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth().padding(top = 14.dp)
+                modifier = Modifier.fillMaxWidth().padding(top = 16.dp)
             )
             Text(
-                entry.artist,
-                fontSize = 13.sp,
+                entry.artist.ifBlank { "未知歌手" },
+                fontSize = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
             )
-            // 当前歌词行
+            if (entry.album.isNotBlank()) {
+                Text(
+                    entry.album,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
+                )
+            }
+            // 当前歌词行：用次强调色（粉紫），与主色进度条区分
             val lrcText = if (state.lrcIndex in state.lrcLines.indices)
                 state.lrcLines[state.lrcIndex].text else ""
-            Text(
-                lrcText,
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.primary,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
-            )
-            Spacer(Modifier.height(12.dp))
+            if (lrcText.isNotBlank()) {
+                Text(
+                    lrcText,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.secondary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+            // 细进度条（主色，4dp）+ 时间
             LinearProgressIndicator(
                 progress = {
                     if (state.durationMs > 0) state.positionMs.toFloat() / state.durationMs else 0f
                 },
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.primary
+                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant
             )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(fmtTime(state.positionMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(fmtTime(state.durationMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
     }
+}
+
+private fun fmtTime(ms: Long): String {
+    if (ms <= 0) return "0:00"
+    val s = ms / 1000
+    return "${s / 60}:${"%02d".format(s % 60)}"
 }
 
 @Composable
 private fun HomeTopBar(loading: Boolean, count: Int, onRefresh: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 8.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 16.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             "发现",
-            fontSize = 22.sp,
+            fontSize = 24.sp,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
             color = MaterialTheme.colorScheme.onBackground,
             modifier = Modifier.weight(1f)
         )
@@ -254,13 +287,13 @@ private fun HomeTopBar(loading: Boolean, count: Int, onRefresh: () -> Unit) {
         Box(
             modifier = Modifier
                 .padding(start = 16.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.primaryContainer)
+                .clip(RoundedCornerShape(20.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
                 .tvFocus()
                 .clickable(onClick = onRefresh)
-                .padding(horizontal = 16.dp, vertical = 7.dp)
+                .padding(horizontal = 18.dp, vertical = 8.dp)
         ) {
-            Text("刷新", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 14.sp)
+            Text("⟳ 刷新", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
         }
     }
 }
@@ -273,8 +306,8 @@ private fun OperationsRow(
     onOpenMyList: () -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(18.dp)
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(20.dp)
     ) {
         ActionEntry("🔥", "推荐歌单", "按标签发现好歌单", Modifier.weight(1f), onOpenRecommend)
         ActionEntry("🏆", "排行榜", "各平台权威榜单", Modifier.weight(1f), onOpenTopList)
@@ -341,12 +374,13 @@ private fun SectionWithMore(title: String, onMore: () -> Unit) {
         )
         Box(
             modifier = Modifier
-                .clip(RoundedCornerShape(7.dp))
+                .clip(RoundedCornerShape(16.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
                 .tvFocus()
                 .clickable(onClick = onMore)
-                .padding(horizontal = 12.dp, vertical = 6.dp)
+                .padding(horizontal = 16.dp, vertical = 7.dp)
         ) {
-            Text("更多 ›", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+            Text("更多 ›", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
         }
     }
 }
@@ -368,8 +402,8 @@ private fun PluginSwitcher(
     onSelect: (String) -> Unit
 ) {
     LazyRow(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         items(plugins, key = { it.info?.platform ?: it.name }) { p ->
             val platform = p.info?.platform ?: return@items

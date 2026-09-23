@@ -250,14 +250,15 @@ private fun MiniPlayerBar(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(
-                androidx.compose.ui.graphics.Brush.verticalGradient(
-                    listOf(androidx.compose.ui.graphics.Color(0xF214181F), androidx.compose.ui.graphics.Color(0xFA0B0D12))
-                ),
-                RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)
-            )
+            .background(androidx.compose.ui.graphics.Color(0xE60B0E14))
     ) {
-        // 顶部细进度条
+        // 顶部细分割线 + 进度
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(androidx.compose.ui.graphics.Color(0x1FFFFFFF))
+        )
         androidx.compose.material3.LinearProgressIndicator(
             progress = { if (durationMs > 0) positionMs.toFloat() / durationMs else 0f },
             modifier = Modifier.fillMaxWidth().height(3.dp),
@@ -267,7 +268,7 @@ private fun MiniPlayerBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .padding(horizontal = 24.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             // 左：封面（点击进入播放器）
@@ -275,7 +276,7 @@ private fun MiniPlayerBar(
                 entry.artwork,
                 Modifier
                     .size(52.dp)
-                    .clip(RoundedCornerShape(10.dp))
+                    .clip(CircleShape)
                     .tvFocus(1.04f)
                     .clickable(onClick = onClick)
             )
@@ -289,7 +290,7 @@ private fun MiniPlayerBar(
             ) {
                 Text(
                     text = entry.title.ifBlank { "未知歌曲" },
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = androidx.compose.ui.graphics.Color.White,
                     fontSize = 16.sp,
                     fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
                     maxLines = 1,
@@ -301,49 +302,46 @@ private fun MiniPlayerBar(
                         if (isPlaying) entry.artist.ifBlank { "正在播放" } else "已暂停"
                     },
                     color = if (lyricLine.isNotBlank()) primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    else androidx.compose.ui.graphics.Color(0xAAFFFFFF),
                     fontSize = 13.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
 
-            // 右：操作按钮
-            MiniControl("⏮", primary, onPrev)
-            // 播放/暂停（主色圆形，更突出）
+            // 右：操作按钮（白色图标，播放键大一圈）
+            MiniControl("⏮", onPrev)
             Box(
                 modifier = Modifier
-                    .padding(horizontal = 6.dp)
-                    .size(48.dp)
+                    .padding(horizontal = 10.dp)
+                    .size(52.dp)
                     .clip(CircleShape)
                     .background(primary)
-                    .tvFocus(1.08f)
+                    .tvFocus(1.1f)
                     .clickable(onClick = onToggle),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     if (isPlaying) "⏸" else "▶",
                     color = MaterialTheme.colorScheme.onPrimary,
-                    fontSize = 20.sp
+                    fontSize = 22.sp
                 )
             }
-            // 下一曲
-            MiniControl("⏭", primary, onNext)
+            MiniControl("⏭", onNext)
         }
     }
 }
 
 @Composable
-private fun MiniControl(symbol: String, accent: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
+private fun MiniControl(symbol: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
             .size(44.dp)
             .clip(CircleShape)
-            .background(androidx.compose.ui.graphics.Color(0x14FFFFFF))
             .tvFocus(1.1f)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Text(symbol, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp)
+        Text(symbol, color = androidx.compose.ui.graphics.Color.White, fontSize = 22.sp)
     }
 }

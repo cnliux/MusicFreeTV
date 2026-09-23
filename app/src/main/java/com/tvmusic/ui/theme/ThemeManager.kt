@@ -26,27 +26,28 @@ object ThemeManager {
 
     val themes: List<AppTheme> = listOf(
         AppTheme(
-            id = "green", name = "森林绿", accent = "4ADE80", bg = "0B0D12",
+            // 默认主题：TV 友好的深蓝系（低饱和主色 + 粉紫点缀），背景近纯黑
+            id = "blue", name = "深海蓝", accent = "4A7DFF", bg = "0B0E14",
             scheme = darkColorScheme(
-                primary = Color(0xFF4ADE80), onPrimary = Color(0xFF002010),
-                primaryContainer = Color(0xFF0F3D24), onPrimaryContainer = Color(0xFFBFF5D1),
-                secondary = Color(0xFFB6C8D4),
-                background = Color(0xFF0B0D12), onBackground = Color(0xFFE4E6EB),
-                surface = Color(0xFF14181F), onSurface = Color(0xFFE4E6EB),
-                surfaceVariant = Color(0xFF1E232C), onSurfaceVariant = Color(0xFF9AA3AD),
-                error = Color(0xFFEF5A6F), onError = Color(0xFFFFFFFF)
+                primary = Color(0xFF4A7DFF), onPrimary = Color(0xFF06122E),
+                primaryContainer = Color(0xFF182A4D), onPrimaryContainer = Color(0xFFC9D9FF),
+                secondary = Color(0xFFFF6B9D), onSecondary = Color(0xFF3D0018),
+                background = Color(0xFF0B0E14), onBackground = Color(0xFFF0F2F5),
+                surface = Color(0xFF1A1D24), onSurface = Color(0xFFF0F2F5),
+                surfaceVariant = Color(0xFF252A33), onSurfaceVariant = Color(0xFF8B919C),
+                error = Color(0xFFFF6B6B), onError = Color(0xFFFFFFFF)
             )
         ),
         AppTheme(
-            id = "blue", name = "海洋蓝", accent = "5B9DFF", bg = "0A0E16",
+            id = "green", name = "森林绿", accent = "34D399", bg = "0A0F0D",
             scheme = darkColorScheme(
-                primary = Color(0xFF5B9DFF), onPrimary = Color(0xFF001A3D),
-                primaryContainer = Color(0xFF143059), onPrimaryContainer = Color(0xFFC5DDFF),
-                secondary = Color(0xFF9FC4E0),
-                background = Color(0xFF0A0E16), onBackground = Color(0xFFE4E9F2),
-                surface = Color(0xFF121A26), onSurface = Color(0xFFE4E9F2),
-                surfaceVariant = Color(0xFF1B2534), onSurfaceVariant = Color(0xFF93A2B8),
-                error = Color(0xFFFF6B6B), onError = Color(0xFFFFFFFF)
+                primary = Color(0xFF34D399), onPrimary = Color(0xFF00281A),
+                primaryContainer = Color(0xFF0F3D2C), onPrimaryContainer = Color(0xFFBFF5DF),
+                secondary = Color(0xFFFFB46B), onSecondary = Color(0xFF3A2000),
+                background = Color(0xFF0A0F0D), onBackground = Color(0xFFE7EFEA),
+                surface = Color(0xFF161D1A), onSurface = Color(0xFFE7EFEA),
+                surfaceVariant = Color(0xFF212B27), onSurfaceVariant = Color(0xFF93A39B),
+                error = Color(0xFFEF5A6F), onError = Color(0xFFFFFFFF)
             )
         ),
         AppTheme(
@@ -54,7 +55,7 @@ object ThemeManager {
             scheme = darkColorScheme(
                 primary = Color(0xFFB388FF), onPrimary = Color(0xFF1E0033),
                 primaryContainer = Color(0xFF3A2260), onPrimaryContainer = Color(0xFFE6D9FF),
-                secondary = Color(0xFFC3B0E8),
+                secondary = Color(0xFF69D2E7),
                 background = Color(0xFF0D0A16), onBackground = Color(0xFFEAE6F2),
                 surface = Color(0xFF181322), onSurface = Color(0xFFEAE6F2),
                 surfaceVariant = Color(0xFF241D31), onSurfaceVariant = Color(0xFFA79BBC),

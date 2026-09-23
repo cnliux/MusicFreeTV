@@ -346,6 +346,10 @@ class RemoteConfigService : Service() {
                 val fav = app().playback.toggleFavorite(item, listId)
                 respond(socket, 200, JSONObject().put("ok", true).put("favorited", fav).toString())
             }
+            method == "POST" && path == "/api/player/favorite" -> {
+                val fav = com.tvmusic.player.PlayerManager.toggleFavorite()
+                respond(socket, 200, JSONObject().put("ok", true).put("favorited", fav).toString())
+            }
             method == "POST" && path == "/api/fav/play" -> {
                 // 播放整个收藏专辑：{ id }
                 val body = readBody(input, headers)
@@ -431,6 +435,7 @@ class RemoteConfigService : Service() {
             .put("queue", queue)
             .put("volume", st.volume)
             .put("playMode", st.playMode.name)
+            .put("favorite", st.isFavorite)
             .put("error", st.error ?: JSONObject.NULL)
     }
 
@@ -763,12 +768,21 @@ private val PAGE_HTML = """<!DOCTYPE html>
   input[type=range]::-moz-range-progress { height: 5px; border-radius: 3px; background: var(--accent); }
   input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: #fff; border: none; }
   .times { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .ctrls { display: flex; align-items: center; justify-content: center; gap: 26px; margin: 14px 0 4px; }
+  .ctrls { display: flex; align-items: center; justify-content: center; gap: 22px; margin: 14px 0 4px; }
   .ctrl {
-    width: 52px; height: 52px; border-radius: 50%; background: var(--card2); border: 1px solid var(--line);
+    width: 56px; height: 56px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #333a49, var(--card2) 70%);
+    border: none; box-shadow: 0 4px 14px rgba(0,0,0,.45);
     color: var(--text); font-size: 20px; display: flex; align-items: center; justify-content: center; padding: 0;
+    transition: transform .12s;
   }
-  .ctrl.main { width: 68px; height: 68px; background: var(--accent); border: none; font-size: 26px; color: #fff; }
+  .ctrl:active { transform: scale(.92); }
+  .ctrl.main {
+    width: 72px; height: 72px; font-size: 28px; color: #fff;
+    background: radial-gradient(circle at 35% 30%, var(--accent2), var(--accent) 75%);
+    box-shadow: 0 6px 22px rgba(0,0,0,.5);
+  }
+  .ctrl.favon { color: var(--accent2); }
   .ctrls .side { display: flex; flex-direction: column; align-items: center; gap: 2px; color: var(--muted); font-size: 10px; }
   .ctrls .side button { width: 44px; height: 44px; font-size: 16px; }
   .qitem { display: flex; align-items: center; gap: 10px; padding: 10px 4px; border-bottom: 1px solid var(--line); }
@@ -818,6 +832,7 @@ private val PAGE_HTML = """<!DOCTYPE html>
         <button class="ctrl" onclick="playerCmd('prev')">⏮</button>
         <button class="ctrl main" id="pToggle" onclick="playerCmd('playpause')">▶</button>
         <button class="ctrl" onclick="playerCmd('next')">⏭</button>
+        <div class="side"><button class="ctrl" id="pFav" onclick="toggleCurFav()">♡</button><span>收藏</span></div>
         <div class="side"><button class="ctrl" onclick="showVol()">🔊</button><span>音量</span></div>
       </div>
       <div class="volrow" id="volRow" style="display:none;">
@@ -972,6 +987,11 @@ function loadPlayer() {
     if (art.getAttribute('src') !== want) art.src = want;
     art.style.visibility = want ? 'visible' : 'hidden';
     el('pToggle').textContent = d.playing ? '⏸' : '▶';
+    var favBtn = el('pFav');
+    if (favBtn) {
+      favBtn.textContent = d.favorite ? '♥' : '♡';
+      favBtn.className = 'ctrl' + (d.favorite ? ' favon' : '');
+    }
     el('pErr').textContent = d.error ? String(d.error) : '';
     el('pVol').textContent = (d.volume || 0) + '%';
     el('volBar').value = d.volume || 0;
@@ -1016,6 +1036,13 @@ function showVol() {
 }
 function playerCmd(cmd) {
   api('/api/player/' + cmd, { method: 'POST' }).then(function () { loadPlayer(); });
+}
+/* 播放页收藏当前曲 */
+function toggleCurFav() {
+  post('/api/player/favorite', {}).then(function (d) {
+    toast(d.favorited ? '已加入收藏' : '已取消收藏');
+    loadPlayer();
+  }).catch(function () { toast('操作失败'); });
 }
 function volume(delta) {
   post('/api/player/volume', { delta: delta }).then(function () { loadPlayer(); });
@@ -1077,6 +1104,7 @@ function renderSearch() {
     html += '<div class="row">' +
       '<div class="grow"><div class="ellip" style="font-size:15px;">' + esc(it.title) + '</div>' +
       '<div class="muted ellip">' + esc(it.artist) + ' · ' + esc(it.plugin) + '</div></div>' +
+      '<button class="small ghost" id="sfav' + i + '" onclick="favResult(' + i + ')">♡</button>' +
       '<button class="small" onclick="playResult(' + i + ')">播放</button></div>';
   });
   box.innerHTML = html;
@@ -1092,6 +1120,15 @@ function playResult(i) {
   post('/api/play', { plugin: it.plugin, raw: it.raw }).then(function (d) {
     toast(d.message || '已播放');
   }).catch(function () { toast('播放失败'); });
+}
+/* 搜索结果收藏（默认专辑） */
+function favResult(i) {
+  var it = searchResults[i];
+  post('/api/fav/toggle', { listId: 'fav_default', plugin: it.plugin, raw: it.raw }).then(function (d) {
+    var b = el('sfav' + i);
+    if (b) { b.textContent = d.favorited ? '♥' : '♡'; b.style.color = d.favorited ? 'var(--accent2)' : ''; }
+    toast(d.favorited ? '已收藏' : '已取消收藏');
+  }).catch(function () { toast('操作失败'); });
 }
 
 /* ---------------- 收藏 ---------------- */

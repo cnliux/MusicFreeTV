@@ -63,31 +63,31 @@ fun Modifier.tvInitialFocus(): Modifier {
 }
 
 /**
- * D-pad 聚焦放大效果（纯视觉）。
+ * D-pad 聚焦效果（纯视觉）：白边 3dp + 轻微提亮底色 + 1.08x 放大 + 阴影。
+ * TV 上焦点必须"一眼可见"：白边在所有主题色上都成立，比彩色描边更清晰。
  * 注意：不要再叠加 focusable()——clickable 自身已创建焦点节点，
  * 额外的 focusable 节点会抢走焦点，导致遥控器 OK 键无法触发点击。
  */
 @Composable
-fun Modifier.tvFocus(scaleOnFocus: Float = 1.06f): Modifier {
+fun Modifier.tvFocus(scaleOnFocus: Float = 1.08f): Modifier {
     var focused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (focused) scaleOnFocus else 1f, label = "tvScale")
-    val ring = MaterialTheme.colorScheme.primary
+    val glow = MaterialTheme.colorScheme.primary
     return this
         .onFocusChanged { focused = it.isFocused }
-        .drawBehind {
-            // 焦点高亮：遥控器聚焦时整块填充主色渐变，形成明显的"变色"反馈。
-            // drawBehind 画在本节点之前的 background 之上、内容之下，
-            // 因此使用处应把 clip/background 放在 tvFocus 之前。
-            if (focused) {
-                drawRect(
-                    brush = Brush.linearGradient(
-                        listOf(ring.copy(alpha = 0.55f), ring.copy(alpha = 0.38f))
-                    )
-                )
-            }
+        .graphicsLayer {
+            scaleX = scale
+            scaleY = scale
+            alpha = if (focused) 1f else 0.92f
+            shadowElevation = if (focused) 24f else 0f
+            ambientShadowColor = glow
+            spotShadowColor = glow
         }
-        .border(if (focused) 2.dp else 0.dp, ring, RoundedCornerShape(12.dp))
-        .graphicsLayer { scaleX = scale; scaleY = scale; alpha = if (focused) 1f else 0.9f }
+        .drawBehind {
+            // 聚焦时轻提亮底色（低透明主色），保持文字可读
+            if (focused) drawRect(glow.copy(alpha = 0.14f))
+        }
+        .border(if (focused) 3.dp else 0.dp, Color.White, RoundedCornerShape(14.dp))
 }
 
 @Composable
@@ -128,7 +128,7 @@ fun AppTitleBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xFF0B0D12))
+            .background(MaterialTheme.colorScheme.background)
             .padding(horizontal = 28.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -166,7 +166,7 @@ private fun TabItem(
     ) {
         Text(
             text = label,
-            color = if (isSelected) Color(0xFF002030) else MaterialTheme.colorScheme.onBackground,
+            color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 17.sp
         )
     }
@@ -194,7 +194,7 @@ fun SectionHeader(title: String) {
     }
 }
 
-/** 通用筛选 chip：插件页签 / 标签 / 搜索类型切换共用（D-pad 可聚焦）。 */
+/** 通用筛选 chip：胶囊形，选中=主色填充，聚焦=白边（tvFocus）。 */
 @Composable
 fun FilterChip(
     label: String,
@@ -204,21 +204,21 @@ fun FilterChip(
 ) {
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(20.dp))
             .background(
                 if (selected) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.surface
             )
-            .tvFocus(1.05f)
+            .tvFocus(1.06f)
             .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 9.dp)
+            .padding(horizontal = 20.dp, vertical = 10.dp)
     ) {
         Text(
             label,
             fontSize = 14.sp,
             maxLines = 1,
             color = if (selected) MaterialTheme.colorScheme.onPrimary
-            else MaterialTheme.colorScheme.onSurface
+            else MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }
@@ -233,50 +233,38 @@ fun MediaCard(
 ) {
     Column(
         modifier = modifier
-            .width(156.dp)
-            .tvFocus(1.05f)
+            .width(168.dp)
+            .tvFocus(1.08f)
             .clickable(onClick = onClick)
     ) {
-        // 封面：底部渐变遮罩叠标题，沉浸感更强
-        Box(
-            modifier = Modifier
+        // 封面：1:1，圆角 12dp，加载失败/无图时深灰渐变+音符兜底（Artwork 内置）
+        Artwork(
+            artwork,
+            Modifier
                 .fillMaxWidth()
-                .height(156.dp)
+                .height(168.dp)
                 .graphicsLayer {
-                    shadowElevation = 10.dp.toPx()
+                    shadowElevation = 8.dp.toPx()
                     clip = true
-                    shape = RoundedCornerShape(14.dp)
+                    shape = RoundedCornerShape(12.dp)
                 }
-        ) {
-            Artwork(artwork, Modifier.fillMaxSize())
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-                    .align(Alignment.BottomCenter)
-                    .background(
-                        Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000)))
-                    )
-            )
-            Text(
-                text = title,
-                fontSize = 13.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                color = Color.White,
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 8.dp)
-            )
-        }
+        )
+        // 标题/平台分层：14sp 白 / 11sp 灰
+        Text(
+            text = title,
+            fontSize = 14.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(top = 8.dp, start = 2.dp, end = 2.dp)
+        )
         Text(
             text = subtitle,
             fontSize = 11.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 6.dp, start = 4.dp, end = 4.dp)
+            modifier = Modifier.padding(top = 2.dp, start = 2.dp, end = 2.dp)
         )
     }
 }
