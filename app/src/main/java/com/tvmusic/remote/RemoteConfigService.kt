@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.util.Log
 import com.tvmusic.BuildConfig
 import com.tvmusic.core.TvMusicApp
+import com.tvmusic.data.FavList
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -387,6 +388,7 @@ class RemoteConfigService : Service() {
                     .put("colorHex", c.colorHex)
                     .put("position", c.position.name)
                     .put("offsetY", c.offsetY)
+                    .put("opacity", c.opacity)
                     .toString())
             }
             method == "POST" && path == "/api/lyric" -> {
@@ -403,12 +405,107 @@ class RemoteConfigService : Service() {
                             json?.optString("position", cur.position.name) ?: cur.position.name
                         )
                     } catch (_: Exception) { cur.position },
-                    offsetY = json?.optInt("offsetY", cur.offsetY)?.coerceIn(-300, 300) ?: cur.offsetY
+                    offsetY = json?.optInt("offsetY", cur.offsetY)?.coerceIn(-300, 300) ?: cur.offsetY,
+                    opacity = json?.optDouble("opacity", cur.opacity.toDouble())?.toFloat()?.coerceIn(0.2f, 1f) ?: cur.opacity
                 )
                 com.tvmusic.ui.theme.LyricSettings.update(next)
                 respond(socket, 200, JSONObject().put("ok", true).toString())
             }
-            method == "POST" && path == "/api/fav/play" -> {
+            method == "GET" && path == "/api/export" -> {
+                // 配置导出：主题 + 歌词设置 + 全部收藏专辑（含原始条目）
+                val c = com.tvmusic.ui.theme.LyricSettings.config.value
+                val listsArr = JSONArray()
+                app().playback.lists.value.forEach { l ->
+                    val items = JSONArray()
+                    l.items.forEach { items.put(it) }
+                    listsArr.put(
+                        JSONObject().put("id", l.id).put("name", l.name).put("items", items)
+                    )
+                }
+                val exportBody = JSONObject()
+                    .put("ok", true)
+                    .put("version", 1)
+                    .put("theme", com.tvmusic.ui.theme.ThemeManager.currentId())
+                    .put(
+                        "lyric",
+                        JSONObject()
+                            .put("enabled", c.enabled)
+                            .put("fontSizeSp", c.fontSizeSp)
+                            .put("colorHex", c.colorHex)
+                            .put("position", c.position.name)
+                            .put("offsetY", c.offsetY)
+                            .put("opacity", c.opacity)
+                    )
+                    .put("favLists", listsArr)
+                    .toString()
+                val rawQuery = parts[1].substringAfter('?', "")
+                if (rawQuery.contains("dl=1")) {
+                    respondDownload(socket, exportBody, "musicfree-tv-config.json")
+                } else {
+                    respond(socket, 200, exportBody)
+                }
+            }
+            method == "POST" && path == "/api/import" -> {
+                // 配置导入：缺字段容错；favLists 存在时整体替换收藏专辑
+                val body = readBody(input, headers)
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                if (json == null) {
+                    respond(socket, 400, JSONObject().put("ok", false).put("error", "bad json").toString())
+                    return
+                }
+                var themeApplied = false
+                if (json.has("theme")) {
+                    val tid = json.optString("theme", "")
+                    if (tid.isNotBlank()) themeApplied = com.tvmusic.ui.theme.ThemeManager.set(tid)
+                }
+                var lyricApplied = false
+                val lo = json.optJSONObject("lyric")
+                if (lo != null) {
+                    val cur = com.tvmusic.ui.theme.LyricSettings.config.value
+                    val next = com.tvmusic.ui.theme.LyricConfig(
+                        enabled = lo.optBoolean("enabled", cur.enabled),
+                        fontSizeSp = lo.optInt("fontSizeSp", cur.fontSizeSp).coerceIn(10, 40),
+                        colorHex = lo.optString("colorHex", cur.colorHex).trim().trimStart('#').take(6)
+                            .ifBlank { cur.colorHex },
+                        position = try {
+                            com.tvmusic.ui.theme.LyricPosition.valueOf(lo.optString("position", cur.position.name))
+                        } catch (_: Exception) { cur.position },
+                        offsetY = lo.optInt("offsetY", cur.offsetY).coerceIn(-300, 300),
+                        opacity = lo.optDouble("opacity", cur.opacity.toDouble()).toFloat().coerceIn(0.2f, 1f)
+                    )
+                    com.tvmusic.ui.theme.LyricSettings.update(next)
+                    lyricApplied = true
+                }
+                var listCount = 0
+                val la = json.optJSONArray("favLists")
+                if (la != null) {
+                    val imported = (0 until la.length()).mapNotNull { i ->
+                        val o = la.optJSONObject(i) ?: return@mapNotNull null
+                        val itemsArr = o.optJSONArray("items") ?: JSONArray()
+                        FavList(
+                            id = o.optString("id", "").ifBlank { "import_$i" },
+                            name = o.optString("name", "").ifBlank { "Imported " + (i + 1) },
+                            items = (0 until itemsArr.length()).mapNotNull { j -> itemsArr.optJSONObject(j) }
+                        )
+                    }
+                    val merged = imported.toMutableList()
+                    if (merged.none { it.id == com.tvmusic.data.PlaybackStore.DEFAULT_FAV_ID }) {
+                        merged.add(0, FavList(com.tvmusic.data.PlaybackStore.DEFAULT_FAV_ID, "我的收藏", emptyList()))
+                    }
+                    app().playback.replaceAllLists(merged)
+                    listCount = merged.size
+                }
+                respond(socket, 200, JSONObject()
+                    .put("ok", true)
+                    .put(
+                        "imported",
+                        JSONObject()
+                            .put("theme", themeApplied)
+                            .put("lyric", lyricApplied)
+                            .put("lists", listCount)
+                    )
+                    .toString())
+            }            method == "POST" && path == "/api/fav/play" -> {
                 // 播放整个收藏专辑：{ id }
                 val body = readBody(input, headers)
                 val id = runCatching { JSONObject(body).optString("id", "") }.getOrDefault("")
@@ -731,6 +828,24 @@ class RemoteConfigService : Service() {
         }
     }
 
+    private fun respondDownload(socket: Socket, body: String, filename: String) {
+        val bytes = body.toByteArray(Charsets.UTF_8)
+        val head = "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: application/json; charset=utf-8\r\n" +
+            "Content-Disposition: attachment; filename=\"$filename\"\r\n" +
+            "Content-Length: ${bytes.size}\r\n" +
+            "Access-Control-Allow-Origin: *\r\n" +
+            "Connection: close\r\n\r\n"
+        try {
+            socket.getOutputStream().use { out ->
+                out.write(head.toByteArray(Charsets.UTF_8))
+                out.write(bytes)
+                out.flush()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "respondDownload: ${e.message}")
+        }
+    }
     private fun readLine(input: InputStream): String? {
         val sb = StringBuilder()
         var prev = -1
@@ -999,6 +1114,7 @@ private val PAGE_HTML = """<!DOCTYPE html>
     </div>
     <div class="card" id="searchCard" style="display:none;">
       <h2>搜索结果</h2>
+      <div class="chips" id="searchPluginBar" style="display:none;"></div>
       <div id="searchBox"></div>
       <div class="pager" id="searchPager"></div>
     </div>
@@ -1050,6 +1166,11 @@ private val PAGE_HTML = """<!DOCTYPE html>
         <span id="lyricOffset" style="min-width:44px;text-align:center;"></span>
         <button class="ghost small" onclick="stepLyricOffset(20)">↓</button>
       </div>
+      <div class="row" style="border:none;padding:6px 0 0;margin-top:8px;">
+        <span class="muted" style="flex:1;">透明度</span>
+        <input type="range" id="lyricOpacityBar" min="20" max="100" value="100" style="flex:2;" onchange="setLyricOpacity(this.value)" oninput="el('lyricOpacity').textContent=this.value+'%'">
+        <span id="lyricOpacity" style="min-width:44px;text-align:center;">100%</span>
+      </div>
     </div>
     <div class="card">
       <h2>订阅源</h2>
@@ -1065,6 +1186,15 @@ private val PAGE_HTML = """<!DOCTYPE html>
     <div class="card">
       <h2>插件 <span id="pluginCount" class="muted"></span></h2>
       <div id="pluginList"></div>
+    </div>
+    <div class="card">
+      <h2>配置</h2>
+      <div class="muted">导出/导入主题、歌词设置与收藏专辑，用于备份或迁移到其他设备。</div>
+      <div class="row" style="border:none;padding:10px 0 0;">
+        <button class="small" onclick="exportConfig()">⬇ 导出配置</button>
+        <button class="ghost small" onclick="el('importFile').click()">⬆ 导入配置</button>
+        <input type="file" id="importFile" accept="application/json,.json" style="display:none;" onchange="importConfig(this)">
+      </div>
     </div>
   </section>
 </main>
@@ -1292,13 +1422,14 @@ function skipTo(i) {
 }
 
 /* ---------------- 搜索 ---------------- */
-var searchResults = [], sPage = 1, sSize = 20;
+var searchResults = [], sPage = 1, sSize = 20, sPlugin = null;
 function doSearch() {
   var q = el('searchQ').value.trim();
   if (!q) return;
   toast('搜索中…');
   api('/api/search?q=' + encodeURIComponent(q)).then(function (d) {
     searchResults = d.results || [];
+    sPlugin = null;
     sPage = 1;
     el('searchInfo').textContent = '共 ' + (d.total || 0) + ' 条';
     el('playAllBtn').style.display = searchResults.length ? '' : 'none';
@@ -1320,12 +1451,16 @@ function playAllSearch() {
 }
 function renderSearch() {
   var box = el('searchBox');
+  renderPluginBar();
+  var view = [];
+  searchResults.forEach(function (it, i) { if (!sPlugin || it.plugin === sPlugin) view.push(i); });
   if (!searchResults.length) { box.innerHTML = '<div class="empty">没有结果</div>'; el('searchPager').innerHTML = ''; return; }
-  var pages = Math.max(1, Math.ceil(searchResults.length / sSize));
+  if (!view.length) { box.innerHTML = '<div class="empty">该站点没有结果</div>'; el('searchPager').innerHTML = ''; return; }
+  var pages = Math.max(1, Math.ceil(view.length / sSize));
   if (sPage > pages) sPage = pages;
   var html = '';
-  searchResults.slice((sPage - 1) * sSize, sPage * sSize).forEach(function (it, k) {
-    var i = (sPage - 1) * sSize + k;
+  view.slice((sPage - 1) * sSize, sPage * sSize).forEach(function (i) {
+    var it = searchResults[i];
     html += '<div class="row">' +
       '<div class="grow"><div class="ellip" style="font-size:15px;">' + esc(it.title) + '</div>' +
       '<div class="muted ellip">' + esc(it.artist) + ' · ' + esc(it.plugin) + '</div></div>' +
@@ -1340,6 +1475,25 @@ function renderSearch() {
     '<button class="ghost" ' + (sPage >= pages ? 'disabled' : '') + ' onclick="sGo(' + (sPage + 1) + ')">›</button>' : '';
 }
 function sGo(p) { sPage = p; renderSearch(); }
+function renderPluginBar() {
+  var bar = el('searchPluginBar');
+  if (!bar) return;
+  var names = [];
+  var seen = {};
+  searchResults.forEach(function (it) { if (it.plugin && !seen[it.plugin]) { seen[it.plugin] = 1; names.push(it.plugin); } });
+  if (names.length <= 1) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+  bar.style.display = '';
+  bar.innerHTML = '';
+  var mk = function (label, val) {
+    var chip = document.createElement('span');
+    chip.className = 'chip' + (sPlugin === val ? ' on' : '');
+    chip.textContent = label;
+    chip.onclick = function () { sPlugin = val; sPage = 1; renderSearch(); };
+    bar.appendChild(chip);
+  };
+  mk('全部', null);
+  names.forEach(function (n) { mk(n, n); });
+}
 function playResult(i) {
   var it = searchResults[i];
   post('/api/play', { plugin: it.plugin, raw: it.raw }).then(function (d) {
@@ -1545,7 +1699,7 @@ function loadThemes() {
 }
 
 /* ---------------- 歌词显示设置 ---------------- */
-var lyricCfg = { enabled: true, fontSizeSp: 16, colorHex: 'FFFFFF', position: 'CENTER', offsetY: 0 };
+var lyricCfg = { enabled: true, fontSizeSp: 16, colorHex: 'FFFFFF', position: 'CENTER', offsetY: 0, opacity: 1.0 };
 var LRC_COLORS = [
   { hex: 'FFFFFF', name: '白' },
   { hex: 'FF6B9D', name: '粉' },
@@ -1563,6 +1717,8 @@ function renderLyric() {
   el('lyricToggle').className = 'small' + (lyricCfg.enabled ? '' : ' ghost');
   el('lyricSize').textContent = lyricCfg.fontSizeSp + ' sp';
   el('lyricOffset').textContent = lyricCfg.offsetY;
+  el('lyricOpacity').textContent = Math.round(lyricCfg.opacity * 100) + '%';
+  el('lyricOpacityBar').value = Math.round(lyricCfg.opacity * 100);
   el('lyricColor').value = '#' + lyricCfg.colorHex;
   var cb = el('lyricColorBar');
   cb.innerHTML = '';
@@ -1590,7 +1746,8 @@ function saveLyric(patch) {
     fontSizeSp: patch.fontSizeSp != null ? patch.fontSizeSp : lyricCfg.fontSizeSp,
     colorHex: patch.colorHex != null ? patch.colorHex : lyricCfg.colorHex,
     position: patch.position != null ? patch.position : lyricCfg.position,
-    offsetY: patch.offsetY != null ? patch.offsetY : lyricCfg.offsetY
+    offsetY: patch.offsetY != null ? patch.offsetY : lyricCfg.offsetY,
+    opacity: patch.opacity != null ? patch.opacity : lyricCfg.opacity
   };
   post('/api/lyric', body).then(function (d) {
     if (d.ok) { lyricCfg = body; renderLyric(); }
@@ -1604,13 +1761,52 @@ function stepLyricOffset(delta) {
   saveLyric({ offsetY: Math.min(300, Math.max(-300, lyricCfg.offsetY + delta)) });
 }
 function setLyricColor(v) { saveLyric({ colorHex: String(v).replace('#', '').toUpperCase() }); }
+function setLyricOpacity(v) { saveLyric({ opacity: Math.min(1, Math.max(0.2, parseInt(v) / 100)) }); }
 function loadLyric() {
   api('/api/lyric').then(function (d) {
     if (d.ok) {
-      lyricCfg = { enabled: d.enabled, fontSizeSp: d.fontSizeSp, colorHex: d.colorHex, position: d.position, offsetY: d.offsetY || 0 };
+      lyricCfg = { enabled: d.enabled, fontSizeSp: d.fontSizeSp, colorHex: d.colorHex, position: d.position, offsetY: d.offsetY || 0, opacity: d.opacity != null ? d.opacity : 1.0 };
       renderLyric();
     }
   }).catch(function () {});
+}
+
+/* ---------------- 配置导出/导入 ---------------- */
+function exportConfig() {
+  api('/api/export').then(function (d) {
+    if (!d.ok) { toast('导出失败'); return; }
+    var blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'musicfree-tv-config.json';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 200);
+    toast('已导出配置');
+  }).catch(function () { toast('导出失败'); });
+}
+function importConfig(input) {
+  var f = input.files && input.files[0];
+  if (!f) return;
+  var reader = new FileReader();
+  reader.onload = function () {
+    var data;
+    try { data = JSON.parse(reader.result); } catch (e) { toast('文件不是合法 JSON'); input.value = ''; return; }
+    post('/api/import', data).then(function (d) {
+      if (d.ok) {
+        var im = d.imported || {};
+        toast('导入成功：' + (im.theme ? '主题✓' : '') + (im.lyric ? ' 歌词✓' : '') + ' 专辑 ' + (im.lists || 0) + ' 个');
+        loadThemes();
+        loadLyric();
+        curFavId = null;
+        loadFavLists();
+      } else {
+        toast('导入失败');
+      }
+    }).catch(function () { toast('导入失败'); });
+    input.value = '';
+  };
+  reader.readAsText(f, 'utf-8');
 }
 
 /* ---------------- 状态与轮询 ---------------- */

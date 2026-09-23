@@ -110,7 +110,7 @@ fun SettingsScreen(
                     label = { Text("粘贴订阅 URL（plugins.json）") },
                     singleLine = true,
                     shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp).tvFocus()
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp).tvFocus(shapeOverride = RoundedCornerShape(10.dp))
                 )
                 Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     ActionButton("添加订阅并同步") { viewModel.addSubscription(subUrl) }
@@ -162,7 +162,7 @@ fun SettingsScreen(
                                         label = { Text("${v.name}（${v.key}）") },
                                         singleLine = true,
                                         shape = RoundedCornerShape(8.dp),
-                                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).tvFocus()
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                                     )
                                 }
                                 Row(Modifier.padding(top = 8.dp)) {
@@ -179,7 +179,7 @@ fun SettingsScreen(
                     label = { Text("粘贴单个插件 JS 地址（导入）") },
                     singleLine = true,
                     shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp).tvFocus()
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp).tvFocus(shapeOverride = RoundedCornerShape(10.dp))
                 )
                 Row(Modifier.padding(top = 8.dp)) {
                     ActionButton("导入插件") { viewModel.importSingle(pluginUrl) }
@@ -206,7 +206,7 @@ fun SettingsScreen(
                         val selected = com.tvmusic.player.PlayerManager.quality == key
                         Box(
                             modifier = Modifier
-                                .tvFocus()
+                                .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                                 .clickable { com.tvmusic.player.PlayerManager.setQuality(key) }
                                 .background(
                                     if (selected) MaterialTheme.colorScheme.primaryContainer
@@ -252,7 +252,7 @@ fun SettingsScreen(
                                     if (selected) MaterialTheme.colorScheme.primaryContainer
                                     else MaterialTheme.colorScheme.surfaceVariant
                                 )
-                                .tvFocus()
+                                .tvFocus(shapeOverride = RoundedCornerShape(12.dp))
                                 .clickable { com.tvmusic.ui.theme.ThemeManager.set(t.id) }
                                 .padding(horizontal = 16.dp, vertical = 12.dp)
                         ) {
@@ -340,7 +340,7 @@ fun SettingsScreen(
                                 .padding(start = 10.dp)
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(if (sel) MaterialTheme.colorScheme.primaryContainer else androidx.compose.ui.graphics.Color.Transparent)
-                                .tvFocus()
+                                .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                                 .clickable {
                                     com.tvmusic.ui.theme.LyricSettings.update(cfg.copy(colorHex = hex))
                                 }
@@ -371,7 +371,7 @@ fun SettingsScreen(
                                 .padding(start = 10.dp)
                                 .clip(RoundedCornerShape(16.dp))
                                 .background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                                .tvFocus()
+                                .tvFocus(shapeOverride = RoundedCornerShape(16.dp))
                                 .clickable {
                                     com.tvmusic.ui.theme.LyricSettings.update(cfg.copy(position = pos))
                                 }
@@ -403,6 +403,30 @@ fun SettingsScreen(
                     StepperButton("↓") {
                         com.tvmusic.ui.theme.LyricSettings.update(
                             cfg.copy(offsetY = (cfg.offsetY + 20).coerceIn(-300, 300))
+                        )
+                    }
+                }
+                // 透明度
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("透明度", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp,
+                        modifier = Modifier.weight(1f))
+                    StepperButton("－") {
+                        com.tvmusic.ui.theme.LyricSettings.update(
+                            cfg.copy(opacity = (cfg.opacity - 0.1f).coerceIn(0.2f, 1f))
+                        )
+                    }
+                    Text(
+                        "${(cfg.opacity * 100).toInt()}%",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(horizontal = 14.dp)
+                    )
+                    StepperButton("＋") {
+                        com.tvmusic.ui.theme.LyricSettings.update(
+                            cfg.copy(opacity = (cfg.opacity + 0.1f).coerceIn(0.2f, 1f))
                         )
                     }
                 }
@@ -477,7 +501,7 @@ private fun SettingsRow(
 fun ActionButton(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .tvFocus()
+            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
             .background(
                 MaterialTheme.colorScheme.primaryContainer,
@@ -501,7 +525,7 @@ private fun StepperButton(label: String, onClick: () -> Unit) {
             .size(38.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .tvFocus()
+            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {

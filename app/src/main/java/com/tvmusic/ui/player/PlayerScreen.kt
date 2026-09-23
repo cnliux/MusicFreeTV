@@ -114,7 +114,7 @@ fun PlayerScreen(onBack: () -> Unit) {
                                 clip = true
                                 shape = RoundedCornerShape(tokens.radius * 2)
                             }
-                            .tvFocus(1.03f)
+                            .tvFocus(1.03f, shapeOverride = RoundedCornerShape(tokens.radius * 2))
                             .clickable(onClick = onBack)
                     ) {
                         Artwork(state.current!!.artwork, Modifier.fillMaxSize())
@@ -261,7 +261,8 @@ private fun LyricOverlay(lines: List<LrcLine>, currentIndex: Int) {
             .fillMaxSize()
             // 底部留出控制条区域，避免歌词悬浮层盖住进度条和按钮
             .padding(start = 64.dp, end = 64.dp, top = 24.dp, bottom = 220.dp)
-            .offset { androidx.compose.ui.unit.IntOffset(0, with(density) { cfg.offsetY.dp.roundToPx() }) },
+            .offset { androidx.compose.ui.unit.IntOffset(0, with(density) { cfg.offsetY.dp.roundToPx() }) }
+            .graphicsLayer { alpha = cfg.opacity },
         contentAlignment = align
     ) {
         if (lines.isEmpty()) {
@@ -354,7 +355,7 @@ private fun FavAlbumDialog(
             ) {
                 Box(
                     modifier = Modifier
-                        .tvFocus()
+                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                         .clip(RoundedCornerShape(8.dp))
                         .background(MaterialTheme.colorScheme.primaryContainer)
                         .clickable(onClick = onNewAlbum)
@@ -362,7 +363,7 @@ private fun FavAlbumDialog(
                 ) { Text("＋ 新建专辑", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 14.sp) }
                 Box(
                     modifier = Modifier
-                        .tvFocus()
+                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                         .clip(RoundedCornerShape(8.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                         .clickable(onClick = onDismiss)

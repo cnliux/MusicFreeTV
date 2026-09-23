@@ -18,8 +18,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,6 +51,9 @@ fun SearchScreen(
     val selectedType by viewModel.selectedType.collectAsState()
     val filterPlatform by viewModel.filterPlatform.collectAsState()
     val searchablePlatforms by viewModel.searchablePlatforms.collectAsState()
+    // 结果内站点过滤：仅过滤已返回的分组，不重新请求
+    var selectedPlugin by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(phase) { if (phase !is SearchPhase.Ready) selectedPlugin = null }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 28.dp)) {
         // 搜索输入行
@@ -64,7 +70,7 @@ fun SearchScreen(
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier
                     .weight(1f)
-                    .tvFocus(),
+                    .tvFocus(shapeOverride = RoundedCornerShape(10.dp)),
                 textStyle = MaterialTheme.typography.bodyLarge,
                 colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = MaterialTheme.colorScheme.primary,
@@ -92,17 +98,43 @@ fun SearchScreen(
             is SearchPhase.Idle -> HistoryPanel(viewModel, history, query)
             is SearchPhase.Searching -> LoadingBox(Modifier.weight(1f).fillMaxWidth())
             is SearchPhase.NoResult -> EmptyResult(message = (phase as SearchPhase.NoResult).message)
-            is SearchPhase.Ready -> ResultList(
-                groups = groups,
-                type = selectedType,
-                loadingMore = loadingMore,
-                onLoadMore = viewModel::loadMore,
-                onRetry = viewModel::retry,
-                onPlay = viewModel::play,
-                onOpenDetail = { entry ->
-                    viewModel.openDetail(entry)?.let(onOpenDetail)
+            is SearchPhase.Ready -> {
+                val plugins = remember(groups) { groups.map { it.plugin }.distinct() }
+                Column(Modifier.weight(1f)) {
+                    if (plugins.size > 1) {
+                        LazyRow(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            item(key = "__res_all__") {
+                                FilterChip(
+                                    label = "全部",
+                                    selected = selectedPlugin == null,
+                                    onClick = { selectedPlugin = null }
+                                )
+                            }
+                            items(plugins, key = { "res_$it" }) { p ->
+                                FilterChip(
+                                    label = p,
+                                    selected = p == selectedPlugin,
+                                    onClick = { selectedPlugin = p }
+                                )
+                            }
+                        }
+                    }
+                    ResultList(
+                        groups = if (selectedPlugin == null) groups else groups.filter { it.plugin == selectedPlugin },
+                        type = selectedType,
+                        loadingMore = loadingMore,
+                        onLoadMore = viewModel::loadMore,
+                        onRetry = viewModel::retry,
+                        onPlay = viewModel::play,
+                        onOpenDetail = { entry ->
+                            viewModel.openDetail(entry)?.let(onOpenDetail)
+                        }
+                    )
                 }
-            )
+            }
         }
     }
 }
@@ -286,7 +318,7 @@ private fun TinyButton(label: String, onClick: () -> Unit) {
             .padding(start = 28.dp, top = 4.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(MaterialTheme.colorScheme.primaryContainer)
-            .tvFocus()
+            .tvFocus(shapeOverride = RoundedCornerShape(6.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 18.dp, vertical = 6.dp)
     ) {
@@ -312,7 +344,7 @@ private fun HistoryPanel(
                     modifier = Modifier
                         .padding(start = 16.dp)
                         .clip(RoundedCornerShape(6.dp))
-                        .tvFocus()
+                        .tvFocus(shapeOverride = RoundedCornerShape(6.dp))
                         .clickable(onClick = viewModel::clearHistory)
                         .padding(horizontal = 12.dp, vertical = 4.dp)
                 ) {
@@ -372,7 +404,7 @@ private fun Chip(label: String, onSelect: () -> Unit, onClose: (() -> Unit)? = n
         modifier = Modifier
             .clip(RoundedCornerShape(16.dp))
             .background(MaterialTheme.colorScheme.surface)
-            .tvFocus()
+            .tvFocus(shapeOverride = RoundedCornerShape(16.dp))
             .clickable(onClick = onSelect)
             .padding(horizontal = 14.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -381,7 +413,7 @@ private fun Chip(label: String, onSelect: () -> Unit, onClose: (() -> Unit)? = n
         if (onClose != null) {
             Box(
                 modifier = Modifier.padding(start = 8.dp).clip(RoundedCornerShape(8.dp))
-                    .tvFocus().clickable(onClick = onClose)
+                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp)).clickable(onClick = onClose)
                     .padding(horizontal = 4.dp)
             ) {
                 Text("×", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
@@ -407,7 +439,7 @@ private fun SubmitButton(label: String, onClick: () -> Unit) {
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.primary)
-            .tvFocus()
+            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 14.dp)
     ) {

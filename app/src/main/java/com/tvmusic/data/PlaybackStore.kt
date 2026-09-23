@@ -204,6 +204,13 @@ class PlaybackStore(context: Context) {
         publishMerged()
     }
 
+    /** 整体替换收藏专辑（导入配置用）。 */
+    fun replaceAllLists(lists: List<FavList>) {
+        _lists.value = lists
+        saveLists(lists)
+        publishMerged()
+    }
+
     private fun publishMerged() {
         val seen = HashSet<String>()
         val merged = _lists.value.flatMap { it.items }.filter { seen.add(primaryKey(it)) }

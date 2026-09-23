@@ -71,7 +71,7 @@ fun MyListScreen(
         ) {
             Box(
                 modifier = Modifier
-                    .tvFocus()
+                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                     .clickable(onClick = onBack)
                     .padding(horizontal = 12.dp, vertical = 6.dp)
                     .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
@@ -244,7 +244,7 @@ fun AlbumNameDialog(
                 textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .tvFocus()
+                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                     .clip(RoundedCornerShape(8.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant)
                     .padding(horizontal = 12.dp, vertical = 10.dp),
@@ -258,7 +258,7 @@ fun AlbumNameDialog(
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Box(
                     modifier = Modifier
-                        .tvFocus()
+                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                         .clip(RoundedCornerShape(8.dp))
                         .background(MaterialTheme.colorScheme.primary)
                         .clickable { onConfirm(text) }
@@ -266,7 +266,7 @@ fun AlbumNameDialog(
                 ) { Text("确定", color = MaterialTheme.colorScheme.onPrimary, fontSize = 15.sp) }
                 Box(
                     modifier = Modifier
-                        .tvFocus()
+                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                         .clip(RoundedCornerShape(8.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                         .clickable(onClick = onDismiss)
@@ -296,7 +296,7 @@ private fun QueueRow(
                 if (isCurrent) MaterialTheme.colorScheme.primaryContainer
                 else MaterialTheme.colorScheme.surface
             )
-            .tvFocus()
+            .tvFocus(shapeOverride = RoundedCornerShape(10.dp))
             .clickable(onClick = onPlay)
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -347,7 +347,7 @@ private fun HistoryRow(
             .padding(horizontal = 28.dp, vertical = 6.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(MaterialTheme.colorScheme.surface)
-            .tvFocus()
+            .tvFocus(shapeOverride = RoundedCornerShape(10.dp))
             .clickable(onClick = onPlay)
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically

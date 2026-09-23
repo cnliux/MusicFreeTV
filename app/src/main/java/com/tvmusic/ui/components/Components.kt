@@ -69,13 +69,13 @@ fun Modifier.tvInitialFocus(): Modifier {
  * 额外的 focusable 节点会抢走焦点，导致遥控器 OK 键无法触发点击。
  */
 @Composable
-fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false): Modifier {
+fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false, shapeOverride: androidx.compose.ui.graphics.Shape? = null): Modifier {
     val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
     var focused by remember { mutableStateOf(false) }
     val glow = MaterialTheme.colorScheme.primary
     val scale = scaleOverride ?: tokens.focusScale
     val animated by animateFloatAsState(if (focused) scale else 1f, label = "tvScale")
-    val shape = if (circle) androidx.compose.foundation.shape.CircleShape else RoundedCornerShape(tokens.radius)
+    val shape = shapeOverride ?: if (circle) androidx.compose.foundation.shape.CircleShape else RoundedCornerShape(tokens.radius)
     return this
         .onFocusChanged { focused = it.isFocused }
         .graphicsLayer {
@@ -177,7 +177,7 @@ private fun TabItem(
                 else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)
             )
             .let { if (initialFocus) it.tvInitialFocus() else it }
-            .tvFocus()
+            .tvFocus(shapeOverride = RoundedCornerShape(20.dp))
             .clickable { onSelect(key) }
             .padding(horizontal = 24.dp, vertical = 9.dp)
     ) {
@@ -229,7 +229,7 @@ fun FilterChip(
                 if (selected) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.surface
             )
-            .tvFocus()
+            .tvFocus(shapeOverride = RoundedCornerShape(20.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 10.dp)
     ) {
@@ -304,7 +304,7 @@ fun MusicRow(
             .padding(horizontal = 28.dp, vertical = 4.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surface)
-            .tvFocus()
+            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -364,7 +364,7 @@ fun ErrorBox(message: String?, onRetry: (() -> Unit)? = null) {
                     .align(Alignment.TopEnd)
                     .clip(RoundedCornerShape(6.dp))
                     .border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(6.dp))
-                    .tvFocus()
+                    .tvFocus(shapeOverride = RoundedCornerShape(6.dp))
                     .clickable(onClick = onRetry)
                     .padding(horizontal = 16.dp, vertical = 6.dp)
             ) {

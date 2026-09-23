@@ -400,7 +400,7 @@ private fun SectionWithMore(title: String, onMore: () -> Unit) {
             modifier = Modifier
                 .clip(RoundedCornerShape(16.dp))
                 .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
-                .tvFocus()
+                .tvFocus(shapeOverride = RoundedCornerShape(16.dp))
                 .clickable(onClick = onMore)
                 .padding(horizontal = 16.dp, vertical = 7.dp)
         ) {
@@ -467,7 +467,7 @@ private fun EmptyGuide(onRefresh: () -> Unit) {
                 .padding(top = 20.dp)
                 .clip(RoundedCornerShape(8.dp))
                 .background(MaterialTheme.colorScheme.primaryContainer)
-                .tvFocus()
+                .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                 .clickable(onClick = onRefresh)
                 .padding(horizontal = 24.dp, vertical = 10.dp)
         ) {

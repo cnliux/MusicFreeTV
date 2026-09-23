@@ -74,7 +74,7 @@ fun SheetScreen(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
                         .background(MaterialTheme.colorScheme.primary)
-                        .tvFocus()
+                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                         .clickable(onClick = viewModel::playAll)
                         .padding(horizontal = 18.dp, vertical = 8.dp)
                 ) {
@@ -174,7 +174,7 @@ private fun ListFooter(
                     modifier = Modifier
                         .clip(RoundedCornerShape(6.dp))
                         .background(MaterialTheme.colorScheme.primaryContainer)
-                        .tvFocus()
+                        .tvFocus(shapeOverride = RoundedCornerShape(6.dp))
                         .clickable(onClick = onLoadMore)
                         .padding(horizontal = 14.dp, vertical = 6.dp)
                 ) {
@@ -185,7 +185,7 @@ private fun ListFooter(
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
                     .background(MaterialTheme.colorScheme.primaryContainer)
-                    .tvFocus()
+                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                     .clickable(onClick = onLoadMore)
                     .padding(horizontal = 28.dp, vertical = 10.dp)
             ) {
