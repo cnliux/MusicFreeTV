@@ -96,7 +96,11 @@ fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false): Mod
         .drawBehind {
             if (focused) drawRect(glow.copy(alpha = if (tokens.focusBrightnessOnly) 0.08f else 0.14f))
         }
-        .border(if (focused) 3.dp else 0.dp, tokens.focusBorder, shape)
+        .let {
+            // 注意：不能用 border(0.dp)——旧版 Compose 在低版本设备上仍会画 1px 发丝线，
+            // 被胶囊 clip 裁掉四角后表现为上下白条。仅聚焦时才加边框。
+            if (focused) it.border(3.dp, tokens.focusBorder, shape) else it
+        }
 }
 
 @Composable

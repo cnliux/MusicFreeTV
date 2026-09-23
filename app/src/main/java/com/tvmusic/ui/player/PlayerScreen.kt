@@ -384,7 +384,7 @@ private fun RoundCtrlButton(
             .clip(CircleShape)
             .background(if (filled) primary else Color(0x22FFFFFF))
             .drawBehind { if (focused) drawRect(primary.copy(alpha = 0.3f)) }
-            .border(if (focused) 3.dp else 0.dp, tokens.focusBorder, CircleShape)
+            .let { if (focused) it.border(3.dp, tokens.focusBorder, CircleShape) else it }
             .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center

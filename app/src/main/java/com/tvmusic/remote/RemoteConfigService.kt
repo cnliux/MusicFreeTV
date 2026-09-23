@@ -134,6 +134,12 @@ class RemoteConfigService : Service() {
             method == "GET" && (path == "/info" || path == "/api/status") -> {
                 respond(socket, 200, infoJson().toString())
             }
+            method == "GET" && path.startsWith("/api/img") -> {
+                val target = java.net.URLDecoder.decode(
+                    path.substringAfter("url=", ""), Charsets.UTF_8.name()
+                )
+                proxyImage(socket, target)
+            }
             method == "GET" && path == "/api/subscriptions" -> {
                 respond(socket, 200, subscriptionsJson().toString())
             }
@@ -609,6 +615,59 @@ class RemoteConfigService : Service() {
             .put("status", "ok")
     }
 
+    /**
+     * 图片代理：手机浏览器直连 B 站等图床会被防盗链拦截，
+     * 改由 TV 端带 Referer 拉取后转发给浏览器。
+     */
+    private fun proxyImage(socket: Socket, target: String) {
+        if (!target.startsWith("http")) {
+            respond(socket, 400, "{\"ok\":false}")
+            return
+        }
+        try {
+            val conn = java.net.URL(target).openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            conn.instanceFollowRedirects = true
+            conn.setRequestProperty(
+                "User-Agent",
+                "Mozilla/5.0 (Linux; Android 7.1.2) AppleWebKit/537.36 Chrome/109.0 Mobile Safari/537.36"
+            )
+            runCatching {
+                val u = java.net.URL(target)
+                val host = u.host.lowercase()
+                val ref = when {
+                    host.contains("hdslb") || host.contains("bilibili") -> "https://www.bilibili.com/"
+                    else -> u.protocol + "://" + u.host + "/"
+                }
+                conn.setRequestProperty("Referer", ref)
+            }
+            val code = conn.responseCode
+            if (code != 200) {
+                conn.disconnect()
+                respond(socket, 404, "{\"ok\":false}")
+                return
+            }
+            val bytes = conn.inputStream.use { it.readBytes() }
+            val ctype = conn.contentType ?: "image/jpeg"
+            conn.disconnect()
+            val head = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: $ctype\r\n" +
+                "Content-Length: ${bytes.size}\r\n" +
+                "Cache-Control: public, max-age=86400\r\n" +
+                "Access-Control-Allow-Origin: *\r\n" +
+                "Connection: close\r\n\r\n"
+            socket.getOutputStream().use { out ->
+                out.write(head.toByteArray(Charsets.UTF_8))
+                out.write(bytes)
+                out.flush()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "proxyImage: ${e.message}")
+            runCatching { respond(socket, 502, "{\"ok\":false}") }
+        }
+    }
+
     private fun respond(socket: Socket, code: Int, body: String) {
         val status = when (code) {
             200 -> "OK"
@@ -1036,7 +1095,8 @@ function loadPlayer() {
     el('pArtist').textContent = (d.artist || '') + (d.album ? ' · ' + d.album : '') + ' · ' + (d.index + 1) + '/' + d.queueSize + (d.buffering ? ' · 缓冲中' : '');
     var art = el('pArt');
     var want = d.artwork || '';
-    if (art.getAttribute('src') !== want) art.src = want;
+    var wantSrc = want ? '/api/img?url=' + encodeURIComponent(want) : '';
+    if (art.getAttribute('src') !== wantSrc) art.src = wantSrc;
     art.style.visibility = want ? 'visible' : 'hidden';
     el('pToggle').textContent = d.playing ? '⏸' : '▶';
     var favBtn = el('pFav');
