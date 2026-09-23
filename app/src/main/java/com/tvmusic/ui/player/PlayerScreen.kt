@@ -234,14 +234,22 @@ fun PlayerScreen(onBack: () -> Unit) {
     }
 }
 
-/** 逐行滚动歌词：当前行高亮并居中，其余行渐隐。 */
+/** 逐行滚动歌词：当前行高亮并居中，其余行渐隐。字号/颜色/开关/位置跟随歌词设置。 */
 @Composable
 private fun LyricScroll(lines: List<LrcLine>, currentIndex: Int, modifier: Modifier = Modifier) {
+    val cfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
+    val lrcColor = com.tvmusic.ui.theme.LyricSettings.parseColor()
     val listState = rememberLazyListState()
     LaunchedEffect(currentIndex) {
         if (currentIndex in lines.indices) {
             listState.animateScrollToItem(currentIndex)
         }
+    }
+    if (!cfg.enabled) {
+        Box(modifier, contentAlignment = Alignment.Center) {
+            Text("歌词已关闭", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+        }
+        return
     }
     if (lines.isEmpty()) {
         Box(modifier, contentAlignment = Alignment.Center) {
@@ -253,16 +261,20 @@ private fun LyricScroll(lines: List<LrcLine>, currentIndex: Int, modifier: Modif
         state = listState,
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+        verticalArrangement = when (cfg.position) {
+            com.tvmusic.ui.theme.LyricPosition.TOP -> Arrangement.Top
+            com.tvmusic.ui.theme.LyricPosition.BOTTOM -> Arrangement.Bottom
+            else -> Arrangement.Center
+        }
     ) {
         item { Spacer(Modifier.height(80.dp)) }
         items(lines.size) { i ->
             val isCurrent = i == currentIndex
             Text(
                 text = lines[i].text,
-                color = if (isCurrent) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                fontSize = if (isCurrent) 22.sp else 16.sp,
+                color = if (isCurrent) lrcColor
+                else lrcColor.copy(alpha = 0.4f),
+                fontSize = if (isCurrent) (cfg.fontSizeSp + 4).sp else cfg.fontSizeSp.sp,
                 textAlign = TextAlign.Center,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -411,11 +423,11 @@ private fun SeekBar(
             .focusable()
             .onKeyEvent { event ->
                 if (durationMs <= 0) return@onKeyEvent false
+                // 只消费左右键做 ±10s 微调；上下键放行给焦点系统，
+                // 否则焦点会卡在进度条上无法移动到下方控制按钮（焦点陷阱）。
                 val delta = when (event.key) {
                     Key.DirectionRight -> 10_000L
                     Key.DirectionLeft -> -10_000L
-                    Key.DirectionUp -> 60_000L
-                    Key.DirectionDown -> -60_000L
                     else -> return@onKeyEvent false
                 }
                 if (event.nativeKeyEvent.action == android.view.KeyEvent.ACTION_UP) {

@@ -166,18 +166,24 @@ private fun TabItem(
     val isSelected = selected == key
     Box(
         modifier = Modifier
-            .padding(end = 12.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent)
-            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .padding(end = 10.dp)
+            .clip(RoundedCornerShape(20.dp))
+            .background(
+                if (isSelected) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)
+            )
             .let { if (initialFocus) it.tvInitialFocus() else it }
             .tvFocus()
             .clickable { onSelect(key) }
+            .padding(horizontal = 24.dp, vertical = 9.dp)
     ) {
         Text(
             text = label,
-            color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 17.sp
+            color = if (isSelected) MaterialTheme.colorScheme.onPrimary
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 16.sp,
+            fontWeight = if (isSelected) androidx.compose.ui.text.font.FontWeight.SemiBold
+            else androidx.compose.ui.text.font.FontWeight.Normal
         )
     }
 }

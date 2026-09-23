@@ -218,12 +218,14 @@ class MainActivity : ComponentActivity() {
 
             // 迷你播放条
             if (route != "player" && uiState.current != null) {
+                val lyricCfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
                 MiniPlayerBar(
                     entry = uiState.current!!,
                     isPlaying = uiState.isPlaying,
                     positionMs = uiState.positionMs,
                     durationMs = uiState.durationMs,
-                    lyricLine = uiState.lrcLines.getOrNull(uiState.lrcIndex)?.text ?: "",
+                    lyricLine = if (lyricCfg.enabled)
+                        uiState.lrcLines.getOrNull(uiState.lrcIndex)?.text ?: "" else "",
                     onPrev = { PlayerManager.prev() },
                     onToggle = { PlayerManager.playPause() },
                     onNext = { PlayerManager.next() },
@@ -301,7 +303,7 @@ private fun MiniPlayerBar(
                     text = lyricLine.ifBlank {
                         if (isPlaying) entry.artist.ifBlank { "正在播放" } else "已暂停"
                     },
-                    color = if (lyricLine.isNotBlank()) primary
+                    color = if (lyricLine.isNotBlank()) com.tvmusic.ui.theme.LyricSettings.parseColor()
                     else androidx.compose.ui.graphics.Color(0xAAFFFFFF),
                     fontSize = 13.sp,
                     maxLines = 1,

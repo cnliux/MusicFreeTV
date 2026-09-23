@@ -1,6 +1,7 @@
 package com.tvmusic.ui.home
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -226,14 +228,15 @@ private fun NowPlayingPanel(onOpenPlayer: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
                 )
             }
-            // 当前歌词行：用次强调色（粉紫），与主色进度条区分
-            val lrcText = if (state.lrcIndex in state.lrcLines.indices)
+            // 当前歌词行：开关/颜色跟随歌词设置
+            val lyricCfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
+            val lrcText = if (lyricCfg.enabled && state.lrcIndex in state.lrcLines.indices)
                 state.lrcLines[state.lrcIndex].text else ""
             if (lrcText.isNotBlank()) {
                 Text(
                     lrcText,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.secondary,
+                    fontSize = lyricCfg.fontSizeSp.coerceAtMost(16).sp,
+                    color = com.tvmusic.ui.theme.LyricSettings.parseColor(),
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
@@ -287,13 +290,21 @@ private fun HomeTopBar(loading: Boolean, count: Int, onRefresh: () -> Unit) {
         Box(
             modifier = Modifier
                 .padding(start = 16.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .tvFocus()
+                .clip(CircleShape)
+                .background(
+                    androidx.compose.ui.graphics.Brush.linearGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                        )
+                    )
+                )
+                .tvFocus(circle = true)
                 .clickable(onClick = onRefresh)
-                .padding(horizontal = 18.dp, vertical = 8.dp)
+                .padding(horizontal = 18.dp, vertical = 7.dp)
         ) {
-            Text("⟳ 刷新", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+            Text("⟳ 刷新", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
         }
     }
 }
@@ -323,10 +334,19 @@ private fun ActionEntry(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
+    val primary = MaterialTheme.colorScheme.primary
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(MaterialTheme.colorScheme.surface)
+            .clip(RoundedCornerShape(16.dp))
+            .background(
+                androidx.compose.ui.graphics.Brush.linearGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.surface,
+                        primary.copy(alpha = 0.10f)
+                    )
+                )
+            )
+            .border(1.dp, primary.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
             .tvFocus(1.03f)
             .clickable(onClick = onClick)
             .padding(horizontal = 22.dp, vertical = 18.dp),
@@ -336,8 +356,12 @@ private fun ActionEntry(
         Box(
             modifier = Modifier
                 .size(52.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.primaryContainer),
+                .clip(CircleShape)
+                .background(
+                    androidx.compose.ui.graphics.Brush.linearGradient(
+                        listOf(primary.copy(alpha = 0.35f), primary.copy(alpha = 0.15f))
+                    )
+                ),
             contentAlignment = Alignment.Center
         ) {
             Text(icon, fontSize = 26.sp)
@@ -375,12 +399,12 @@ private fun SectionWithMore(title: String, onMore: () -> Unit) {
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(16.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
                 .tvFocus()
                 .clickable(onClick = onMore)
                 .padding(horizontal = 16.dp, vertical = 7.dp)
         ) {
-            Text("更多 ›", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurface)
+            Text("更多 ›", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
         }
     }
 }

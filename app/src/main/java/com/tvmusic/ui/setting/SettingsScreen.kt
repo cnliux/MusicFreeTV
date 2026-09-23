@@ -33,6 +33,7 @@ import com.tvmusic.ui.components.ErrorBox
 import com.tvmusic.ui.components.SectionHeader
 import com.tvmusic.ui.components.tvFocus
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     viewModel: SettingsViewModel
@@ -236,9 +237,10 @@ fun SettingsScreen(
                     modifier = Modifier.padding(bottom = 10.dp)
                 )
                 val currentTheme by com.tvmusic.ui.theme.ThemeManager.current.collectAsState()
-                Row(
+                androidx.compose.foundation.layout.FlowRow(
                     Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     com.tvmusic.ui.theme.ThemeManager.themes.forEach { t ->
                         val selected = t.id == currentTheme.id
@@ -267,6 +269,116 @@ fun SettingsScreen(
                                 else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(top = 6.dp)
                             )
+                        }
+                    }
+                }
+            }
+        }
+
+        item(key = "lyric") {
+            SectionHeader("歌词显示")
+            SettingsCard {
+                val cfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "显示歌词",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 15.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = cfg.enabled,
+                        onCheckedChange = { on ->
+                            com.tvmusic.ui.theme.LyricSettings.update(cfg.copy(enabled = on))
+                        },
+                        colors = androidx.compose.material3.SwitchDefaults.colors(
+                            checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                            checkedTrackColor = MaterialTheme.colorScheme.primary
+                        )
+                    )
+                }
+                // 字号
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("字号", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp,
+                        modifier = Modifier.weight(1f))
+                    StepperButton("－") {
+                        com.tvmusic.ui.theme.LyricSettings.update(
+                            cfg.copy(fontSizeSp = (cfg.fontSizeSp - 2).coerceIn(10, 40))
+                        )
+                    }
+                    Text(
+                        "${cfg.fontSizeSp} sp",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(horizontal = 14.dp)
+                    )
+                    StepperButton("＋") {
+                        com.tvmusic.ui.theme.LyricSettings.update(
+                            cfg.copy(fontSizeSp = (cfg.fontSizeSp + 2).coerceIn(10, 40))
+                        )
+                    }
+                }
+                // 颜色
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("颜色", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp,
+                        modifier = Modifier.weight(1f))
+                    val colorPresets = listOf("FFFFFF" to "白", "4A7DFF" to "蓝", "FF6B9D" to "粉", "FFB74D" to "橙", "34D399" to "绿")
+                    colorPresets.forEach { (hex, name) ->
+                        val sel = cfg.colorHex.equals(hex, true)
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .padding(start = 10.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (sel) MaterialTheme.colorScheme.primaryContainer else androidx.compose.ui.graphics.Color.Transparent)
+                                .tvFocus()
+                                .clickable {
+                                    com.tvmusic.ui.theme.LyricSettings.update(cfg.copy(colorHex = hex))
+                                }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Box(Modifier.size(18.dp).clip(CircleShape)
+                                .background(androidx.compose.ui.graphics.Color(android.graphics.Color.parseColor("#$hex"))))
+                            Text(name, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 3.dp))
+                        }
+                    }
+                }
+                // 位置（播放页歌词区对齐方式）
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("位置", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp,
+                        modifier = Modifier.weight(1f))
+                    listOf(
+                        com.tvmusic.ui.theme.LyricPosition.TOP to "顶部",
+                        com.tvmusic.ui.theme.LyricPosition.CENTER to "居中",
+                        com.tvmusic.ui.theme.LyricPosition.BOTTOM to "底部"
+                    ).forEach { (pos, name) ->
+                        val sel = cfg.position == pos
+                        Box(
+                            modifier = Modifier
+                                .padding(start = 10.dp)
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
+                                .tvFocus()
+                                .clickable {
+                                    com.tvmusic.ui.theme.LyricSettings.update(cfg.copy(position = pos))
+                                }
+                                .padding(horizontal = 16.dp, vertical = 7.dp)
+                        ) {
+                            Text(name, fontSize = 13.sp,
+                                color = if (sel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
@@ -354,5 +466,21 @@ fun ActionButton(label: String, onClick: () -> Unit) {
             color = MaterialTheme.colorScheme.onPrimaryContainer,
             fontSize = 14.sp
         )
+    }
+}
+
+/** 字号加减按钮。 */
+@Composable
+private fun StepperButton(label: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(38.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .tvFocus()
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp)
     }
 }

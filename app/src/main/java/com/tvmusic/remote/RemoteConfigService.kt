@@ -350,6 +350,34 @@ class RemoteConfigService : Service() {
                 val fav = com.tvmusic.player.PlayerManager.toggleFavorite()
                 respond(socket, 200, JSONObject().put("ok", true).put("favorited", fav).toString())
             }
+            method == "GET" && path == "/api/lyric" -> {
+                val c = com.tvmusic.ui.theme.LyricSettings.config.value
+                respond(socket, 200, JSONObject()
+                    .put("ok", true)
+                    .put("enabled", c.enabled)
+                    .put("fontSizeSp", c.fontSizeSp)
+                    .put("colorHex", c.colorHex)
+                    .put("position", c.position.name)
+                    .toString())
+            }
+            method == "POST" && path == "/api/lyric" -> {
+                val body = readBody(input, headers)
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                val cur = com.tvmusic.ui.theme.LyricSettings.config.value
+                val next = com.tvmusic.ui.theme.LyricConfig(
+                    enabled = json?.optBoolean("enabled", cur.enabled) ?: cur.enabled,
+                    fontSizeSp = json?.optInt("fontSizeSp", cur.fontSizeSp)?.coerceIn(10, 40) ?: cur.fontSizeSp,
+                    colorHex = json?.optString("colorHex", cur.colorHex)?.trim()?.trimStart('#')?.take(6)
+                        ?.ifBlank { cur.colorHex } ?: cur.colorHex,
+                    position = try {
+                        com.tvmusic.ui.theme.LyricPosition.valueOf(
+                            json?.optString("position", cur.position.name) ?: cur.position.name
+                        )
+                    } catch (_: Exception) { cur.position }
+                )
+                com.tvmusic.ui.theme.LyricSettings.update(next)
+                respond(socket, 200, JSONObject().put("ok", true).toString())
+            }
             method == "POST" && path == "/api/fav/play" -> {
                 // 播放整个收藏专辑：{ id }
                 val body = readBody(input, headers)
@@ -896,6 +924,25 @@ private val PAGE_HTML = """<!DOCTYPE html>
       <div class="muted">选择后立即应用到电视端与本页。</div>
     </div>
     <div class="card">
+      <h2>歌词显示</h2>
+      <div class="row" style="border:none;padding:0 0 6px;">
+        <span class="muted" style="flex:1;">在播放页与首页底部显示歌词</span>
+        <button class="small" id="lyricToggle" onclick="toggleLyric()">开</button>
+      </div>
+      <div class="row" style="border:none;padding:6px 0;">
+        <span class="muted" style="flex:1;">字体大小</span>
+        <button class="ghost small" onclick="stepLyricSize(-2)">－</button>
+        <span id="lyricSize" style="min-width:44px;text-align:center;"></span>
+        <button class="ghost small" onclick="stepLyricSize(2)">＋</button>
+      </div>
+      <div class="row" style="border:none;padding:6px 0;">
+        <span class="muted" style="flex:1;">颜色</span>
+        <input type="color" id="lyricColor" style="width:44px;height:30px;border:none;background:none;padding:0;" onchange="setLyricColor(this.value)">
+      </div>
+      <div class="chips" id="lyricColorBar" style="margin-top:2px;"></div>
+      <div class="chips" id="lyricPosBar" style="margin-top:8px;"></div>
+    </div>
+    <div class="card">
       <h2>订阅源</h2>
       <div id="subList"></div>
       <div class="row" style="border:none;padding:10px 0 0;">
@@ -955,7 +1002,7 @@ function switchTab(name) {
   for (var j = 0; j < btns.length; j++) btns[j].className = btns[j].getAttribute('data-tab') === name ? 'on' : '';
   if (name === 'player') loadPlayer();
   if (name === 'fav') loadFavLists();
-  if (name === 'manage') { loadSubs(); loadPlugins(); }
+  if (name === 'manage') { loadSubs(); loadPlugins(); loadLyric(); }
 }
 
 /* ---------------- 播放器 ---------------- */
@@ -1334,6 +1381,70 @@ function loadThemes() {
   }).catch(function () {});
 }
 
+/* ---------------- 歌词显示设置 ---------------- */
+var lyricCfg = { enabled: true, fontSizeSp: 16, colorHex: 'FFFFFF', position: 'CENTER' };
+var LRC_COLORS = [
+  { hex: 'FFFFFF', name: '白' },
+  { hex: 'FF6B9D', name: '粉' },
+  { hex: '4A7DFF', name: '蓝' },
+  { hex: 'FFB74D', name: '橙' },
+  { hex: '34D399', name: '绿' }
+];
+var LRC_POS = [
+  { id: 'TOP', name: '顶部' },
+  { id: 'CENTER', name: '居中' },
+  { id: 'BOTTOM', name: '底部' }
+];
+function renderLyric() {
+  el('lyricToggle').textContent = lyricCfg.enabled ? '开' : '关';
+  el('lyricToggle').className = 'small' + (lyricCfg.enabled ? '' : ' ghost');
+  el('lyricSize').textContent = lyricCfg.fontSizeSp + ' sp';
+  el('lyricColor').value = '#' + lyricCfg.colorHex;
+  var cb = el('lyricColorBar');
+  cb.innerHTML = '';
+  LRC_COLORS.forEach(function (c) {
+    var chip = document.createElement('span');
+    chip.className = 'chip' + (c.hex === lyricCfg.colorHex ? ' on' : '');
+    chip.style.borderColor = '#' + c.hex;
+    chip.innerHTML = '<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#' + c.hex + ';"></span>' + c.name;
+    chip.onclick = function () { saveLyric({ colorHex: c.hex }); };
+    cb.appendChild(chip);
+  });
+  var pb = el('lyricPosBar');
+  pb.innerHTML = '';
+  LRC_POS.forEach(function (p) {
+    var chip = document.createElement('span');
+    chip.className = 'chip' + (p.id === lyricCfg.position ? ' on' : '');
+    chip.textContent = p.name;
+    chip.onclick = function () { saveLyric({ position: p.id }); };
+    pb.appendChild(chip);
+  });
+}
+function saveLyric(patch) {
+  var body = {
+    enabled: patch.enabled != null ? patch.enabled : lyricCfg.enabled,
+    fontSizeSp: patch.fontSizeSp != null ? patch.fontSizeSp : lyricCfg.fontSizeSp,
+    colorHex: patch.colorHex != null ? patch.colorHex : lyricCfg.colorHex,
+    position: patch.position != null ? patch.position : lyricCfg.position
+  };
+  post('/api/lyric', body).then(function (d) {
+    if (d.ok) { lyricCfg = body; renderLyric(); }
+  }).catch(function () { toast('保存失败'); });
+}
+function toggleLyric() { saveLyric({ enabled: !lyricCfg.enabled }); }
+function stepLyricSize(delta) {
+  saveLyric({ fontSizeSp: Math.min(40, Math.max(10, lyricCfg.fontSizeSp + delta)) });
+}
+function setLyricColor(v) { saveLyric({ colorHex: String(v).replace('#', '').toUpperCase() }); }
+function loadLyric() {
+  api('/api/lyric').then(function (d) {
+    if (d.ok) {
+      lyricCfg = { enabled: d.enabled, fontSizeSp: d.fontSizeSp, colorHex: d.colorHex, position: d.position };
+      renderLyric();
+    }
+  }).catch(function () {});
+}
+
 /* ---------------- 状态与轮询 ---------------- */
 function loadStatus() {
   api('/api/status').then(function (d) {
@@ -1343,6 +1454,7 @@ function loadStatus() {
 
 loadStatus();
 loadThemes();
+loadLyric();
 loadPlayer();
 loadFavLists();
 loadSubs();
