@@ -353,8 +353,29 @@ class RemoteConfigService : Service() {
                 respond(socket, 200, JSONObject().put("ok", true).put("favorited", fav).toString())
             }
             method == "POST" && path == "/api/player/favorite" -> {
-                val fav = com.tvmusic.player.PlayerManager.toggleFavorite()
+                val body = readBody(input, headers)
+                val listId = runCatching { JSONObject(body).optString("listId", "") }.getOrDefault("")
+                val fav = if (listId.isBlank())
+                    com.tvmusic.player.PlayerManager.toggleFavorite()
+                else
+                    com.tvmusic.player.PlayerManager.toggleFavorite(listId)
                 respond(socket, 200, JSONObject().put("ok", true).put("favorited", fav).toString())
+            }
+            method == "GET" && path == "/api/player/fav-albums" -> {
+                // 全部收藏专辑 + 当前播放曲目在各专辑中的收藏状态
+                val cur = com.tvmusic.player.PlayerManager.uiState.value.current
+                val inLists = if (cur != null) app().playback.favoriteListsOf(cur.raw) else emptySet()
+                val arr = JSONArray()
+                app().playback.lists.value.forEach { l ->
+                    arr.put(
+                        JSONObject()
+                            .put("id", l.id)
+                            .put("name", l.name)
+                            .put("count", l.items.size)
+                            .put("inList", l.id in inLists)
+                    )
+                }
+                respond(socket, 200, JSONObject().put("ok", true).put("albums", arr).toString())
             }
             method == "GET" && path == "/api/lyric" -> {
                 val c = com.tvmusic.ui.theme.LyricSettings.config.value
@@ -364,6 +385,7 @@ class RemoteConfigService : Service() {
                     .put("fontSizeSp", c.fontSizeSp)
                     .put("colorHex", c.colorHex)
                     .put("position", c.position.name)
+                    .put("offsetY", c.offsetY)
                     .toString())
             }
             method == "POST" && path == "/api/lyric" -> {
@@ -379,7 +401,8 @@ class RemoteConfigService : Service() {
                         com.tvmusic.ui.theme.LyricPosition.valueOf(
                             json?.optString("position", cur.position.name) ?: cur.position.name
                         )
-                    } catch (_: Exception) { cur.position }
+                    } catch (_: Exception) { cur.position },
+                    offsetY = json?.optInt("offsetY", cur.offsetY)?.coerceIn(-300, 300) ?: cur.offsetY
                 )
                 com.tvmusic.ui.theme.LyricSettings.update(next)
                 respond(socket, 200, JSONObject().put("ok", true).toString())
@@ -895,6 +918,24 @@ private val PAGE_HTML = """<!DOCTYPE html>
     pointer-events: none; z-index: 30; max-width: 86vw;
   }
   #toast.show { opacity: 1; }
+  #favModal {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 40;
+    display: none; align-items: flex-end; justify-content: center;
+  }
+  #favModal.show { display: flex; }
+  #favModal .sheet {
+    width: 100%; max-width: 520px; background: var(--card); border-radius: 18px 18px 0 0;
+    padding: 18px 18px calc(18px + env(safe-area-inset-bottom)); max-height: 70vh; overflow-y: auto;
+  }
+  #favModal h3 { margin: 0 0 4px; font-size: 16px; }
+  #favModal .fitem {
+    display: flex; align-items: center; gap: 10px; padding: 13px 6px; border-bottom: 1px solid var(--line);
+    font-size: 15px; cursor: pointer;
+  }
+  #favModal .fitem .ck { width: 24px; color: var(--accent2); font-size: 16px; flex: none; }
+  #favModal .fitem .cnt { margin-left: auto; color: var(--muted); font-size: 12px; }
+  #favModal .newrow { display: flex; gap: 8px; margin-top: 12px; }
+  #favModal .newrow input { flex: 1; }
   .pager { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--muted); }
   .pager button { padding: 6px 12px; font-size: 12px; }
   .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 18px 0; }
@@ -1000,6 +1041,12 @@ private val PAGE_HTML = """<!DOCTYPE html>
       </div>
       <div class="chips" id="lyricColorBar" style="margin-top:2px;"></div>
       <div class="chips" id="lyricPosBar" style="margin-top:8px;"></div>
+      <div class="row" style="border:none;padding:6px 0 0;margin-top:8px;">
+        <span class="muted" style="flex:1;">垂直微调</span>
+        <button class="ghost small" onclick="stepLyricOffset(-20)">↑</button>
+        <span id="lyricOffset" style="min-width:44px;text-align:center;"></span>
+        <button class="ghost small" onclick="stepLyricOffset(20)">↓</button>
+      </div>
     </div>
     <div class="card">
       <h2>订阅源</h2>
@@ -1020,6 +1067,18 @@ private val PAGE_HTML = """<!DOCTYPE html>
 </main>
 
 <div id="toast"></div>
+
+<div id="favModal" onclick="if(event.target===this)closeFavModal()">
+  <div class="sheet">
+    <h3 id="favModalTitle">收藏到…</h3>
+    <div id="favAlbumList"></div>
+    <div class="newrow">
+      <input type="text" id="favAlbumNew" placeholder="新专辑名称">
+      <button class="small" onclick="createFavAlbumFromModal()">新建</button>
+    </div>
+    <div class="newrow"><button class="ghost small" style="flex:1;" onclick="closeFavModal()">关闭</button></div>
+  </div>
+</div>
 
 <nav>
   <button class="on" data-tab="player" onclick="switchTab('player')"><span class="ic">🎵</span>播放</button>
@@ -1149,12 +1208,63 @@ function showVol() {
 function playerCmd(cmd) {
   api('/api/player/' + cmd, { method: 'POST' }).then(function () { loadPlayer(); });
 }
-/* 播放页收藏当前曲 */
+/* 播放页收藏当前曲：弹出收藏夹选择 */
+var favCtx = null; /* { mode:'player' } 或 { mode:'search', idx } */
 function toggleCurFav() {
-  post('/api/player/favorite', {}).then(function (d) {
-    toast(d.favorited ? '已加入收藏' : '已取消收藏');
-    loadPlayer();
-  }).catch(function () { toast('操作失败'); });
+  favCtx = { mode: 'player' };
+  el('favModalTitle').textContent = '收藏到…（' + (el('pTitle').textContent || '') + '）';
+  loadFavAlbums();
+  el('favModal').className = 'show';
+}
+function favResult(i) {
+  favCtx = { mode: 'search', idx: i };
+  var it = searchResults[i];
+  el('favModalTitle').textContent = '收藏到…（' + (it ? it.title : '') + '）';
+  loadFavAlbums();
+  el('favModal').className = 'show';
+}
+function closeFavModal() { el('favModal').className = ''; }
+function loadFavAlbums() {
+  api('/api/player/fav-albums').then(function (d) {
+    var box = el('favAlbumList');
+    var arr = d.albums || [];
+    var html = '';
+    arr.forEach(function (a, i) {
+      html += '<div class="fitem" onclick="pickFavAlbum(' + i + ')">' +
+        '<span class="ck">' + (a.inList ? '♥' : '♡') + '</span>' +
+        '<span class="ellip">' + esc(a.name) + '</span>' +
+        '<span class="cnt">' + a.count + ' 首</span></div>';
+    });
+    box.innerHTML = html || '<div class="empty">还没有收藏专辑</div>';
+    window._favAlbums = arr;
+  }).catch(function () { toast('加载专辑失败'); });
+}
+function pickFavAlbum(i) {
+  var a = (window._favAlbums || [])[i];
+  if (!a || !favCtx) return;
+  if (favCtx.mode === 'player') {
+    post('/api/player/favorite', { listId: a.id }).then(function (d) {
+      toast(d.favorited ? '已收藏到「' + a.name + '」' : '已从「' + a.name + '」取消');
+      loadPlayer(); loadFavAlbums();
+    }).catch(function () { toast('操作失败'); });
+  } else {
+    var it = searchResults[favCtx.idx];
+    if (!it) return;
+    post('/api/fav/toggle', { listId: a.id, plugin: it.plugin, raw: it.raw }).then(function (d) {
+      var b = el('sfav' + favCtx.idx);
+      if (b) { b.textContent = d.favorited ? '♥' : '♡'; b.style.color = d.favorited ? 'var(--accent2)' : ''; }
+      toast(d.favorited ? '已收藏到「' + a.name + '」' : '已从「' + a.name + '」取消');
+      loadFavAlbums();
+    }).catch(function () { toast('操作失败'); });
+  }
+}
+function createFavAlbumFromModal() {
+  var name = (el('favAlbumNew').value || '').trim();
+  if (!name) { toast('请输入专辑名'); return; }
+  post('/api/fav/lists/create', { name: name }).then(function () {
+    el('favAlbumNew').value = '';
+    loadFavAlbums();
+  }).catch(function () { toast('新建失败'); });
 }
 function volume(delta) {
   post('/api/player/volume', { delta: delta }).then(function () { loadPlayer(); });
@@ -1233,16 +1343,6 @@ function playResult(i) {
     toast(d.message || '已播放');
   }).catch(function () { toast('播放失败'); });
 }
-/* 搜索结果收藏（默认专辑） */
-function favResult(i) {
-  var it = searchResults[i];
-  post('/api/fav/toggle', { listId: 'fav_default', plugin: it.plugin, raw: it.raw }).then(function (d) {
-    var b = el('sfav' + i);
-    if (b) { b.textContent = d.favorited ? '♥' : '♡'; b.style.color = d.favorited ? 'var(--accent2)' : ''; }
-    toast(d.favorited ? '已收藏' : '已取消收藏');
-  }).catch(function () { toast('操作失败'); });
-}
-
 /* ---------------- 收藏 ---------------- */
 var favLists = [], curFavId = null, favPage = 1, favSize = 20;
 function loadFavLists() {
@@ -1442,7 +1542,7 @@ function loadThemes() {
 }
 
 /* ---------------- 歌词显示设置 ---------------- */
-var lyricCfg = { enabled: true, fontSizeSp: 16, colorHex: 'FFFFFF', position: 'CENTER' };
+var lyricCfg = { enabled: true, fontSizeSp: 16, colorHex: 'FFFFFF', position: 'CENTER', offsetY: 0 };
 var LRC_COLORS = [
   { hex: 'FFFFFF', name: '白' },
   { hex: 'FF6B9D', name: '粉' },
@@ -1459,6 +1559,7 @@ function renderLyric() {
   el('lyricToggle').textContent = lyricCfg.enabled ? '开' : '关';
   el('lyricToggle').className = 'small' + (lyricCfg.enabled ? '' : ' ghost');
   el('lyricSize').textContent = lyricCfg.fontSizeSp + ' sp';
+  el('lyricOffset').textContent = lyricCfg.offsetY;
   el('lyricColor').value = '#' + lyricCfg.colorHex;
   var cb = el('lyricColorBar');
   cb.innerHTML = '';
@@ -1485,7 +1586,8 @@ function saveLyric(patch) {
     enabled: patch.enabled != null ? patch.enabled : lyricCfg.enabled,
     fontSizeSp: patch.fontSizeSp != null ? patch.fontSizeSp : lyricCfg.fontSizeSp,
     colorHex: patch.colorHex != null ? patch.colorHex : lyricCfg.colorHex,
-    position: patch.position != null ? patch.position : lyricCfg.position
+    position: patch.position != null ? patch.position : lyricCfg.position,
+    offsetY: patch.offsetY != null ? patch.offsetY : lyricCfg.offsetY
   };
   post('/api/lyric', body).then(function (d) {
     if (d.ok) { lyricCfg = body; renderLyric(); }
@@ -1495,11 +1597,14 @@ function toggleLyric() { saveLyric({ enabled: !lyricCfg.enabled }); }
 function stepLyricSize(delta) {
   saveLyric({ fontSizeSp: Math.min(40, Math.max(10, lyricCfg.fontSizeSp + delta)) });
 }
+function stepLyricOffset(delta) {
+  saveLyric({ offsetY: Math.min(300, Math.max(-300, lyricCfg.offsetY + delta)) });
+}
 function setLyricColor(v) { saveLyric({ colorHex: String(v).replace('#', '').toUpperCase() }); }
 function loadLyric() {
   api('/api/lyric').then(function (d) {
     if (d.ok) {
-      lyricCfg = { enabled: d.enabled, fontSizeSp: d.fontSizeSp, colorHex: d.colorHex, position: d.position };
+      lyricCfg = { enabled: d.enabled, fontSizeSp: d.fontSizeSp, colorHex: d.colorHex, position: d.position, offsetY: d.offsetY || 0 };
       renderLyric();
     }
   }).catch(function () {});

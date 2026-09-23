@@ -382,6 +382,30 @@ fun SettingsScreen(
                         }
                     }
                 }
+                // 垂直微调：在位置基础上上下移动歌词悬浮层
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("垂直微调", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp,
+                        modifier = Modifier.weight(1f))
+                    StepperButton("↑") {
+                        com.tvmusic.ui.theme.LyricSettings.update(
+                            cfg.copy(offsetY = (cfg.offsetY - 20).coerceIn(-300, 300))
+                        )
+                    }
+                    Text(
+                        "${cfg.offsetY}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(horizontal = 14.dp)
+                    )
+                    StepperButton("↓") {
+                        com.tvmusic.ui.theme.LyricSettings.update(
+                            cfg.copy(offsetY = (cfg.offsetY + 20).coerceIn(-300, 300))
+                        )
+                    }
+                }
             }
         }
 

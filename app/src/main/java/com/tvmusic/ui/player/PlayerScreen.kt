@@ -148,11 +148,6 @@ fun PlayerScreen(onBack: () -> Unit) {
                             Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.error,
                                 modifier = Modifier.padding(top = 10.dp))
                         }
-                        LyricScroll(
-                            lines = state.lrcLines,
-                            currentIndex = state.lrcIndex,
-                            modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 12.dp)
-                        )
                     }
                 }
 
@@ -205,6 +200,12 @@ fun PlayerScreen(onBack: () -> Unit) {
             }
         }
 
+        // 悬浮歌词层：叠加在最上层，位置/字号/颜色由歌词设置控制
+        LyricOverlay(
+            lines = state.lrcLines,
+            currentIndex = state.lrcIndex
+        )
+
         // 收藏到哪个专辑
         if (showFavDialog) {
             val entry = state.current
@@ -234,10 +235,14 @@ fun PlayerScreen(onBack: () -> Unit) {
     }
 }
 
-/** 逐行滚动歌词：当前行高亮并居中，其余行渐隐。字号/颜色/开关/位置跟随歌词设置。 */
+/**
+ * 悬浮歌词层：叠加在播放页最上层，不拦截焦点。
+ * 位置（顶部/居中/底部 + 垂直微调）与字号/颜色由歌词设置控制。
+ */
 @Composable
-private fun LyricScroll(lines: List<LrcLine>, currentIndex: Int, modifier: Modifier = Modifier) {
+private fun LyricOverlay(lines: List<LrcLine>, currentIndex: Int) {
     val cfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
+    if (!cfg.enabled) return
     val lrcColor = com.tvmusic.ui.theme.LyricSettings.parseColor()
     val listState = rememberLazyListState()
     LaunchedEffect(currentIndex) {
@@ -245,46 +250,58 @@ private fun LyricScroll(lines: List<LrcLine>, currentIndex: Int, modifier: Modif
             listState.animateScrollToItem(currentIndex)
         }
     }
-    if (!cfg.enabled) {
-        Box(modifier, contentAlignment = Alignment.Center) {
-            Text("歌词已关闭", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
-        }
-        return
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val align = when (cfg.position) {
+        com.tvmusic.ui.theme.LyricPosition.TOP -> Alignment.TopCenter
+        com.tvmusic.ui.theme.LyricPosition.BOTTOM -> Alignment.BottomCenter
+        else -> Alignment.Center
     }
-    if (lines.isEmpty()) {
-        Box(modifier, contentAlignment = Alignment.Center) {
-            Text("暂无歌词", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 16.sp)
-        }
-        return
-    }
-    LazyColumn(
-        state = listState,
-        modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = when (cfg.position) {
-            com.tvmusic.ui.theme.LyricPosition.TOP -> Arrangement.Top
-            com.tvmusic.ui.theme.LyricPosition.BOTTOM -> Arrangement.Bottom
-            else -> Arrangement.Center
-        }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            // 底部留出控制条区域，避免歌词悬浮层盖住进度条和按钮
+            .padding(start = 64.dp, end = 64.dp, top = 24.dp, bottom = 220.dp)
+            .offset { androidx.compose.ui.unit.IntOffset(0, with(density) { cfg.offsetY.dp.roundToPx() }) },
+        contentAlignment = align
     ) {
-        item { Spacer(Modifier.height(80.dp)) }
-        items(lines.size) { i ->
-            val isCurrent = i == currentIndex
+        if (lines.isEmpty()) {
             Text(
-                text = lines[i].text,
-                color = if (isCurrent) lrcColor
-                else lrcColor.copy(alpha = 0.4f),
-                fontSize = if (isCurrent) (cfg.fontSizeSp + 4).sp else cfg.fontSizeSp.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 6.dp, horizontal = 24.dp)
-                    .graphicsLayer {
-                        alpha = if (isCurrent) 1f else 0.55f
-                    }
+                "暂无歌词",
+                color = lrcColor.copy(alpha = 0.45f),
+                fontSize = 15.sp,
+                modifier = Modifier.padding(vertical = 30.dp)
             )
+        } else {
+            LazyColumn(
+                state = listState,
+                userScrollEnabled = false,
+                modifier = Modifier.fillMaxWidth().height(300.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                item { Spacer(Modifier.height(120.dp)) }
+                items(lines.size) { i ->
+                    val isCurrent = i == currentIndex
+                    Text(
+                        text = lines[i].text,
+                        color = if (isCurrent) lrcColor else lrcColor.copy(alpha = 0.35f),
+                        fontSize = if (isCurrent) (cfg.fontSizeSp + 4).sp else cfg.fontSizeSp.sp,
+                        fontWeight = if (isCurrent)
+                            androidx.compose.ui.text.font.FontWeight.Bold
+                        else androidx.compose.ui.text.font.FontWeight.Normal,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp)
+                            .graphicsLayer {
+                                alpha = if (isCurrent) 1f else 0.6f
+                            }
+                    )
+                }
+                item { Spacer(Modifier.height(120.dp)) }
+            }
         }
-        item { Spacer(Modifier.height(80.dp)) }
     }
 }
 
