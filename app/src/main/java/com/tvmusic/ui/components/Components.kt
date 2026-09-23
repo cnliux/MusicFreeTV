@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -93,12 +94,13 @@ fun Modifier.tvFocus(scaleOnFocus: Float = 1.06f): Modifier {
 fun Artwork(url: String, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(14.dp))
             .background(
                 Brush.linearGradient(
-                    listOf(Color(0xFF23303C), MaterialTheme.colorScheme.surfaceVariant)
+                    listOf(Color(0xFF232C38), Color(0xFF12161D))
                 )
-            )
+            ),
+        contentAlignment = Alignment.Center
     ) {
         if (url.startsWith("http")) {
             AsyncImage(
@@ -106,6 +108,13 @@ fun Artwork(url: String, modifier: Modifier = Modifier) {
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
+            )
+        } else {
+            // 占位：音符图标（无封面图时不再是空黑块）
+            Text(
+                "♪",
+                fontSize = 34.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
             )
         }
     }
@@ -165,12 +174,24 @@ private fun TabItem(
 
 @Composable
 fun SectionHeader(title: String) {
-    Text(
-        text = title,
-        fontSize = 19.sp,
-        color = MaterialTheme.colorScheme.onBackground,
-        modifier = Modifier.padding(horizontal = 28.dp, vertical = 10.dp)
-    )
+    Row(
+        modifier = Modifier.padding(horizontal = 28.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // 主色竖条：分区标题统一视觉锚点
+        Box(
+            Modifier
+                .size(width = 4.dp, height = 18.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.primary)
+        )
+        Text(
+            text = title,
+            fontSize = 19.sp,
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.padding(start = 10.dp)
+        )
+    }
 }
 
 /** 通用筛选 chip：插件页签 / 标签 / 搜索类型切换共用（D-pad 可聚焦）。 */
@@ -212,28 +233,50 @@ fun MediaCard(
 ) {
     Column(
         modifier = modifier
-            .width(148.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .tvFocus()
+            .width(156.dp)
+            .tvFocus(1.05f)
             .clickable(onClick = onClick)
-            .padding(10.dp)
     ) {
-        Artwork(artwork, Modifier.size(128.dp).fillMaxWidth())
-        Text(
-            text = title,
-            fontSize = 14.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.padding(top = 8.dp)
-        )
+        // 封面：底部渐变遮罩叠标题，沉浸感更强
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(156.dp)
+                .graphicsLayer {
+                    shadowElevation = 10.dp.toPx()
+                    clip = true
+                    shape = RoundedCornerShape(14.dp)
+                }
+        ) {
+            Artwork(artwork, Modifier.fillMaxSize())
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .align(Alignment.BottomCenter)
+                    .background(
+                        Brush.verticalGradient(listOf(Color.Transparent, Color(0xCC000000)))
+                    )
+            )
+            Text(
+                text = title,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            )
+        }
         Text(
             text = subtitle,
-            fontSize = 12.sp,
+            fontSize = 11.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 6.dp, start = 4.dp, end = 4.dp)
         )
     }
 }

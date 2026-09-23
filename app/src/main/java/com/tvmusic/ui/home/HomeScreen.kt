@@ -324,14 +324,20 @@ private fun ActionEntry(
 @Composable
 private fun SectionWithMore(title: String, onMore: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 28.dp, end = 20.dp, top = 12.dp, bottom = 4.dp),
+        modifier = Modifier.fillMaxWidth().padding(start = 28.dp, end = 20.dp, top = 14.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        Box(
+            Modifier
+                .size(width = 4.dp, height = 18.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.primary)
+        )
         Text(
             text = title,
             fontSize = 19.sp,
             color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.weight(1f)
+            modifier = Modifier.weight(1f).padding(start = 10.dp)
         )
         Box(
             modifier = Modifier
