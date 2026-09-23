@@ -893,13 +893,12 @@ private val PAGE_HTML = """<!DOCTYPE html>
   }
   .ctrl:active { transform: scale(.92); }
   .ctrl.main {
-    width: 72px; height: 72px; font-size: 28px; color: #fff;
+    color: #fff;
     background: radial-gradient(circle at 35% 30%, var(--accent2), var(--accent) 75%);
     box-shadow: 0 6px 22px rgba(0,0,0,.5);
   }
   .ctrl.favon { color: var(--accent2); }
   .ctrls .side { flex: none; display: flex; flex-direction: column; align-items: center; gap: 2px; color: var(--muted); font-size: 10px; }
-  .ctrls .side button { width: 44px; height: 44px; font-size: 16px; }
   .qitem { display: flex; align-items: center; gap: 10px; padding: 10px 4px; border-bottom: 1px solid var(--line); }
   .qitem:last-child { border-bottom: none; }
   .qitem.cur { color: var(--accent2); }
