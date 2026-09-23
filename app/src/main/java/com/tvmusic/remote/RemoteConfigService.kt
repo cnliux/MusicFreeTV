@@ -399,7 +399,12 @@ class RemoteConfigService : Service() {
     private fun themesJson(): JSONObject {
         val arr = JSONArray()
         com.tvmusic.ui.theme.ThemeManager.themes.forEach { t ->
-            arr.put(JSONObject().put("id", t.id).put("name", t.name).put("accent", t.accent).put("bg", t.bg))
+            arr.put(
+                JSONObject()
+                    .put("id", t.id).put("name", t.name)
+                    .put("accent", t.accent).put("accent2", t.accent2)
+                    .put("bg", t.bg).put("card", t.card).put("radius", t.radiusPx)
+            )
         }
         return JSONObject()
             .put("ok", true)
@@ -691,7 +696,7 @@ private val PAGE_HTML = """<!DOCTYPE html>
     color-scheme: dark;
     --bg: #0d0f14; --card: #171a21; --card2: #1e222b; --line: #262b36;
     --text: #eef1f6; --muted: #8b93a5; --accent: #5b8cff; --accent2: #7aa5ff;
-    --danger: #e06c6c; --ok: #58c97b;
+    --danger: #e06c6c; --ok: #58c97b; --radius: 14px;
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body {
@@ -709,7 +714,7 @@ private val PAGE_HTML = """<!DOCTYPE html>
   main { max-width: 720px; margin: 0 auto; padding: 14px 14px 0; }
   .page { display: none; }
   .page.on { display: block; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; margin-bottom: 14px; }
   .card h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); font-weight: 600; letter-spacing: 1px; }
   .row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); }
   .row:last-child { border-bottom: none; }
@@ -768,13 +773,13 @@ private val PAGE_HTML = """<!DOCTYPE html>
   input[type=range]::-moz-range-progress { height: 5px; border-radius: 3px; background: var(--accent); }
   input[type=range]::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: #fff; border: none; }
   .times { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .ctrls { display: flex; align-items: center; justify-content: center; gap: 22px; margin: 14px 0 4px; }
+  .ctrls { display: flex; align-items: center; justify-content: center; gap: 18px; margin: 14px 0 4px; flex-wrap: wrap; }
   .ctrl {
-    width: 56px; height: 56px; border-radius: 50%;
+    flex: none; width: 56px; height: 56px; border-radius: 50%;
     background: radial-gradient(circle at 35% 30%, #333a49, var(--card2) 70%);
     border: none; box-shadow: 0 4px 14px rgba(0,0,0,.45);
     color: var(--text); font-size: 20px; display: flex; align-items: center; justify-content: center; padding: 0;
-    transition: transform .12s;
+    transition: transform .12s; cursor: pointer;
   }
   .ctrl:active { transform: scale(.92); }
   .ctrl.main {
@@ -783,7 +788,7 @@ private val PAGE_HTML = """<!DOCTYPE html>
     box-shadow: 0 6px 22px rgba(0,0,0,.5);
   }
   .ctrl.favon { color: var(--accent2); }
-  .ctrls .side { display: flex; flex-direction: column; align-items: center; gap: 2px; color: var(--muted); font-size: 10px; }
+  .ctrls .side { flex: none; display: flex; flex-direction: column; align-items: center; gap: 2px; color: var(--muted); font-size: 10px; }
   .ctrls .side button { width: 44px; height: 44px; font-size: 16px; }
   .qitem { display: flex; align-items: center; gap: 10px; padding: 10px 4px; border-bottom: 1px solid var(--line); }
   .qitem:last-child { border-bottom: none; }
@@ -1294,8 +1299,13 @@ function applyTheme(id) {
   if (!t) return;
   var r = document.documentElement.style;
   r.setProperty('--accent', '#' + t.accent);
+  r.setProperty('--accent2', '#' + (t.accent2 || t.accent));
   r.setProperty('--bg', '#' + t.bg);
-  // 强调色的半透明派生（用于 range 轨道等）
+  if (t.card) {
+    r.setProperty('--card', '#' + t.card);
+    r.setProperty('--card2', '#' + t.card);
+  }
+  if (t.radius) r.setProperty('--radius', t.radius + 'px');
   curTheme = id;
   renderThemeBar();
 }

@@ -277,7 +277,7 @@ private fun MiniPlayerBar(
                 Modifier
                     .size(52.dp)
                     .clip(CircleShape)
-                    .tvFocus(1.04f)
+                    .tvFocus(circle = true)
                     .clickable(onClick = onClick)
             )
 
@@ -317,7 +317,7 @@ private fun MiniPlayerBar(
                     .size(52.dp)
                     .clip(CircleShape)
                     .background(primary)
-                    .tvFocus(1.1f)
+                    .tvFocus(circle = true)
                     .clickable(onClick = onToggle),
                 contentAlignment = Alignment.Center
             ) {
@@ -338,7 +338,7 @@ private fun MiniControl(symbol: String, onClick: () -> Unit) {
         modifier = Modifier
             .size(44.dp)
             .clip(CircleShape)
-            .tvFocus(1.1f)
+            .tvFocus(circle = true)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {

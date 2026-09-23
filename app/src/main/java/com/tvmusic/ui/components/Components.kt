@@ -63,38 +63,48 @@ fun Modifier.tvInitialFocus(): Modifier {
 }
 
 /**
- * D-pad 聚焦效果（纯视觉）：白边 3dp + 轻微提亮底色 + 1.08x 放大 + 阴影。
- * TV 上焦点必须"一眼可见"：白边在所有主题色上都成立，比彩色描边更清晰。
+ * D-pad 聚焦效果（纯视觉），读取当前主题 Token：
+ * 圆角 / 焦点缩放 / 焦点边框色 / 发光强度 / 是否仅用亮度变化（杂志模式）。
  * 注意：不要再叠加 focusable()——clickable 自身已创建焦点节点，
  * 额外的 focusable 节点会抢走焦点，导致遥控器 OK 键无法触发点击。
  */
 @Composable
-fun Modifier.tvFocus(scaleOnFocus: Float = 1.08f): Modifier {
+fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false): Modifier {
+    val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) scaleOnFocus else 1f, label = "tvScale")
     val glow = MaterialTheme.colorScheme.primary
+    val scale = scaleOverride ?: tokens.focusScale
+    val animated by animateFloatAsState(if (focused) scale else 1f, label = "tvScale")
+    val shape = if (circle) androidx.compose.foundation.shape.CircleShape else RoundedCornerShape(tokens.radius)
     return this
         .onFocusChanged { focused = it.isFocused }
         .graphicsLayer {
-            scaleX = scale
-            scaleY = scale
-            alpha = if (focused) 1f else 0.92f
-            shadowElevation = if (focused) 24f else 0f
-            ambientShadowColor = glow
-            spotShadowColor = glow
+            if (!tokens.focusBrightnessOnly) {
+                scaleX = animated
+                scaleY = animated
+            }
+            alpha = when {
+                tokens.focusBrightnessOnly -> if (focused) 1f else 0.62f
+                else -> if (focused) 1f else 0.92f
+            }
+            if (tokens.focusGlow > 0.dp) {
+                shadowElevation = if (focused) tokens.focusGlow.toPx() else 0f
+                ambientShadowColor = glow
+                spotShadowColor = glow
+            }
         }
         .drawBehind {
-            // 聚焦时轻提亮底色（低透明主色），保持文字可读
-            if (focused) drawRect(glow.copy(alpha = 0.14f))
+            if (focused) drawRect(glow.copy(alpha = if (tokens.focusBrightnessOnly) 0.08f else 0.14f))
         }
-        .border(if (focused) 3.dp else 0.dp, Color.White, RoundedCornerShape(14.dp))
+        .border(if (focused) 3.dp else 0.dp, tokens.focusBorder, shape)
 }
 
 @Composable
 fun Artwork(url: String, modifier: Modifier = Modifier) {
+    val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(tokens.radius))
             .background(
                 Brush.linearGradient(
                     listOf(Color(0xFF232C38), Color(0xFF12161D))
@@ -209,7 +219,7 @@ fun FilterChip(
                 if (selected) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.surface
             )
-            .tvFocus(1.06f)
+            .tvFocus()
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 10.dp)
     ) {
@@ -231,13 +241,14 @@ fun MediaCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
     Column(
         modifier = modifier
             .width(168.dp)
-            .tvFocus(1.08f)
+            .tvFocus()
             .clickable(onClick = onClick)
     ) {
-        // 封面：1:1，圆角 12dp，加载失败/无图时深灰渐变+音符兜底（Artwork 内置）
+        // 封面：1:1，圆角随主题 Token，加载失败/无图时深灰渐变+音符兜底（Artwork 内置）
         Artwork(
             artwork,
             Modifier
@@ -246,7 +257,7 @@ fun MediaCard(
                 .graphicsLayer {
                     shadowElevation = 8.dp.toPx()
                     clip = true
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(tokens.radius)
                 }
         )
         // 标题/平台分层：14sp 白 / 11sp 灰

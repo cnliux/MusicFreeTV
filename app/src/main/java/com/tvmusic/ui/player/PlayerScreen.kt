@@ -98,108 +98,109 @@ fun PlayerScreen(onBack: () -> Unit) {
             return@Box
         }
 
-        Row(Modifier.fillMaxSize().padding(horizontal = 64.dp, vertical = 32.dp)) {
-
-            // 左：旋转黑胶 + 逐行歌词
-            Column(
-                modifier = Modifier.weight(1f).fillMaxHeight(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterVertically)
-            ) {
-                RotatingVinyl(
-                    artwork = state.current!!.artwork,
-                    isPlaying = state.isPlaying,
-                    size = 320.dp
-                )
-                LyricScroll(
-                    lines = state.lrcLines,
-                    currentIndex = state.lrcIndex,
-                    modifier = Modifier.fillMaxWidth().height(220.dp)
-                )
-            }
-
-            // 右：信息 + 进度 + 控制
-            Column(
-                modifier = Modifier.weight(1f).fillMaxHeight(),
-                verticalArrangement = Arrangement.Center
-            ) {
-                Text(
-                    text = state.current!!.title,
-                    fontSize = 36.sp,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = "${state.current!!.artist} · ${state.current!!.album}",
-                    fontSize = 17.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 10.dp)
-                )
-                if (state.buffering) {
-                    Row(Modifier.padding(top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.primary
+        Row(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 28.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(Modifier.fillMaxWidth()) {
+                // 上：左大封面（圆角+阴影） + 右逐行歌词
+                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                    val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
+                    Box(
+                        modifier = Modifier
+                            .size(340.dp)
+                            .graphicsLayer {
+                                shadowElevation = 26.dp.toPx()
+                                clip = true
+                                shape = RoundedCornerShape(tokens.radius * 2)
+                            }
+                            .tvFocus(1.03f)
+                            .clickable(onClick = onBack)
+                    ) {
+                        Artwork(state.current!!.artwork, Modifier.fillMaxSize())
+                        if (state.buffering) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.align(Alignment.Center).size(36.dp),
+                                strokeWidth = 3.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(48.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = state.current!!.title,
+                            fontSize = 30.sp,
+                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        Text("缓冲中…", fontSize = 14.sp, color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(start = 8.dp))
+                        Text(
+                            text = "${state.current!!.artist} · ${state.current!!.album}",
+                            fontSize = 16.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 8.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        state.error?.let {
+                            Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(top = 10.dp))
+                        }
+                        LyricScroll(
+                            lines = state.lrcLines,
+                            currentIndex = state.lrcIndex,
+                            modifier = Modifier.fillMaxWidth().weight(1f).padding(top = 12.dp)
+                        )
                     }
                 }
-                state.error?.let {
-                    Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(top = 12.dp))
-                }
 
+                // 下：控制条（进度 + 时间 + 全部控制按钮）
                 SeekBar(
                     positionMs = state.positionMs,
                     durationMs = state.durationMs,
-                    modifier = Modifier.fillMaxWidth().padding(top = 42.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 18.dp),
                     onSeek = { PlayerManager.seek(it) }
                 )
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(format(state.positionMs), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(format(state.durationMs), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-
-                // 主控制：上一曲 / 播放暂停 / 下一曲（居中大圆按钮）
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 34.dp),
+                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 6.dp),
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    RoundCtrlButton("⏮", size = 64.dp, iconSize = 26.sp, filled = false) { PlayerManager.prev() }
-                    Spacer(Modifier.width(28.dp))
-                    // 播放/暂停：主色实心大圆
-                    RoundCtrlButton(if (state.isPlaying) "⏸" else "▶", size = 88.dp, iconSize = 36.sp, filled = true) { PlayerManager.playPause() }
-                    Spacer(Modifier.width(28.dp))
-                    RoundCtrlButton("⏭", size = 64.dp, iconSize = 26.sp, filled = false) { PlayerManager.next() }
-                }
-
-                // 次控制：收藏 / 播放模式 / 快退 / 快进
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 26.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    PlayerButton(if (state.isFavorite) "♥ 已收藏" else "♡ 收藏") { showFavDialog = true }
-                    PlayerButton(playModeLabel(state.playMode)) { PlayerManager.cyclePlayMode() }
-                    PlayerButton("⏪ 30s") { PlayerManager.seek(state.positionMs - 30_000) }
-                    PlayerButton("30s ⏩") { PlayerManager.seek(state.positionMs + 30_000) }
-                }
-
-                Row(Modifier.padding(top = 26.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .tvFocus()
-                            .clickable(onClick = onBack)
-                            .padding(horizontal = 14.dp, vertical = 8.dp)
-                            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
-                    ) { Text("返回", color = MaterialTheme.colorScheme.primary, fontSize = 15.sp) }
+                    // 收藏
+                    RoundCtrlButton(
+                        if (state.isFavorite) "♥" else "♡",
+                        size = 52.dp, iconSize = 22.sp, filled = false,
+                        onClick = { showFavDialog = true }
+                    )
+                    Spacer(Modifier.width(22.dp))
+                    RoundCtrlButton("⏪", size = 52.dp, iconSize = 20.sp, filled = false) {
+                        PlayerManager.seek(state.positionMs - 30_000)
+                    }
+                    Spacer(Modifier.width(22.dp))
+                    RoundCtrlButton("⏮", size = 60.dp, iconSize = 26.sp, filled = false) { PlayerManager.prev() }
+                    Spacer(Modifier.width(26.dp))
+                    RoundCtrlButton(if (state.isPlaying) "⏸" else "▶", size = 84.dp, iconSize = 34.sp, filled = true) { PlayerManager.playPause() }
+                    Spacer(Modifier.width(26.dp))
+                    RoundCtrlButton("⏭", size = 60.dp, iconSize = 26.sp, filled = false) { PlayerManager.next() }
+                    Spacer(Modifier.width(22.dp))
+                    RoundCtrlButton("⏩", size = 52.dp, iconSize = 20.sp, filled = false) {
+                        PlayerManager.seek(state.positionMs + 30_000)
+                    }
+                    Spacer(Modifier.width(22.dp))
+                    RoundCtrlButton(playModeIcon(state.playMode), size = 52.dp, iconSize = 20.sp, filled = false) {
+                        PlayerManager.cyclePlayMode()
+                    }
+                    Spacer(Modifier.width(22.dp))
+                    RoundCtrlButton("↩", size = 52.dp, iconSize = 22.sp, filled = false, onClick = onBack)
                 }
             }
         }
@@ -230,52 +231,6 @@ fun PlayerScreen(onBack: () -> Unit) {
                 }
             )
         }
-    }
-}
-
-/** 旋转黑胶：播放时匀速旋转，暂停时停住。 */
-@Composable
-private fun RotatingVinyl(artwork: String, isPlaying: Boolean, size: androidx.compose.ui.unit.Dp) {
-    val transition = rememberInfiniteTransition(label = "vinyl")
-    val angle by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 20_000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "vinylAngle"
-    )
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(CircleShape)
-            .background(Color(0xFF000000)),
-        contentAlignment = Alignment.Center
-    ) {
-        // 黑胶外圈纹理
-        Box(
-            modifier = Modifier
-                .size(size)
-                .clip(CircleShape)
-                .background(Color(0xFF1A1A1A))
-        )
-        // 封面（旋转）
-        Box(
-            modifier = Modifier
-                .size(size * 0.78f)
-                .clip(CircleShape)
-                .rotate(if (isPlaying) angle else 0f)
-        ) {
-            Artwork(artwork, Modifier.fillMaxSize())
-        }
-        // 中心孔
-        Box(
-            modifier = Modifier
-                .size(size * 0.12f)
-                .clip(CircleShape)
-                .background(Color(0xFF2A2A2A))
-        )
     }
 }
 
@@ -389,21 +344,7 @@ private fun FavAlbumDialog(
     }
 }
 
-@Composable
-private fun PlayerButton(label: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .clip(RoundedCornerShape(20.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .tvFocus(1.06f)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 12.dp)
-    ) {
-        Text(label, color = MaterialTheme.colorScheme.onBackground, fontSize = 15.sp)
-    }
-}
-
-/** 圆形控制按钮：filled=主色实心（播放/暂停），否则半透明白底。 */
+/** 圆形控制按钮：filled=主色实心（播放/暂停），否则半透明白底；焦点样式跟随主题 Token。 */
 @Composable
 private fun RoundCtrlButton(
     symbol: String,
@@ -412,17 +353,26 @@ private fun RoundCtrlButton(
     filled: Boolean,
     onClick: () -> Unit
 ) {
+    val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
     var focused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (focused) 1.1f else 1f, label = "ctrlScale")
+    val scale by animateFloatAsState(if (focused) tokens.focusScale else 1f, label = "ctrlScale")
     val primary = MaterialTheme.colorScheme.primary
     Box(
         modifier = Modifier
             .size(size)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .graphicsLayer {
+                scaleX = scale; scaleY = scale
+                alpha = if (tokens.focusBrightnessOnly) (if (focused) 1f else 0.62f) else 1f
+                if (tokens.focusGlow > 0.dp) {
+                    shadowElevation = if (focused) tokens.focusGlow.toPx() else 0f
+                    ambientShadowColor = primary
+                    spotShadowColor = primary
+                }
+            }
             .clip(CircleShape)
             .background(if (filled) primary else Color(0x22FFFFFF))
             .drawBehind { if (focused) drawRect(primary.copy(alpha = 0.3f)) }
-            .border(if (focused) 2.dp else 0.dp, primary, CircleShape)
+            .border(if (focused) 3.dp else 0.dp, tokens.focusBorder, CircleShape)
             .onFocusChanged { focused = it.isFocused }
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
@@ -515,10 +465,10 @@ private fun SeekBar(
     }
 }
 
-private fun playModeLabel(mode: PlayMode): String = when (mode) {
-    PlayMode.ORDER -> "🔁 顺序"
-    PlayMode.LOOP_ONE -> "🔂 单曲循环"
-    PlayMode.SHUFFLE -> "🔀 随机"
+private fun playModeIcon(mode: PlayMode): String = when (mode) {
+    PlayMode.ORDER -> "🔁"
+    PlayMode.LOOP_ONE -> "🔂"
+    PlayMode.SHUFFLE -> "🔀"
 }
 
 private fun format(ms: Long): String {
