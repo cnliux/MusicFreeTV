@@ -30,6 +30,7 @@ class TvMusicApp : Application() {
     override fun onCreate() {
         super.onCreate()
 
+        com.tvmusic.ui.theme.ThemeManager.init(this)
         store = PluginStore(this)
         playback = PlaybackStore(this)
         runtime = PluginRuntime.create(this, store)

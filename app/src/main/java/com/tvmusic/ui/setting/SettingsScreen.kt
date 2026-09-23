@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -24,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -217,6 +219,53 @@ fun SettingsScreen(
                                 color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
                                 else MaterialTheme.colorScheme.onSurfaceVariant,
                                 fontSize = 14.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        item(key = "theme") {
+            SectionHeader("界面主题")
+            SettingsCard {
+                Text(
+                    "选择配色方案，立即生效（手机远程管理页同步切换）。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(bottom = 10.dp)
+                )
+                val currentTheme by com.tvmusic.ui.theme.ThemeManager.current.collectAsState()
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    com.tvmusic.ui.theme.ThemeManager.themes.forEach { t ->
+                        val selected = t.id == currentTheme.id
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(
+                                    if (selected) MaterialTheme.colorScheme.primaryContainer
+                                    else MaterialTheme.colorScheme.surfaceVariant
+                                )
+                                .tvFocus()
+                                .clickable { com.tvmusic.ui.theme.ThemeManager.set(t.id) }
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(t.scheme.primary)
+                            )
+                            Text(
+                                t.name,
+                                fontSize = 12.sp,
+                                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 6.dp)
                             )
                         }
                     }

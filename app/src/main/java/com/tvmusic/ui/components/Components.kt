@@ -74,9 +74,16 @@ fun Modifier.tvFocus(scaleOnFocus: Float = 1.06f): Modifier {
     return this
         .onFocusChanged { focused = it.isFocused }
         .drawBehind {
-            // 焦点高亮：整个区域覆盖一层主色半透明背景（drawBehind 画在本节点之前的
-            // background 之上、内容之下，所以要求使用处 clip/background 在 tvFocus 之前）
-            if (focused) drawRect(ring.copy(alpha = 0.32f))
+            // 焦点高亮：遥控器聚焦时整块填充主色渐变，形成明显的"变色"反馈。
+            // drawBehind 画在本节点之前的 background 之上、内容之下，
+            // 因此使用处应把 clip/background 放在 tvFocus 之前。
+            if (focused) {
+                drawRect(
+                    brush = Brush.linearGradient(
+                        listOf(ring.copy(alpha = 0.55f), ring.copy(alpha = 0.38f))
+                    )
+                )
+            }
         }
         .border(if (focused) 2.dp else 0.dp, ring, RoundedCornerShape(12.dp))
         .graphicsLayer { scaleX = scale; scaleY = scale; alpha = if (focused) 1f else 0.9f }

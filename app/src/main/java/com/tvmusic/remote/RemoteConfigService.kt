@@ -229,6 +229,19 @@ class RemoteConfigService : Service() {
             method == "GET" && path == "/api/player" -> {
                 respond(socket, 200, playerStatusJson().toString())
             }
+            method == "GET" && path == "/api/themes" -> {
+                respond(socket, 200, themesJson().toString())
+            }
+            method == "POST" && path == "/api/theme" -> {
+                val body = readBody(input, headers)
+                val id = runCatching { JSONObject(body).optString("id", "") }.getOrDefault("")
+                val ok = com.tvmusic.ui.theme.ThemeManager.set(id)
+                if (!ok) {
+                    respond(socket, 400, JSONObject().put("ok", false).put("error", "unknown theme id").toString())
+                    return
+                }
+                respond(socket, 200, JSONObject().put("ok", true).put("current", id).toString())
+            }
             method == "POST" && path == "/api/player/playpause" -> {
                 com.tvmusic.player.PlayerManager.playPause()
                 respond(socket, 200, JSONObject().put("ok", true).toString())
@@ -376,6 +389,18 @@ class RemoteConfigService : Service() {
             arr.put(JSONObject().put("url", s.url).put("addedAt", s.addedAt))
         }
         return JSONObject().put("ok", true).put("subscriptions", arr)
+    }
+
+    /** 主题列表与当前值，供远程页面渲染主题选择器。 */
+    private fun themesJson(): JSONObject {
+        val arr = JSONArray()
+        com.tvmusic.ui.theme.ThemeManager.themes.forEach { t ->
+            arr.put(JSONObject().put("id", t.id).put("name", t.name).put("accent", t.accent).put("bg", t.bg))
+        }
+        return JSONObject()
+            .put("ok", true)
+            .put("current", com.tvmusic.ui.theme.ThemeManager.currentId())
+            .put("themes", arr)
     }
 
     private fun playerStatusJson(): JSONObject {
@@ -846,6 +871,11 @@ private val PAGE_HTML = """<!DOCTYPE html>
   <!-- 管理 -->
   <section class="page" id="page-manage">
     <div class="card">
+      <h2>界面主题</h2>
+      <div class="chips" id="themeBar"></div>
+      <div class="muted">选择后立即应用到电视端与本页。</div>
+    </div>
+    <div class="card">
       <h2>订阅源</h2>
       <div id="subList"></div>
       <div class="row" style="border:none;padding:10px 0 0;">
@@ -1220,6 +1250,43 @@ function uninstallPlugin(i) {
   post('/api/plugins/uninstall', { name: p.name }).then(loadPlugins);
 }
 
+/* ---------------- 主题 ---------------- */
+var themes = [], curTheme = null;
+function applyTheme(id) {
+  var t = themes.filter(function (x) { return x.id === id; })[0];
+  if (!t) return;
+  var r = document.documentElement.style;
+  r.setProperty('--accent', '#' + t.accent);
+  r.setProperty('--bg', '#' + t.bg);
+  // 强调色的半透明派生（用于 range 轨道等）
+  curTheme = id;
+  renderThemeBar();
+}
+function renderThemeBar() {
+  var bar = el('themeBar');
+  bar.innerHTML = '';
+  themes.forEach(function (t) {
+    var chip = document.createElement('span');
+    chip.className = 'chip' + (t.id === curTheme ? ' on' : '');
+    chip.style.borderColor = '#' + t.accent;
+    chip.innerHTML = '<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:#' + t.accent + ';"></span>' + esc(t.name);
+    chip.onclick = function () { setTheme(t.id); };
+    bar.appendChild(chip);
+  });
+}
+function setTheme(id) {
+  post('/api/theme', { id: id }).then(function () {
+    applyTheme(id);
+    toast('已切换主题');
+  }).catch(function () { toast('切换失败'); });
+}
+function loadThemes() {
+  api('/api/themes').then(function (d) {
+    themes = d.themes || [];
+    applyTheme(d.current || (themes[0] && themes[0].id));
+  }).catch(function () {});
+}
+
 /* ---------------- 状态与轮询 ---------------- */
 function loadStatus() {
   api('/api/status').then(function (d) {
@@ -1228,6 +1295,7 @@ function loadStatus() {
 }
 
 loadStatus();
+loadThemes();
 loadPlayer();
 loadFavLists();
 loadSubs();
