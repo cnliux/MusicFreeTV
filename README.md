@@ -156,11 +156,12 @@ JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17.0.x
 # 构建 Debug APK（可安装；用于发布版资产）
 ./gradlew :app:assembleDebug
 
-# 构建 Release APK（当前未配置签名，需自行补 signingConfig）
+# 构建 Release APK（本地已配置 keystore.properties 时自动签名）
 ./gradlew :app:assembleRelease
 ```
 
-> 发布版（GitHub Release）当前附带 **Debug APK**（已用 debug 签名，可直接安装到电视盒）。
+> 发布版（GitHub Release）附带 **已签名的 Release APK**（R8 混淆 + release 证书，可直接安装）。
+> Release 签名配置：本机存在 `keystore.properties`（含 `storeFile/storePassword/keyAlias/keyPassword`）与 `keystore/release.jks`，二者均已加入 `.gitignore` 不随仓库分发；克隆者如无该文件，`assembleRelease` 将生成未签名 APK。
 
 ---
 

@@ -16,3 +16,7 @@ local.properties
 /annotations.zip
 /classes.jar
 /proguard.txt
+
+# release signing (never commit)
+/keystore.properties
+/keystore/

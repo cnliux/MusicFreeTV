@@ -8,12 +8,30 @@ android {
     namespace = "com.tvmusic"
     compileSdk = 35
 
+    signingConfigs {
+        create("release") {
+            val f = rootProject.file("keystore.properties")
+            if (f.exists() && f.isFile) {
+                val lines = f.readLines().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }
+                fun prop(key: String): String? =
+                    lines.firstOrNull { it.startsWith("$key=") }?.substringAfter("=")?.trim()
+                val sf = prop("storeFile")?.let { rootProject.file(it) }
+                if (sf != null && sf.exists() && sf.isFile) {
+                    storeFile = sf
+                    storePassword = prop("storePassword")
+                    keyAlias = prop("keyAlias")
+                    keyPassword = prop("keyPassword")
+                }
+            }
+        }
+    }
+
     defaultConfig {
         applicationId = "com.tvmusic"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
 
         vectorDrawables { useSupportLibrary = true }
 
@@ -44,6 +62,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 

@@ -1397,6 +1397,9 @@ private val PAGE_HTML = """<!DOCTYPE html>
       </div>
       <div class="muted" style="padding:6px 0 4px;">音源优先级（越靠上越先搜索、结果越靠前）</div>
       <div id="cfgOrderBox"></div>
+      <div class="row" style="border:none;padding:4px 0 0;">
+        <button class="ghost small" onclick="resetCfgOrder()">重置为插件顺序</button>
+      </div>
       <div class="row" style="border:none;padding:8px 0 0;">
         <button class="small" onclick="saveSearchCfg()">保存搜索设置</button>
       </div>
@@ -1652,7 +1655,7 @@ function skipTo(i) {
 }
 
 /* ---------------- 搜索配置与筛选 ---------------- */
-var cfgOrder = [], srcNames = [], srcSel = {};
+var cfgOrder = [], srcNames = [], knownNames = [], srcSel = {}, orderUI = [];
 var SORT_OPTS = [['default', '默认（音源顺序）'], ['duration', '时长'], ['title', '歌名'], ['artist', '歌手']];
 function bindOpts(sel, opts, val) {
   if (!sel) return null;
@@ -1666,21 +1669,31 @@ function bindOpts(sel, opts, val) {
   sel.value = val;
   return sel.value;
 }
+function srcOrderFull() {
+  var out = cfgOrder.slice();
+  knownNames.forEach(function (n) { if (out.indexOf(n) < 0) out.push(n); });
+  return out;
+}
 function loadSearchCfg() {
-  return api('/api/search/config').then(function (d) {
+  var cfgP = api('/api/search/config');
+  return api('/api/plugins').then(function (pd) {
+    var list = pd.plugins || [];
+    srcNames = list.filter(function (p) { return p.enabled && !p.loadError; })
+      .map(function (p) { return p.platform || p.name; })
+      .filter(function (n, i, a) { return n && a.indexOf(n) === i; });
+    knownNames = list.map(function (p) { return p.platform || p.name; })
+      .filter(function (n, i, a) { return n && a.indexOf(n) === i; });
+    return cfgP;
+  }).then(function (d) {
     cfgOrder = d.sourceOrder || [];
     bindOpts(el('cfgSortBy'), SORT_OPTS, d.sortBy);
     if (el('cfgSortAsc')) el('cfgSortAsc').value = d.asc ? '1' : '0';
     if (el('cfgMaxTotal')) el('cfgMaxTotal').value = d.maxTotal || 60;
     bindOpts(el('sortSel'), SORT_OPTS, d.sortBy);
     if (el('ascSel')) el('ascSel').value = d.asc ? '1' : '0';
+    orderUI = srcOrderFull();
+    renderSrcBar();
     renderCfgOrder();
-    return api('/api/plugins').then(function (pd) {
-      srcNames = (pd.plugins || []).filter(function (p) { return p.enabled && !p.loadError; })
-        .map(function (p) { return p.platform || p.name; })
-        .filter(function (n, i, a) { return n && a.indexOf(n) === i; });
-      renderSrcBar();
-    });
   }).catch(function () { });
 }
 function renderSrcBar() {
@@ -1694,8 +1707,12 @@ function renderSrcBar() {
     chip.onclick = cb;
     bar.appendChild(chip);
   };
+  var sorted = srcNames.slice().sort(function (a, b) {
+    var ia = orderUI.indexOf(a), ib = orderUI.indexOf(b);
+    return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+  });
   mk('全部', Object.keys(srcSel).length === 0, function () { srcSel = {}; renderSrcBar(); });
-  srcNames.forEach(function (n) {
+  sorted.forEach(function (n) {
     mk(n, !!srcSel[n], function () {
       if (srcSel[n]) delete srcSel[n]; else srcSel[n] = 1;
       renderSrcBar();
@@ -1705,30 +1722,41 @@ function renderSrcBar() {
 function renderCfgOrder() {
   var box = el('cfgOrderBox');
   if (!box) return;
-  if (!cfgOrder.length) { box.innerHTML = '<div class="muted">暂无可配置音源（请先启用可搜索的插件）</div>'; return; }
+  if (!orderUI.length) { box.innerHTML = '<div class="muted">未启用任何可搜索插件（请先在下方“插件”中启用）</div>'; return; }
   var html = '';
-  cfgOrder.forEach(function (p, i) {
+  orderUI.forEach(function (p, i) {
+    var tag = '';
+    if (knownNames.indexOf(p) < 0) tag = '<span class="badge off">已卸载</span>';
+    else if (srcNames.indexOf(p) < 0) tag = '<span class="badge off">已停用</span>';
     html += '<div class="row" style="border:none;padding:3px 0;">' +
-      '<span class="grow ellip">' + (i + 1) + '. ' + esc(p) + '</span>' +
+      '<span class="grow ellip">' + (i + 1) + '. ' + esc(p) + ' ' + tag + '</span>' +
       '<button class="ghost small" onclick="moveCfgOrder(' + i + ',-1)">↑</button>' +
-      '<button class="ghost small" onclick="moveCfgOrder(' + i + ',1)">↓</button></div>';
+      '<button class="ghost small" onclick="moveCfgOrder(' + i + ',1)">↓</button>' +
+      (knownNames.indexOf(p) < 0 ? '<button class="danger small" onclick="removeOrderEntry(' + i + ')" title="从优先级中移除">✕</button>' : '') + '</div>';
   });
   box.innerHTML = html;
 }
 function moveCfgOrder(i, dir) {
   var j = i + dir;
-  if (j < 0 || j >= cfgOrder.length) return;
-  var t = cfgOrder[i]; cfgOrder[i] = cfgOrder[j]; cfgOrder[j] = t;
+  if (j < 0 || j >= orderUI.length) return;
+  var t = orderUI[i]; orderUI[i] = orderUI[j]; orderUI[j] = t;
   renderCfgOrder();
 }
+function removeOrderEntry(i) {
+  orderUI.splice(i, 1);
+  renderCfgOrder();
+}
+function resetCfgOrder() {
+  orderUI = knownNames.slice();
+  renderCfgOrder();
+  toast('已重置为插件顺序（尚未保存，请点「保存搜索设置」）');
+}
 function orderedCfg() {
-  var order = cfgOrder.filter(function (n) { return srcNames.indexOf(n) >= 0; });
-  srcNames.forEach(function (n) { if (order.indexOf(n) < 0) order.push(n); });
-  return order;
+  return orderUI.slice();
 }
 function saveSearchCfg() {
   var order = orderedCfg();
-  cfgOrder = order;
+  cfgOrder = order; orderUI = order;
   post('/api/search/config', {
     sourceOrder: order,
     sortBy: el('cfgSortBy').value,
@@ -2012,13 +2040,13 @@ function loadPlugins() {
 function togglePlugin(i) {
   var p = (window._plugins || [])[i];
   if (!p) return;
-  post('/api/plugins/toggle', { name: p.name, enabled: !p.enabled }).then(loadPlugins);
+  post('/api/plugins/toggle', { name: p.name, enabled: !p.enabled }).then(function () { loadPlugins(); loadSearchCfg(); });
 }
 function uninstallPlugin(i) {
   var p = (window._plugins || [])[i];
   if (!p) return;
   if (!confirm('卸载插件「' + p.platform + '」？')) return;
-  post('/api/plugins/uninstall', { name: p.name }).then(loadPlugins);
+  post('/api/plugins/uninstall', { name: p.name }).then(function () { loadPlugins(); loadSearchCfg(); });
 }
 
 /* ---------------- 主题 ---------------- */
