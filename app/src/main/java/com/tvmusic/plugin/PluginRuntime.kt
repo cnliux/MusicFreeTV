@@ -110,11 +110,29 @@ class PluginRuntime private constructor(
             stat.lastLatencyMs = now - startedAt
             if (error != null) {
                 stat.fails++
-                stat.lastError = (error.message ?: error.javaClass.simpleName).take(200)
+                stat.lastError = healthErrorText(error)
             } else {
                 stat.lastSuccessAtElapsed = now
             }
         }
+    }
+
+    /**
+     * 提炼可读的最近错误：去掉包装类名前缀与 JS 堆栈帧噪音。
+     * 原始文本形如 "com.tvmusic.runtime.PluginCallException:  at getMediaSource (<input>:605)"，
+     * 提炼为 "getMediaSource 失败（<input>:605）"；多行错误取首个非空行（通常含真实原因）。
+     */
+    private fun healthErrorText(error: Throwable): String {
+        val cause = (error as? java.util.concurrent.ExecutionException)?.cause ?: error
+        val raw = cause.message?.takeIf { it.isNotBlank() } ?: cause.javaClass.simpleName
+        var s = raw.lineSequence().map { it.trim() }
+            .firstOrNull { it.isNotEmpty() } ?: raw
+        s = s.replace(Regex("^com\\.tvmusic\\.runtime\\.PluginCallException:\\s*"), "")
+        val frame = Regex("^at\\s+(.+?)\\s*\\((\\S+)\\)$").find(s)
+        if (frame != null) {
+            s = "${frame.groupValues[1]} 失败（${frame.groupValues[2]}）"
+        }
+        return s.take(200)
     }
 
     /** 健康度快照（线程安全拷贝，按平台名排序）。 */
