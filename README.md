@@ -121,6 +121,40 @@ tvmusic://config?sub=<订阅地址>               # 添加订阅
 
 ---
 
+## JDK 17 配置
+
+本工程要求 **JDK 17** 构建（Gradle 8.10.2 运行、`compileOptions` / `kotlinOptions` 均指向 17）。Android Studio 自带 JBR 即 JDK 17，通常无需额外配置；若命令行构建报错，请按以下任一方式指定：
+
+**方式一（推荐）：使用 Android Studio 内置 JBR**
+- 已随 Android Studio 安装，路径一般为 `C:\Program Files\Android\Android Studio\jbr`。
+- 命令行使用：在环境变量中设置
+  ```
+  JAVA_HOME=C:\Program Files\Android\Android Studio\jbr
+  ```
+  或将上述路径写入 `gradle.properties`：
+  ```
+  org.gradle.java.home=C:/Program Files/Android/Android Studio/jbr
+  ```
+
+**方式二：独立安装 JDK 17（如 Temurin / Oracle）**
+- 下载安装后设置 `JAVA_HOME` 指向 JDK 17 根目录，例如：
+  ```
+  JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17.0.x
+  ```
+- 验证版本（必须为 `17.x`，大于或小于 17 均可能导致 Gradle/AGP 兼容性问题）：
+  ```
+  java -version
+  ```
+- 注意：本机若同时安装多个 JDK，`JAVA_HOME` 与 `org.gradle.java.home` 不可同时设置且指向不同版本，二者优先级高于 `PATH`。
+
+**方式三：在 Android Studio 内指定**
+- `File → Project Structure → SDK Location → JDK location` 选择 JDK 17 所在目录。
+- 或 `Settings → Build, Execution, Deployment → Build Tools → Gradle → Gradle JDK` 选择 17。
+
+> 注：Gradle 编译时 `org.gradle.java.home`（或 `JAVA_HOME`）决定 Gradle 守护进程使用哪个 JDK，必须为 **17**；工程源码层面的 Java/Kotlin target 已固定为 17，无需改动构建脚本。
+
+---
+
 ## 已知限制与待完善
 
 1. **歌单详情的分页加载**：部分插件 `importMusicSheet` 需分页参数；当前仅取第一页（page=1），大歌单需后续补充滚动加载。
