@@ -52,6 +52,9 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
     private var item: JSONObject = JSONObject()
     private var importUrl: String? = null
 
+    /** 当前详情页的来源插件名（收藏条目时写入 platform 字段用）。 */
+    val pluginName: String get() = plugin
+
     /** 记录确认未实现的方法，后续翻页不再重复尝试。 */
     private val notImplemented = mutableSetOf<String>()
 

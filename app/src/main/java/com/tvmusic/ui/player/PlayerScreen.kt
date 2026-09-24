@@ -77,6 +77,7 @@ fun PlayerScreen(onBack: () -> Unit) {
     val lists by playback.lists.collectAsState()
     var showFavDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     var showNameDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var showSleepDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
         // 背景：模糊封面 + 暗色蒙层
@@ -227,6 +228,22 @@ fun PlayerScreen(onBack: () -> Unit) {
                         PlayerManager.cyclePlayMode()
                     }
                     Spacer(Modifier.width(22.dp))
+                    // 倍速：点击循环 0.75/1/1.25/1.5/2.0，非 1x 时高亮
+                    RoundCtrlButton(
+                        speedLabel(state.speed),
+                        size = 52.dp,
+                        iconSize = 14.sp,
+                        filled = state.speed != 1f
+                    ) { PlayerManager.cycleSpeed() }
+                    Spacer(Modifier.width(22.dp))
+                    // 定时关闭：启用时显示剩余分钟
+                    RoundCtrlButton(
+                        if (state.sleepRemainingMs > 0) "${state.sleepRemainingMs / 60_000}m" else "🌙",
+                        size = 52.dp,
+                        iconSize = 16.sp,
+                        filled = state.sleepRemainingMs > 0
+                    ) { showSleepDialog = true }
+                    Spacer(Modifier.width(22.dp))
                     RoundCtrlButton("↩", size = 52.dp, iconSize = 22.sp, filled = false, onClick = onBack)
                 }
             }
@@ -241,6 +258,18 @@ fun PlayerScreen(onBack: () -> Unit) {
                 onDismiss = { showFavDialog = false },
                 onToggle = { id -> entry?.let { playback.toggleFavorite(it.raw, id) } },
                 onNewAlbum = { showNameDialog = true }
+            )
+        }
+        if (showSleepDialog) {
+            SleepTimerDialog(
+                currentMinutes = if (state.sleepRemainingMs > 0) {
+                    ((state.sleepRemainingMs + 59_999) / 60_000).toInt()
+                } else 0,
+                onDismiss = { showSleepDialog = false },
+                onSelect = { minutes ->
+                    PlayerManager.setSleepTimer(minutes)
+                    showSleepDialog = false
+                }
             )
         }
         if (showNameDialog) {
@@ -391,6 +420,70 @@ private fun FavAlbumDialog(
             }
         }
     }
+}
+
+/** 定时关闭选择弹层：关闭 / 15 / 30 / 45 / 60 / 90 分钟。 */
+@Composable
+private fun SleepTimerDialog(
+    currentMinutes: Int,
+    onDismiss: () -> Unit,
+    onSelect: (Int) -> Unit
+) {
+    val options = listOf(0 to "不开启", 15 to "15 分钟", 30 to "30 分钟", 45 to "45 分钟", 60 to "60 分钟", 90 to "90 分钟")
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xAA000000)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(360.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("定时关闭", fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface)
+            options.forEach { (minutes, label) ->
+                val active = minutes == currentMinutes || (minutes == 0 && currentMinutes == 0)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onSelect(minutes) }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        label,
+                        fontSize = 15.sp,
+                        color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                    )
+                    if (active) Text("✓", color = MaterialTheme.colorScheme.primary, fontSize = 15.sp)
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .padding(top = 6.dp)
+                    .align(Alignment.End)
+                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable(onClick = onDismiss)
+                    .padding(horizontal = 18.dp, vertical = 9.dp)
+            ) { Text("关闭", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp) }
+        }
+    }
+}
+
+/** 倍速按钮文案：1x 显示"倍速"，其余显示如"1.25x"。 */
+private fun speedLabel(speed: Float): String {
+    if (kotlin.math.abs(speed - 1f) < 0.01f) return "倍速"
+    val s = speed.toString().trimEnd('0').trimEnd('.')
+    return "${s}x"
 }
 
 /** 圆形控制按钮：filled=主色实心（播放/暂停），否则半透明白底；焦点样式跟随主题 Token。 */

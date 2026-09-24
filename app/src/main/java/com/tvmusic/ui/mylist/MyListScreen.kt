@@ -54,6 +54,9 @@ fun MyListScreen(
     // null = 播放历史；QUEUE_ID = 当前播放队列；其他 = 所选收藏专辑 id
     var selectedListId by remember { mutableStateOf<String?>(null) }
     var showNameDialog by remember { mutableStateOf<String?>(null) } // null=不显示；""=新建；其他=重命名的当前名称
+    // 批量管理模式：勾选条目后一次性删除（历史 / 收藏专辑通用）
+    var batchMode by remember { mutableStateOf(false) }
+    var checkedKeys by remember { mutableStateOf(setOf<String>()) }
 
     val queue = playerState.queue
     val isQueue = selectedListId == QUEUE_ID
@@ -62,6 +65,14 @@ fun MyListScreen(
         isQueue -> emptyList()
         selectedListId == null -> history
         else -> currentList?.items ?: emptyList()
+    }
+
+    // 条目稳定 key：与 PlaybackStore 主键同规则（platform+id，缺失时回退 标题+歌手）
+    fun itemKey(item: JSONObject): String {
+        val platform = item.optString("platform", "")
+        val id = item.optString("id", "")
+        return if (id.isNotBlank()) "$platform::$id"
+        else "$platform::${item.optString("title", "")}::${item.optString("artist", "")}"
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -102,6 +113,12 @@ fun MyListScreen(
             }
         }
 
+        // 切换页签时退出批量模式，避免勾选状态跨列表残留
+        androidx.compose.runtime.LaunchedEffect(selectedListId) {
+            batchMode = false
+            checkedKeys = emptySet()
+        }
+
         // 播放全部 + 当前专辑操作条（队列页签没有播放全部——它本身就是队列）
         if (!isQueue && list.isNotEmpty()) {
             Row(
@@ -109,21 +126,40 @@ fun MyListScreen(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.primary)
-                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                        .clickable { playAll(list) }
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    Text(
-                        "▶ 播放全部 (${list.size})",
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        fontSize = 14.sp
-                    )
+                if (!batchMode) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(MaterialTheme.colorScheme.primary)
+                            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                            .clickable { playAll(list) }
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Text(
+                            "▶ 播放全部 (${list.size})",
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            fontSize = 14.sp
+                        )
+                    }
                 }
-                if (currentList != null && currentList.id != PlaybackStore.DEFAULT_FAV_ID) {
+                SmallAction(if (batchMode) "取消多选" else "批量删除") {
+                    batchMode = !batchMode
+                    checkedKeys = emptySet()
+                }
+                if (batchMode) {
+                    SmallAction("全选") { checkedKeys = list.map(::itemKey).toSet() }
+                    if (checkedKeys.isNotEmpty()) {
+                        SmallAction("删除选中 (${checkedKeys.size})") {
+                            val targets = list.filter { itemKey(it) in checkedKeys }
+                            val lid = selectedListId
+                            if (lid != null) playback.removeFromList(lid, targets)
+                            else playback.removeHistory(targets)
+                            batchMode = false
+                            checkedKeys = emptySet()
+                        }
+                    }
+                }
+                if (!batchMode && currentList != null && currentList.id != PlaybackStore.DEFAULT_FAV_ID) {
                     SmallAction("重命名") { showNameDialog = currentList.name }
                     SmallAction("删除专辑") {
                         playback.removeList(currentList.id)
@@ -180,21 +216,24 @@ fun MyListScreen(
                     // 稳定 key：与 PlaybackStore 主键同规则（platform+id，缺失时回退 标题+歌手），
                     // 替代原先的 toString().hashCode()（Int 可碰撞，且类型与其他页面 key 不一致）；
                     // 历史记录入库时已按主键去重，列表内不会出现重复 key
-                    val platform = item.optString("platform", "")
-                    val id = item.optString("id", "")
-                    if (id.isNotBlank()) "$platform::$id"
-                    else "$platform::${item.optString("title", "")}::${item.optString("artist", "")}"
+                    itemKey(item)
                 }) { item ->
+                    val key = itemKey(item)
                     HistoryRow(
                         item = item,
-                        onPlay = { playItem(item) },
+                        onPlay = { if (!batchMode) playItem(item) },
                         onRemove = {
                             val lid = selectedListId
                             if (lid != null) {
                                 playback.toggleFavorite(item, lid)
                             }
                         },
-                        showRemove = selectedListId != null
+                        showRemove = !batchMode && selectedListId != null,
+                        batchMode = batchMode,
+                        checked = key in checkedKeys,
+                        onToggleCheck = {
+                            checkedKeys = if (key in checkedKeys) checkedKeys - key else checkedKeys + key
+                        }
                     )
                 }
             }
@@ -360,7 +399,10 @@ private fun HistoryRow(
     item: JSONObject,
     onPlay: () -> Unit,
     onRemove: () -> Unit,
-    showRemove: Boolean
+    showRemove: Boolean,
+    batchMode: Boolean = false,
+    checked: Boolean = false,
+    onToggleCheck: () -> Unit = {}
 ) {
     val title = item.optString("title", "未知")
     val artist = item.optString("artist", "")
@@ -371,12 +413,23 @@ private fun HistoryRow(
             .fillMaxWidth()
             .padding(horizontal = 28.dp, vertical = 6.dp)
             .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surface)
+            .background(
+                if (checked) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surface
+            )
             .tvFocus(shapeOverride = RoundedCornerShape(10.dp))
-            .clickable(onClick = onPlay)
+            .clickable(onClick = if (batchMode) onToggleCheck else onPlay)
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (batchMode) {
+            Text(
+                if (checked) "☑" else "☐",
+                fontSize = 20.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(end = 12.dp)
+            )
+        }
         Artwork(artwork, Modifier.size(48.dp))
         Column(Modifier.padding(start = 12.dp).weight(1f)) {
             Text(title, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurface,

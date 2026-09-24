@@ -383,7 +383,9 @@ fun MusicRow(
     title: String,
     artist: String,
     album: String,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    /** 行尾附加操作（如收藏按钮）；null 时不占位。 */
+    trailing: (@Composable androidx.compose.foundation.layout.RowScope.() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
@@ -426,6 +428,7 @@ fun MusicRow(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.width(180.dp)
         )
+        if (trailing != null) trailing()
     }
 }
 

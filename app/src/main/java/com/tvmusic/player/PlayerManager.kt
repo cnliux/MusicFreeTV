@@ -62,7 +62,11 @@ data class PlayerUiState(
     val volume: Int = 100,
     val playMode: PlayMode = PlayMode.ORDER,
     /** 当前条目含视频轨（由 ExoPlayer 轨道检测得出，仅真实视频流为 true）。 */
-    val isVideo: Boolean = false
+    val isVideo: Boolean = false,
+    /** 播放倍速（0.75 ~ 2.0）。 */
+    val speed: Float = 1f,
+    /** 定时关闭剩余毫秒；0 表示未启用。 */
+    val sleepRemainingMs: Long = 0L
 )
 
 /**
@@ -73,6 +77,7 @@ object PlayerManager {
 
     private const val KEY_QUALITY = "quality"
     private const val KEY_PLAY_MODE = "playMode"
+    private const val KEY_SPEED = "playbackSpeed"
 
     private var context: Context? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -158,7 +163,8 @@ object PlayerManager {
         val savedMode = runCatching {
             PlayMode.valueOf(qualityPrefs?.getString(KEY_PLAY_MODE, PlayMode.ORDER.name) ?: PlayMode.ORDER.name)
         }.getOrDefault(PlayMode.ORDER)
-        _uiState.value = _uiState.value.copy(playMode = savedMode)
+        val savedSpeed = qualityPrefs?.getFloat(KEY_SPEED, 1f) ?: 1f
+        _uiState.value = _uiState.value.copy(playMode = savedMode, speed = savedSpeed)
     }
 
     fun setQuality(q: String) {
@@ -185,9 +191,65 @@ object PlayerManager {
         val p = ExoPlayer.Builder(ctx)
             .setMediaSourceFactory(msf)
             .build()
+        p.setPlaybackSpeed(_uiState.value.speed)
         p.addListener(playerListener)
         player = p
         return p
+    }
+
+    // ---------------- 倍速 / 定时关闭 ----------------
+
+    /** 倍速档位：点击按钮循环切换。 */
+    val speedSteps = floatArrayOf(0.75f, 1f, 1.25f, 1.5f, 2f)
+
+    /** 循环切换倍速：0.75 → 1 → 1.25 → 1.5 → 2 → 0.75。 */
+    fun cycleSpeed(): Float {
+        val cur = _uiState.value.speed
+        val idx = speedSteps.indexOfFirst { kotlin.math.abs(it - cur) < 0.01f }
+        val next = speedSteps[((if (idx < 0) 1 else idx) + 1) % speedSteps.size]
+        setSpeed(next)
+        return next
+    }
+
+    fun setSpeed(s: Float) {
+        _uiState.value = _uiState.value.copy(speed = s)
+        qualityPrefs?.edit()?.putFloat(KEY_SPEED, s)?.apply()
+        Handler(Looper.getMainLooper()).post {
+            player?.setPlaybackSpeed(s)
+        }
+    }
+
+    /** 定时关闭到期时刻（elapsedRealtime 毫秒）；0 表示未启用。 */
+    private var sleepDeadline = 0L
+
+    private val sleepRunnable = object : Runnable {
+        override fun run() {
+            val dl = sleepDeadline
+            if (dl == 0L) return
+            val now = android.os.SystemClock.elapsedRealtime()
+            if (now >= dl) {
+                sleepDeadline = 0L
+                _uiState.value = _uiState.value.copy(sleepRemainingMs = 0L)
+                // 到点暂停播放（不销毁播放器，用户仍可手动继续）
+                Handler(Looper.getMainLooper()).post { player?.pause() }
+                return
+            }
+            _uiState.value = _uiState.value.copy(sleepRemainingMs = dl - now)
+            ticker.postDelayed(this, 1000)
+        }
+    }
+
+    /** 设置定时关闭：minutes<=0 取消。 */
+    fun setSleepTimer(minutes: Int) {
+        ticker.removeCallbacks(sleepRunnable)
+        if (minutes <= 0) {
+            sleepDeadline = 0L
+            _uiState.value = _uiState.value.copy(sleepRemainingMs = 0L)
+            return
+        }
+        sleepDeadline = android.os.SystemClock.elapsedRealtime() + minutes * 60_000L
+        _uiState.value = _uiState.value.copy(sleepRemainingMs = minutes * 60_000L)
+        ticker.postDelayed(sleepRunnable, 1000)
     }
 
     private val playerListener = object : Player.Listener {

@@ -157,6 +157,65 @@ class PlaybackStore(context: Context) {
         writeAsync(historyFile, emptyList())
     }
 
+    /** 批量删除历史记录（我的歌单批量管理模式用）。 */
+    fun removeHistory(items: List<JSONObject>) {
+        if (items.isEmpty()) return
+        val keys = items.map { primaryKey(it) }.toSet()
+        val list = _history.value.filterNot { primaryKey(it) in keys }
+        if (list.size == _history.value.size) return
+        _history.value = list
+        writeAsync(historyFile, list)
+    }
+
+    /** 从指定收藏专辑批量移除条目。 */
+    fun removeFromList(listId: String, items: List<JSONObject>) {
+        if (items.isEmpty()) return
+        val keys = items.map { primaryKey(it) }.toSet()
+        val lists = _lists.value.map { l ->
+            if (l.id != listId) l else l.copy(items = l.items.filterNot { primaryKey(it) in keys })
+        }
+        _lists.value = lists
+        saveListsDebounced()
+        publishMerged()
+    }
+
+    /**
+     * 将多个条目批量加入指定收藏专辑（歌单"全部收藏"用）。
+     * 已存在于专辑中的条目自动跳过；目标专辑不存在时落到默认专辑。
+     * @return 实际新增的条目数
+     */
+    fun addAllToList(listId: String, items: List<JSONObject>): Int {
+        if (items.isEmpty()) return 0
+        val lists = _lists.value.toMutableList()
+        var idx = lists.indexOfFirst { it.id == listId }
+        if (idx < 0) {
+            idx = lists.indexOfFirst { it.id == DEFAULT_FAV_ID }.coerceAtLeast(0)
+        }
+        val target = lists[idx]
+        val existing = target.items.mapTo(HashSet()) { primaryKey(it) }
+        var added = 0
+        val newItems = target.items.toMutableList()
+        for (item in items) {
+            if (existing.add(primaryKey(item))) {
+                newItems.add(item)
+                added++
+            }
+        }
+        if (added == 0) return 0
+        lists[idx] = target.copy(items = newItems)
+        _lists.value = lists
+        saveListsDebounced()
+        publishMerged()
+        return added
+    }
+
+    /** 全部收藏条目的主键集合（行级收藏状态判断用）。 */
+    fun favoriteKeys(): Set<String> {
+        val seen = HashSet<String>()
+        _lists.value.forEach { l -> l.items.forEach { seen.add(primaryKey(it)) } }
+        return seen
+    }
+
     // ---------------- 进程被杀恢复（resume.json） ----------------
 
     /**
