@@ -118,6 +118,7 @@ class RemoteConfigService : Service() {
         val method = parts[0].uppercase()
         // 去掉查询参数再路由，允许 /?v=xxx 做缓存刷新
         val path = parts[1].substringBefore('?')
+        val query = parts[1].substringAfter('?', "")
 
         // 读头
         val headers = mutableMapOf<String, String>()
@@ -138,7 +139,7 @@ class RemoteConfigService : Service() {
             }
             method == "GET" && path.startsWith("/api/img") -> {
                 val target = java.net.URLDecoder.decode(
-                    path.substringAfter("url=", ""), Charsets.UTF_8.name()
+                    query.substringAfter("url=", ""), Charsets.UTF_8.name()
                 )
                 proxyImage(socket, target)
             }
@@ -188,8 +189,8 @@ class RemoteConfigService : Service() {
                 respond(socket, 200, JSONObject().put("ok", true).put("message", "开始同步订阅").toString())
             }
             method == "GET" && path.startsWith("/api/search") -> {
-                val q = path.substringAfter("q=", "").substringBefore("&").trim()
-                val page = path.substringAfter("page=", "1").substringBefore("&").toIntOrNull()?.coerceAtLeast(1) ?: 1
+                val q = query.substringAfter("q=", "").substringBefore("&").trim()
+                val page = query.substringAfter("page=", "1").substringBefore("&").toIntOrNull()?.coerceAtLeast(1) ?: 1
                 if (q.isEmpty()) {
                     respond(socket, 400, JSONObject().put("ok", false).put("error", "missing q").toString())
                     return
@@ -332,9 +333,9 @@ class RemoteConfigService : Service() {
                 respond(socket, 200, JSONObject().put("ok", true).toString())
             }
             method == "GET" && path.startsWith("/api/fav/items") -> {
-                val id = path.substringAfter("id=", "").substringBefore("&")
-                val page = path.substringAfter("page=", "1").substringBefore("&").toIntOrNull()?.coerceAtLeast(1) ?: 1
-                val size = path.substringAfter("size=", "20").substringBefore("&").toIntOrNull()?.coerceIn(1, 200) ?: 20
+                val id = query.substringAfter("id=", "").substringBefore("&")
+                val page = query.substringAfter("page=", "1").substringBefore("&").toIntOrNull()?.coerceAtLeast(1) ?: 1
+                val size = query.substringAfter("size=", "20").substringBefore("&").toIntOrNull()?.coerceIn(1, 200) ?: 20
                 respond(socket, 200, favItemsJson(id, page, size).toString())
             }
             method == "POST" && path == "/api/fav/toggle" -> {
