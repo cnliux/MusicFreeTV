@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -23,7 +24,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
@@ -123,21 +126,26 @@ fun SearchScreen(
         ) {
             when (phase) {
                 is SearchPhase.Idle -> HistoryPanel(viewModel, history, query)
-                is SearchPhase.Searching -> {
-                    val s = phase as SearchPhase.Searching
-                    if (groups.isEmpty()) {
+                is SearchPhase.NoResult -> EmptyResult(message = (phase as SearchPhase.NoResult).message)
+                else -> {
+                    // Searching（已有渐进结果）与 Ready 共用同一 ResultsPanel 插槽，
+                    // 避免搜索进行中→完成切换阶段时丢失列表滚动与分页状态
+                    val s = phase as? SearchPhase.Searching
+                    if (s != null && groups.isEmpty()) {
                         LoadingBox(Modifier.weight(1f).fillMaxWidth())
                     } else {
                         Column(Modifier.weight(1f)) {
-                            Text(
-                                if (s.done < s.total)
-                                    "正在搜索 ${s.done}/${s.total} 个音源…（结果边到边显示）"
-                                else
-                                    "正在整理已返回的结果…",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)
-                            )
+                            if (s != null) {
+                                Text(
+                                    if (s.done < s.total)
+                                        "正在搜索 ${s.done}/${s.total} 个音源…（结果边到边显示）"
+                                    else
+                                        "正在整理已返回的结果…",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)
+                                )
+                            }
                             ResultsPanel(
                                 groups = groups,
                                 type = selectedType,
@@ -151,20 +159,6 @@ fun SearchScreen(
                             )
                         }
                     }
-                }
-                is SearchPhase.NoResult -> EmptyResult(message = (phase as SearchPhase.NoResult).message)
-                is SearchPhase.Ready -> {
-                    ResultsPanel(
-                        groups = groups,
-                        type = selectedType,
-                        loadingMore = loadingMore,
-                        onLoadMore = viewModel::loadMore,
-                        onRetry = viewModel::retry,
-                        onPlay = viewModel::play,
-                        onOpenDetail = { entry ->
-                            viewModel.openDetail(entry)?.let(onOpenDetail)
-                        }
-                    )
                 }
             }
         }
@@ -342,34 +336,69 @@ private fun ResultList(
     onPlay: (SearchEntry) -> Unit,
     onOpenDetail: (SearchEntry) -> Unit
 ) {
-    val rows = remember(groups, loadingMore) {
+    val rows = remember(groups, loadingMore, type) {
+        val used = HashSet<String>()
+        // 生成全局唯一的稳定 key：同一内容条目重复出现时追加序号，避免 LazyColumn key 冲突崩溃
+        fun uniqueKey(base: String): String {
+            var k = base
+            var n = 1
+            while (!used.add(k)) k = "$base#${n++}"
+            return k
+        }
         groups.flatMap { g ->
             buildList {
-                add(ResultRow.Header(g))
+                add(ResultRow.Header(uniqueKey("header_" + g.plugin), g))
                 if (type == "music") {
-                    g.entries.forEach { add(ResultRow.Song(it)) }
+                    g.entries.forEach { e ->
+                        // 歌曲条目：plugin + "_" + id（SearchEntry.id 已是 String）
+                        add(ResultRow.Song(uniqueKey("song_" + e.plugin + "_" + e.id), e))
+                    }
                 } else {
-                    add(ResultRow.Cards(g.entries))
+                    add(ResultRow.Cards(uniqueKey("cards_" + g.plugin), g.entries))
                 }
                 when {
-                    g.error != null -> add(ResultRow.Button("重试", g, isError = true))
+                    g.error != null -> add(
+                        ResultRow.Button(uniqueKey("btn_" + g.plugin), "重试", g, isError = true)
+                    )
                     !g.isEnd -> add(
                         ResultRow.Button(
+                            uniqueKey("btn_" + g.plugin),
                             if (loadingMore == g.plugin) "加载更多…" else "加载更多",
                             g,
                             isError = false
                         )
                     )
-                    else -> add(ResultRow.End(g.entries.size))
+                    else -> add(ResultRow.End(uniqueKey("end_" + g.plugin), g.entries.size))
                 }
             }
         }
     }
+
+    // 渲染分页（仅 UI 层，数据层不变）：初始只渲染前 50 行，滚动接近末尾时继续放量
+    var visibleCount by remember { mutableIntStateOf(INITIAL_VISIBLE_ROWS) }
+    // 新搜索发起时 ViewModel 会先清空 groups，此时重置分页进度
+    LaunchedEffect(groups) { if (groups.isEmpty()) visibleCount = INITIAL_VISIBLE_ROWS }
+
+    val listState = rememberLazyListState()
+    // 最后一个可见行进入已渲染区倒数 8 行内且还有未渲染行时，自动追加一页渲染量
+    // （TV 上焦点滚到列表末尾继续按向下键即触发；读 visibleCount 状态以便放量后重新判定）
+    val nearEnd by remember(rows) {
+        derivedStateOf {
+            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            last >= 0 && last >= visibleCount - 8 && visibleCount < rows.size
+        }
+    }
+    LaunchedEffect(nearEnd) {
+        if (nearEnd) visibleCount = (visibleCount + PAGE_STEP_ROWS).coerceAtMost(rows.size)
+    }
+
+    val shown = rows.take(visibleCount)
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 32.dp)
     ) {
-        items(rows) { row ->
+        items(shown, key = { it.key }) { row ->
             when (row) {
                 is ResultRow.Header -> {
                     val g = row.g
@@ -442,12 +471,19 @@ private fun cardSubtitle(e: SearchEntry): String = when (e.type) {
     else -> e.descriptionText.ifBlank { e.artist }.ifBlank { e.plugin }
 }
 
+/** 渲染分页常量：初始渲染行数 / 每次放量行数。 */
+private const val INITIAL_VISIBLE_ROWS = 50
+private const val PAGE_STEP_ROWS = 50
+
 private sealed interface ResultRow {
-    data class Header(val g: SearchGroup) : ResultRow
-    data class Song(val e: SearchEntry) : ResultRow
-    data class Cards(val entries: List<SearchEntry>) : ResultRow
-    data class Button(val label: String, val g: SearchGroup, val isError: Boolean) : ResultRow
-    data class End(val count: Int) : ResultRow
+    /** LazyColumn 稳定 key（构建时已做全局去重，前缀区分类型防止跨 items 块冲突）。 */
+    val key: String
+
+    data class Header(override val key: String, val g: SearchGroup) : ResultRow
+    data class Song(override val key: String, val e: SearchEntry) : ResultRow
+    data class Cards(override val key: String, val entries: List<SearchEntry>) : ResultRow
+    data class Button(override val key: String, val label: String, val g: SearchGroup, val isError: Boolean) : ResultRow
+    data class End(override val key: String, val count: Int) : ResultRow
 }
 
 @Composable

@@ -6,10 +6,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,9 +28,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tvmusic.plugin.PlatformHealth
 import com.tvmusic.ui.components.ErrorBox
 import com.tvmusic.ui.components.SectionHeader
 import com.tvmusic.ui.components.tvFocus
@@ -44,6 +48,8 @@ fun SettingsScreen(
     val message by viewModel.message.collectAsState()
     val expandedVars by viewModel.expandedVars.collectAsState()
     val drafts by viewModel.drafts.collectAsState()
+    val health by viewModel.health.collectAsState()
+    val healthByPlatform = remember(health) { health.associateBy { it.platform } }
 
     var subUrl by remember { mutableStateOf("") }
     var pluginUrl by remember { mutableStateOf("") }
@@ -122,15 +128,32 @@ fun SettingsScreen(
         item(key = "plugins") {
             SectionHeader("插件（${plugins.size}）")
             SettingsCard {
+                Text(
+                    "健康状态为本次运行统计（内存态，重启后清零）",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp
+                )
                 plugins.forEach { plugin ->
                     val info = plugin.info
+                    val h = info?.platform?.let { healthByPlatform[it] }
                     SettingsRow(
                         title = plugin.name.ifBlank { info?.platform ?: "?" },
-                        subtitle = listOf(
-                            info?.platform,
-                            plugin.version ?: info?.version,
-                            plugin.loadError?.let { "加载失败" }
-                        ).filterNotNull().joinToString(" · ")
+                        subtitle = buildString {
+                            if (h != null && h.calls > 0) {
+                                append("调用${h.calls}次/失败${h.fails} · ")
+                            }
+                            append(
+                                listOf(
+                                    info?.platform,
+                                    plugin.version ?: info?.version,
+                                    plugin.loadError?.let { "加载失败" }
+                                ).filterNotNull().joinToString(" · ")
+                            )
+                            if (h != null && h.fails > 0 && !h.lastError.isNullOrBlank()) {
+                                append(" · 最近错误：${h.lastError}")
+                            }
+                        },
+                        dotColor = healthDotColor(h)
                     ) {
                         if (plugin.loadError.isNullOrBlank() && info != null && info.userVariables.isNotEmpty()) {
                             val key = info.platform
@@ -469,6 +492,7 @@ private fun SettingsCard(content: @Composable () -> Unit) {
 private fun SettingsRow(
     title: String,
     subtitle: String,
+    dotColor: Color? = null,
     actions: @Composable () -> Unit
 ) {
     Row(
@@ -476,13 +500,25 @@ private fun SettingsRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(
-                title,
-                fontSize = 15.sp,
-                color = MaterialTheme.colorScheme.onBackground,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 健康度小圆点（绿/黄/红/灰），无统计信息时不占位
+                if (dotColor != null) {
+                    Box(
+                        Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(dotColor)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(
+                    title,
+                    fontSize = 15.sp,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             Text(
                 subtitle,
                 fontSize = 12.sp,
@@ -494,6 +530,17 @@ private fun SettingsRow(
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
             actions()
         }
+    }
+}
+
+/** 健康圆点颜色：成功率 ≥90% 绿、≥60% 黄、否则红；无统计或调用数为 0 显示灰。 */
+private fun healthDotColor(h: PlatformHealth?): Color {
+    if (h == null || h.calls <= 0) return Color(0xFF8A8A8A)
+    val rate = (h.calls - h.fails).toFloat() / h.calls.toFloat()
+    return when {
+        rate >= 0.9f -> Color(0xFF34D399)
+        rate >= 0.6f -> Color(0xFFFFB74D)
+        else -> Color(0xFFEF5350)
     }
 }
 

@@ -27,6 +27,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,6 +63,29 @@ fun HomeScreen(
     val loading by viewModel.loading.collectAsState()
     val availablePlugins by viewModel.availablePlugins.collectAsState()
     val currentPlatform by viewModel.currentPlatform.collectAsState()
+
+    // 「继续播放」对话框：进程被杀后保留的队列快照，询问是否从上次进度恢复。
+    // 本次会话内用户取消后不再打扰（rememberSaveable 随导航返回栈保留）。
+    val resumeAvailable by PlayerManager.resumeAvailable.collectAsState()
+    var resumeDismissed by rememberSaveable { mutableStateOf(false) }
+    if (resumeAvailable && !resumeDismissed) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { resumeDismissed = true },
+            title = { Text("继续播放") },
+            text = { Text("检测到上次未播完的内容，是否从上次进度继续播放？") },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    resumeDismissed = true
+                    PlayerManager.resumePlayback()
+                }) { Text("继续播放") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { resumeDismissed = true }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
 
     Row(Modifier.fillMaxSize()) {
         // 左侧常驻「正在播放」面板

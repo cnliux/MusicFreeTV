@@ -412,11 +412,6 @@ private fun RoundCtrlButton(
             .graphicsLayer {
                 scaleX = scale; scaleY = scale
                 alpha = if (tokens.focusBrightnessOnly) (if (focused) 1f else 0.62f) else 1f
-                if (tokens.focusGlow > 0.dp) {
-                    shadowElevation = if (focused) tokens.focusGlow.toPx() else 0f
-                    ambientShadowColor = primary
-                    spotShadowColor = primary
-                }
             }
             .clip(CircleShape)
             .background(if (filled) primary else Color(0x22FFFFFF))

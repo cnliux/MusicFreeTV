@@ -1,6 +1,8 @@
 package com.tvmusic.data
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -33,6 +35,7 @@ class PlaybackStore(context: Context) {
     private val historyFile = File(dir, "history.json")
     private val favoritesFile = File(dir, "favorites.json")
     private val listsFile = File(dir, "favorite_lists.json")
+    private val resumeFile = File(dir, "resume.json")
 
     /**
      * 磁盘写入统一放到单线程后台执行（保序）：
@@ -50,6 +53,20 @@ class PlaybackStore(context: Context) {
 
     private fun saveListsAsync(lists: List<FavList>) {
         writeExecutor.execute { saveLists(lists) }
+    }
+
+    /**
+     * 收藏列表写盘防抖：400ms 内的多次增删改合并为一次落盘。
+     * 执行时再取最新内存快照（[saveListsRunnable] 读 [_lists].value），中间态不写盘。
+     */
+    private val debounceHandler = Handler(Looper.getMainLooper())
+    private val saveListsRunnable = Runnable {
+        writeExecutor.execute { saveLists(_lists.value) }
+    }
+
+    private fun saveListsDebounced() {
+        debounceHandler.removeCallbacks(saveListsRunnable)
+        debounceHandler.postDelayed(saveListsRunnable, 400)
     }
 
     private val _history = MutableStateFlow<List<JSONObject>>(emptyList())
@@ -140,6 +157,44 @@ class PlaybackStore(context: Context) {
         writeAsync(historyFile, emptyList())
     }
 
+    // ---------------- 进程被杀恢复（resume.json） ----------------
+
+    /**
+     * 保存播放恢复快照：{queue:[原始条目raw数组], index:int, positionMs:long}。
+     * 走统一后台线程落盘（writeAsync 同款保序语义）。
+     */
+    fun saveResume(json: JSONObject) {
+        writeExecutor.execute {
+            try {
+                resumeFile.writeText(json.toString(), Charsets.UTF_8)
+            } catch (e: Exception) {
+                Log.w("PlaybackStore", "save resume: ${e.message}")
+            }
+        }
+    }
+
+    /** 同步读取恢复快照；仅启动时在 IO 线程调用（文件很小，读到即整份返回）。 */
+    fun loadResume(): JSONObject? {
+        if (!resumeFile.exists()) return null
+        return try {
+            JSONObject(resumeFile.readText(Charsets.UTF_8))
+        } catch (e: Exception) {
+            Log.w("PlaybackStore", "load resume: ${e.message}")
+            null
+        }
+    }
+
+    /** 清除恢复快照（恢复完成 / 队列清空后调用）。 */
+    fun clearResume() {
+        writeExecutor.execute {
+            try {
+                if (resumeFile.exists()) resumeFile.delete()
+            } catch (e: Exception) {
+                Log.w("PlaybackStore", "clear resume: ${e.message}")
+            }
+        }
+    }
+
     // ---------------- 收藏专辑 ----------------
 
     /** 该曲目是否收藏在任意专辑中。 */
@@ -188,7 +243,7 @@ class PlaybackStore(context: Context) {
     fun removeFavorite(item: JSONObject) {
         val key = primaryKey(item)
         _lists.value = _lists.value.map { l -> l.copy(items = l.items.filterNot { primaryKey(it) == key }) }
-        saveListsAsync(_lists.value)
+        saveListsDebounced()
         publishMerged()
     }
 
@@ -199,7 +254,7 @@ class PlaybackStore(context: Context) {
         _lists.value.firstOrNull { it.name == trimmed }?.let { return it.id }
         val id = "fav_" + System.currentTimeMillis().toString(36)
         _lists.value = _lists.value + FavList(id, trimmed, emptyList())
-        saveListsAsync(_lists.value)
+        saveListsDebounced()
         publishMerged()
         return id
     }
@@ -208,7 +263,7 @@ class PlaybackStore(context: Context) {
     fun removeList(id: String) {
         if (id == DEFAULT_FAV_ID) return
         _lists.value = _lists.value.filterNot { it.id == id }
-        saveListsAsync(_lists.value)
+        saveListsDebounced()
         publishMerged()
     }
 
@@ -218,14 +273,14 @@ class PlaybackStore(context: Context) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
         _lists.value = _lists.value.map { if (it.id == id) it.copy(name = trimmed) else it }
-        saveListsAsync(_lists.value)
+        saveListsDebounced()
         publishMerged()
     }
 
     /** 整体替换收藏专辑（导入配置用）。 */
     fun replaceAllLists(lists: List<FavList>) {
         _lists.value = lists
-        saveListsAsync(lists)
+        saveListsDebounced()
         publishMerged()
     }
 

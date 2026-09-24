@@ -96,11 +96,8 @@ fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false, shap
                 tokens.focusBrightnessOnly -> if (focused) 1f else 0.62f
                 else -> if (focused) 1f else 0.92f
             }
-            if (tokens.focusGlow > 0.dp) {
-                shadowElevation = if (focused) tokens.focusGlow.toPx() else 0f
-                ambientShadowColor = glow
-                spotShadowColor = glow
-            }
+            // 不再使用 shadowElevation 做"发光"：elevation 模拟顶部光源，
+            // 阴影只会向下偏移，在深色背景上表现为难看的底部阴影。
         }
         .drawBehind {
             if (focused) drawRect(glow.copy(alpha = if (tokens.focusBrightnessOnly) 0.08f else 0.14f))

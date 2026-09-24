@@ -4,11 +4,15 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tvmusic.core.TvMusicApp
 import com.tvmusic.data.PluginRecord
+import com.tvmusic.plugin.PlatformHealth
 import com.tvmusic.plugin.PluginRepository
+import com.tvmusic.plugin.PluginRuntime
 import com.tvmusic.remote.RemoteConfigService
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class SettingsViewModel(app: TvMusicApp) : ViewModel() {
@@ -29,6 +33,26 @@ class SettingsViewModel(app: TvMusicApp) : ViewModel() {
     /** pluginKey -> (varKey -> 草稿值) */
     private val _drafts = MutableStateFlow<Map<String, Map<String, String>>>(emptyMap())
     val drafts: StateFlow<Map<String, Map<String, String>>> = _drafts.asStateFlow()
+
+    /** 各平台健康度快照（本次运行内存统计，按平台名排序）。 */
+    private val _health = MutableStateFlow<List<PlatformHealth>>(emptyList())
+    val health: StateFlow<List<PlatformHealth>> = _health.asStateFlow()
+
+    init {
+        // 进入设置页立即取一次快照，之后定时刷新（健康度是内存态，随时变化）
+        viewModelScope.launch {
+            while (isActive) {
+                refreshHealth()
+                delay(3_000L)
+            }
+        }
+    }
+
+    /** 读取 PluginRuntime 的平台健康度快照（运行时未初始化时静默跳过）。 */
+    private fun refreshHealth() {
+        val runtime = runCatching { PluginRuntime.get() }.getOrNull() ?: return
+        _health.value = runtime.healthSnapshot()
+    }
 
     /** 手机/电脑浏览器直接打开的【管理页】地址 */
     val remoteManageUrl: String get() =

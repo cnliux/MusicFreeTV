@@ -1,7 +1,9 @@
 package com.tvmusic.core
 
+import android.app.Activity
 import android.app.Application
 import android.content.Context
+import android.os.Bundle
 import android.util.Log
 import com.tvmusic.data.PlaybackStore
 import com.tvmusic.data.PluginStore
@@ -40,6 +42,26 @@ class TvMusicApp : Application() {
         PlayerManager.init(this)
         PlayerManager.attach(runtime)
         PlayerManager.attachPlaybackStore(playback)
+        // 启动时异步读取上次的播放快照（供首页「继续播放」对话框）
+        PlayerManager.loadResumeAsync()
+
+        // 应用退出钩子：Application 没有可靠的 onDestroy，改用"最后一个 Activity 停止"
+        // 作为退出/切后台时机，立即落盘播放恢复快照（1s 防抖等不及）
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            private var startedCount = 0
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityStarted(activity: Activity) {
+                startedCount++
+            }
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivityStopped(activity: Activity) {
+                startedCount--
+                if (startedCount <= 0) PlayerManager.flushResumeNow()
+            }
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        })
 
         // 插件订阅源：不留任何默认地址。用户自行添加（插件设置 / web 控制台 / 设备上的 plugin_sources.* 文件）。
         // 这里只做“读取”：若设备上存在用户放置的 plugin_sources 文件，则幂等补全到订阅列表。

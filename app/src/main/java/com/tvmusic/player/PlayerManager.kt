@@ -113,11 +113,13 @@ object PlayerManager {
     /**
      * 统一处理播放失败：记录错误并自动跳到队列下一曲。
      * 单曲循环 / 队列只剩一首时不跳，避免原地打转。
+     * @param autoSkip false 时只提示不自动跳曲（如 FLV 这类换一首也无法解决的硬限制）。
      */
-    private fun reportPlayError(message: String) {
+    private fun reportPlayError(message: String, autoSkip: Boolean = true) {
         val st = _uiState.value
         _uiState.value = st.copy(error = message, buffering = false)
         android.util.Log.w("PlayerManager", "play error: $message (streak=$errorStreak)")
+        if (!autoSkip) return
         if (st.queue.size <= 1 || st.playMode == PlayMode.LOOP_ONE) return
         if (errorStreak >= st.queue.size) {
             android.util.Log.w("PlayerManager", "too many consecutive errors, stop auto-skip")
@@ -128,6 +130,17 @@ object PlayerManager {
         Handler(Looper.getMainLooper()).postDelayed({
             if (_uiState.value.error != null) next()
         }, 1200)
+    }
+
+    /** 按错误码大类转译成用户可读提示（DRM / IO / 解码，其余保持原始码名）。 */
+    private fun friendlyPlaybackError(error: androidx.media3.common.PlaybackException): String {
+        val name = error.errorCodeName
+        return when {
+            name.startsWith("ERROR_CODE_DRM") -> "加密内容（DRM），设备不支持播放"
+            name.startsWith("ERROR_CODE_IO") -> "网络错误或音源不可用"
+            name.startsWith("ERROR_CODE_DECODING") -> "解码失败，音频/视频格式不支持"
+            else -> "播放失败：$name"
+        }
     }
 
     /** 音质档位：插件 getMediaSource 的第二个参数。standard/high/low/super 等。 */
@@ -174,7 +187,6 @@ object PlayerManager {
             .build()
         p.addListener(playerListener)
         player = p
-        startTicker()
         return p
     }
 
@@ -182,6 +194,11 @@ object PlayerManager {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             if (isPlaying) errorStreak = 0
             _uiState.value = _uiState.value.copy(isPlaying = isPlaying)
+            // 事件驱动 ticker：仅播放中周期刷新；暂停/停止时停表并做一次最终刷新，
+            // 把最后的进度/歌词行写进 uiState，避免 UI 停在旧帧。
+            if (isPlaying) startTicker() else stopTickerWithFinalRefresh()
+            // 暂停也是一次"该快照了"的时点（防抖落盘）
+            if (!isPlaying) scheduleResumeSave()
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -197,7 +214,16 @@ object PlayerManager {
         }
 
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-            reportPlayError("播放失败：${error.errorCodeName}")
+            reportPlayError(friendlyPlaybackError(error))
+        }
+
+        /** seek 等位置跳变：立即刷一次状态，不必等下一个 ticker 周期。 */
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int
+        ) {
+            refreshTickState()
         }
 
         /**
@@ -227,23 +253,42 @@ object PlayerManager {
         }
     }
 
+    // ---------------- 进度刷新 ticker（事件驱动） ----------------
+
+    /**
+     * 事件驱动 ticker：只在"正在播放"时按 1s 周期刷新进度/歌词行；
+     * 暂停由 onIsPlayingChanged(false) 停表并做最终刷新，seek 由
+     * onPositionDiscontinuity 立即刷一次，避免常驻空转。
+     */
+    private val tickRunnable = object : Runnable {
+        override fun run() {
+            refreshTickState()
+            // 仅在播放中续期；暂停/空闲时不排下一拍
+            if (player?.isPlaying == true) ticker.postDelayed(this, 1000)
+        }
+    }
+
     private fun startTicker() {
-        ticker.removeCallbacksAndMessages(null)
-        ticker.post(object : Runnable {
-            override fun run() {
-                val p = player
-                if (p != null) {
-                    val st = _uiState.value
-                    _uiState.value = st.copy(
-                        durationMs = p.duration,
-                        positionMs = p.currentPosition,
-                        lrcIndex = findLrcIndex(st.lrcLines, p.currentPosition),
-                        volume = (p.volume * 100).toInt()
-                    )
-                }
-                ticker.postDelayed(this, 500)
-            }
-        })
+        ticker.removeCallbacks(tickRunnable)
+        ticker.postDelayed(tickRunnable, 1000)
+    }
+
+    /** 停掉 ticker 并做一次最终状态刷新（暂停/停止时调用）。 */
+    private fun stopTickerWithFinalRefresh() {
+        ticker.removeCallbacks(tickRunnable)
+        refreshTickState()
+    }
+
+    /** 把播放器当前进度/歌词行/音量刷进 uiState（ticker 周期与 seek/discontinuity 共用）。 */
+    private fun refreshTickState() {
+        val p = player ?: return
+        val st = _uiState.value
+        _uiState.value = st.copy(
+            durationMs = p.duration,
+            positionMs = p.currentPosition,
+            lrcIndex = findLrcIndex(st.lrcLines, p.currentPosition),
+            volume = (p.volume * 100).toInt()
+        )
     }
 
     private fun findLrcIndex(lines: List<LrcLine>, posMs: Long): Int {
@@ -259,12 +304,14 @@ object PlayerManager {
     /**
      * 播放一个条目（可带同源队列）。先经插件解析出真实音源 URL。
      * @param queue 若为空则只播放 single
+     * @param startOffsetMs 起播偏移（进程被杀恢复时从上次进度续播），默认 0
      */
     fun play(
         plugin: String,
         item: QueueEntry,
         queue: List<QueueEntry>? = null,
-        startIndex: Int = 0
+        startIndex: Int = 0,
+        startOffsetMs: Long = 0
     ) {
         // 插件解析（含阻塞式 JS 调用）放 Default 线程；
         // ExoPlayer 只能在主线程访问，拿到地址后必须切回主线程。
@@ -277,6 +324,8 @@ object PlayerManager {
                     queueIndex = startIndex,
                     error = null
                 )
+                // 队列内容/索引已变化：调度防抖写入恢复快照
+                scheduleResumeSave()
                 val rt = runtime ?: error("PlayerManager runtime not attached")
                 val result = rt.callAsync(
                     plugin, "getMediaSource",
@@ -294,6 +343,13 @@ object PlayerManager {
                 val url = media.optString("url")
                 if (url.isBlank()) {
                     reportPlayError("该音源未返回可播放地址（可能需配置用户变量或 VIP）")
+                    return@launch
+                }
+                // FLV 直链 ExoPlayer 无对应解封装器，必然失败；换下一曲也一样，
+                // 所以只明确提示、不自动跳曲，也不 setMediaItem。
+                val pathOnly = url.substringBefore('?').substringBefore('#')
+                if (pathOnly.endsWith(".flv", ignoreCase = true)) {
+                    reportPlayError("该音源为 FLV 直链，当前设备暂不支持播放", autoSkip = false)
                     return@launch
                 }
                 val headers = media.optJSONObject("headers")?.let { h ->
@@ -339,10 +395,16 @@ object PlayerManager {
                     }
                     p.setMediaItem(mediaItem)
                     p.prepare()
+                    // 恢复播放：prepare 后先 seek 到上次进度再起播（未 ready 的 seek 会在 prepared 后生效）
+                    if (startOffsetMs > 0) p.seekTo(startOffsetMs)
                     p.play()
                 }
                 // 通知栏封面由 PlaybackService 的 BitmapLoader 在媒体项切换时按需加载（带请求头，不阻塞播放）
                 fetchLyric(item)
+            } catch (e: com.tvmusic.runtime.PluginCallException) {
+                // 插件 getMediaSource 抛错：多为目标平台版权/会员限制或插件过期，
+                // 原始信息只有 JS 行号（如 "at getMediaSource (<input>:424)"），对用户无意义
+                reportPlayError("音源解析失败：可能是该歌曲有版权/会员限制，或插件需要更新")
             } catch (e: Exception) {
                 reportPlayError(e.message ?: "播放失败")
             }
@@ -354,6 +416,8 @@ object PlayerManager {
         if (index in st.queue.indices && index != st.queueIndex) {
             val entry = st.queue[index]
             _uiState.value = st.copy(queueIndex = index)
+            // 当前索引变化：调度防抖写入恢复快照（next/prev 最终都走到这里）
+            scheduleResumeSave()
             play(entry.plugin, entry, st.queue, index)
         }
     }
@@ -462,7 +526,87 @@ object PlayerManager {
         }
     }
 
+    // ---------------- 进程被杀恢复（resume.json） ----------------
+
+    /** 上次会话的恢复快照（启动时异步加载；恢复播放后清空）。 */
+    @Volatile
+    private var resumeSnapshot: JSONObject? = null
+
+    private val _resumeAvailable = MutableStateFlow(false)
+    /** 是否存在可恢复的上次播放（供首页「继续播放」对话框响应式订阅）。 */
+    val resumeAvailable: StateFlow<Boolean> = _resumeAvailable.asStateFlow()
+
+    /** 防抖写恢复快照：1s 内队列/索引/暂停的多次变化合并为一次落盘。 */
+    private val resumeSaver = Handler(Looper.getMainLooper())
+    private val saveResumeRunnable = Runnable { flushResumeNow() }
+
+    private fun scheduleResumeSave() {
+        resumeSaver.removeCallbacks(saveResumeRunnable)
+        resumeSaver.postDelayed(saveResumeRunnable, 1000)
+    }
+
+    /**
+     * 立即落盘当前播放快照（应用退出 / release 前调用，防抖等不及的场景）。
+     * 必须在主线程调用（读取 player.currentPosition）。
+     */
+    fun flushResumeNow() {
+        resumeSaver.removeCallbacks(saveResumeRunnable)
+        val store = playbackStore ?: return
+        val st = _uiState.value
+        if (st.queue.isEmpty() || st.queueIndex !in st.queue.indices) return
+        val arr = JSONArray()
+        st.queue.forEach { arr.put(it.raw) }
+        val json = JSONObject()
+            .put("queue", arr)
+            .put("index", st.queueIndex)
+            .put("positionMs", player?.currentPosition ?: 0L)
+        store.saveResume(json)
+    }
+
+    /** 启动时异步读取 resume.json（Application 调用，避免在主线程做文件 IO）。 */
+    fun loadResumeAsync() {
+        scope.launch(Dispatchers.IO) {
+            val json = playbackStore?.loadResume() ?: return@launch
+            val queue = json.optJSONArray("queue")
+            if (queue == null || queue.length() == 0) return@launch
+            resumeSnapshot = json
+            _resumeAvailable.value = true
+        }
+    }
+
+    /** 是否有可恢复的上次播放。 */
+    fun hasResume(): Boolean = _resumeAvailable.value
+
+    /**
+     * 从快照恢复播放：重建队列 → 定位到 index → 走一次 play 流程（复用 playSession
+     * 守卫与解析链路，解析结果带过期丢弃）→ prepare 后 seekTo 上次进度再起播。
+     * 恢复后立即清除快照，避免重复弹窗/重复恢复。
+     */
+    fun resumePlayback() {
+        val snap = resumeSnapshot ?: return
+        try {
+            val arr = snap.optJSONArray("queue") ?: return
+            val entries = (0 until arr.length()).mapNotNull { i ->
+                val raw = arr.optJSONObject(i) ?: return@mapNotNull null
+                val plugin = raw.optString("platform")
+                if (plugin.isBlank()) null else QueueEntry(plugin, raw)
+            }
+            if (entries.isEmpty()) return
+            val index = snap.optInt("index", 0).coerceIn(0, entries.lastIndex)
+            val positionMs = snap.optLong("positionMs", 0L).coerceAtLeast(0)
+            resumeSnapshot = null
+            _resumeAvailable.value = false
+            playbackStore?.clearResume()
+            val target = entries[index]
+            play(target.plugin, target, entries, index, positionMs)
+        } catch (e: Exception) {
+            android.util.Log.w("PlayerManager", "resume failed: ${e.message}")
+        }
+    }
+
     fun release() {
+        // 释放前立即落盘恢复快照（此时队列/进度还有效），顺带清掉防抖任务
+        flushResumeNow()
         ticker.removeCallbacksAndMessages(null)
         player?.removeListener(playerListener)
         player?.release()

@@ -176,7 +176,15 @@ fun MyListScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 32.dp)
             ) {
-                items(list, key = { it.toString().hashCode() }) { item ->
+                items(list, key = { item ->
+                    // 稳定 key：与 PlaybackStore 主键同规则（platform+id，缺失时回退 标题+歌手），
+                    // 替代原先的 toString().hashCode()（Int 可碰撞，且类型与其他页面 key 不一致）；
+                    // 历史记录入库时已按主键去重，列表内不会出现重复 key
+                    val platform = item.optString("platform", "")
+                    val id = item.optString("id", "")
+                    if (id.isNotBlank()) "$platform::$id"
+                    else "$platform::${item.optString("title", "")}::${item.optString("artist", "")}"
+                }) { item ->
                     HistoryRow(
                         item = item,
                         onPlay = { playItem(item) },

@@ -323,6 +323,10 @@ class RemoteConfigService : Service() {
             method == "GET" && path == "/api/player" -> {
                 respond(socket, 200, playerStatusJson().toString())
             }
+            method == "GET" && path == "/api/events" -> {
+                // SSE 长连接：推送播放器状态，取代浏览器端 2s 轮询
+                respondEvents(socket)
+            }
             method == "GET" && path == "/api/themes" -> {
                 respond(socket, 200, themesJson().toString())
             }
@@ -1053,6 +1057,45 @@ class RemoteConfigService : Service() {
             Log.w(TAG, "respondDownload: ${e.message}")
         }
     }
+
+    /**
+     * SSE 推送（GET /api/events）：每 1000ms 发一帧 `data: <播放器状态JSON>\n\n`。
+     * 状态组装复用 playerStatusJson()，与 /api/player 完全同源，不另写状态逻辑。
+     * 线程池约束：SSE 是长连接，会长期占用一个工作线程；本服务线程池上限 8，
+     * 若多个标签页同时挂 SSE 可能挤占普通请求的处理线程，浏览器端断开后会自动
+     * 降级回 2s 轮询，正常场景每页仅占 1 条连接。
+     */
+    private fun respondEvents(socket: Socket) {
+        val out = socket.getOutputStream()
+        try {
+            // 15s 读超时只作用于请求头读取阶段；SSE 建立后只写不读，理论上不会触发，
+            // 这里显式关闭该连接的读超时，确保长连接不被干扰。
+            runCatching { socket.soTimeout = 0 }
+            val head = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: text/event-stream; charset=utf-8\r\n" +
+                "Cache-Control: no-cache\r\n" +
+                "Access-Control-Allow-Origin: *\r\n" +
+                "Connection: keep-alive\r\n\r\n"
+            out.write(head.toByteArray(Charsets.UTF_8))
+            out.flush()
+            while (true) {
+                val frame = "data: ${playerStatusJson().toString()}\n\n"
+                out.write(frame.toByteArray(Charsets.UTF_8))
+                out.flush()
+                try {
+                    Thread.sleep(1000)
+                } catch (_: InterruptedException) {
+                    break // 服务销毁（线程池 shutdownNow）时被打断，干净退出
+                }
+            }
+        } catch (e: java.io.IOException) {
+            // SocketException 是 IOException 子类：客户端断开/写失败，干净退出循环
+            Log.i(TAG, "events: ${e.message}")
+        } finally {
+            try { socket.close() } catch (_: Exception) {}
+        }
+    }
+
     private fun readLine(input: InputStream): String? {
         val sb = StringBuilder()
         var prev = -1
@@ -1529,51 +1572,55 @@ function cycleMode() {
 }
 
 var playerFetching = false;
+/* 播放器状态渲染：轮询与 SSE 推送共用同一条渲染路径，只换数据来源 */
+function handlePlayerData(d) {
+  lastStatus = d;
+  if (!d.title) {
+    el('pTitle').textContent = '未在播放';
+    el('pArtist').textContent = '';
+    el('pErr').textContent = '';
+    el('pToggle').textContent = '▶︎';
+    renderQueue(d, -1);
+    return;
+  }
+  el('pTitle').textContent = d.title;
+  el('pArtist').textContent = (d.artist || '') + (d.album ? ' · ' + d.album : '') + ' · ' + (d.index + 1) + '/' + d.queueSize + (d.buffering ? ' · 缓冲中' : '');
+  var art = el('pArt');
+  var want = d.artwork || '';
+  var wantSrc = want ? '/api/img?url=' + encodeURIComponent(want) : '';
+  if (art.getAttribute('src') !== wantSrc) art.src = wantSrc;
+  art.style.visibility = want ? 'visible' : 'hidden';
+  el('pToggle').textContent = d.playing ? '⏸︎' : '▶︎';
+  var favBtn = el('pFav');
+  if (favBtn) {
+    favBtn.textContent = d.favorite ? '♥' : '♡';
+    favBtn.className = 'ctrl' + (d.favorite ? ' favon' : '');
+  }
+  el('pErr').textContent = d.error ? String(d.error) : '';
+  el('pVol').textContent = (d.volume || 0) + '%';
+  el('volBar').value = d.volume || 0;
+  if (d.playMode) {
+    curMode = d.playMode;
+    el('pMode').textContent = MODE_IC[d.playMode] || '⇅';
+    el('pModeName').textContent = (MODE_NAMES[d.playMode] || '顺序').replace(/^[^ ]+ /, '');
+  }
+  el('pDur').textContent = fmtPos(d.duration);
+  if (!seeking) {
+    var f = d.duration > 0 ? Math.round(d.position / d.duration * 1000) : 0;
+    var bar = el('seekBar');
+    bar.value = f;
+    bar.style.setProperty('--fill', (f / 10) + '%');
+    el('pPos').textContent = fmtPos(d.position);
+  }
+  renderQueue(d, d.index);
+}
 function loadPlayer() {
   // 同一时刻只允许一条 /api/player 在途：慢网下响应未回时跳过本轮，避免请求堆积
   if (playerFetching) return;
   playerFetching = true;
   api('/api/player').then(function (d) {
     playerFetching = false;
-    lastStatus = d;
-    if (!d.title) {
-      el('pTitle').textContent = '未在播放';
-      el('pArtist').textContent = '';
-      el('pErr').textContent = '';
-      el('pToggle').textContent = '▶︎';
-      renderQueue(d, -1);
-      return;
-    }
-    el('pTitle').textContent = d.title;
-    el('pArtist').textContent = (d.artist || '') + (d.album ? ' · ' + d.album : '') + ' · ' + (d.index + 1) + '/' + d.queueSize + (d.buffering ? ' · 缓冲中' : '');
-    var art = el('pArt');
-    var want = d.artwork || '';
-    var wantSrc = want ? '/api/img?url=' + encodeURIComponent(want) : '';
-    if (art.getAttribute('src') !== wantSrc) art.src = wantSrc;
-    art.style.visibility = want ? 'visible' : 'hidden';
-    el('pToggle').textContent = d.playing ? '⏸︎' : '▶︎';
-    var favBtn = el('pFav');
-    if (favBtn) {
-      favBtn.textContent = d.favorite ? '♥' : '♡';
-      favBtn.className = 'ctrl' + (d.favorite ? ' favon' : '');
-    }
-    el('pErr').textContent = d.error ? String(d.error) : '';
-    el('pVol').textContent = (d.volume || 0) + '%';
-    el('volBar').value = d.volume || 0;
-    if (d.playMode) {
-      curMode = d.playMode;
-      el('pMode').textContent = MODE_IC[d.playMode] || '⇅';
-      el('pModeName').textContent = (MODE_NAMES[d.playMode] || '顺序').replace(/^[^ ]+ /, '');
-    }
-    el('pDur').textContent = fmtPos(d.duration);
-    if (!seeking) {
-      var f = d.duration > 0 ? Math.round(d.position / d.duration * 1000) : 0;
-      var bar = el('seekBar');
-      bar.value = f;
-      bar.style.setProperty('--fill', (f / 10) + '%');
-      el('pPos').textContent = fmtPos(d.position);
-    }
-    renderQueue(d, d.index);
+    handlePlayerData(d);
   }).catch(function () { playerFetching = false; });
 }
 
@@ -2264,22 +2311,80 @@ loadFavLists();
 loadSubs();
 loadPlugins();
 
-/* 页面切到后台时暂停轮询：手机浏览器后台节流定时器不可靠，
-   继续轮询会在网络差时堆积请求把页面拖死；回到前台立即刷新一次并恢复。 */
-var pollTimers = null;
-function startPolling() {
-  if (pollTimers) return;
-  pollTimers = [setInterval(loadStatus, 15000), setInterval(loadPlayer, 2000)];
+/* 页面切到后台时暂停连接：手机浏览器后台节流定时器不可靠，
+   继续收发会在网络差时堆积请求把页面拖死；回到前台立即刷新一次并恢复。 */
+
+/* 状态栏轮询（/api/status）保持原样 */
+var statusTimer = null;
+function startStatusPoll() {
+  if (statusTimer) return;
+  statusTimer = setInterval(loadStatus, 15000);
 }
-function stopPolling() {
-  if (!pollTimers) return;
-  pollTimers.forEach(clearInterval);
-  pollTimers = null;
+function stopStatusPoll() {
+  if (!statusTimer) return;
+  clearInterval(statusTimer);
+  statusTimer = null;
 }
-startPolling();
+
+/* 播放器状态：优先 SSE（/api/events）推送，失败自动降级回 2s 轮询 */
+var evtSource = null;      /* 当前 EventSource，null 表示未在 SSE 模式 */
+var playerPollTimer = null;/* 降级轮询定时器 */
+var sseRetryTimer = null;  /* 30 秒后重试 SSE 的定时器 */
+function startPlayerPoll() {
+  if (playerPollTimer) return;
+  playerPollTimer = setInterval(loadPlayer, 2000);
+}
+function stopPlayerPoll() {
+  if (!playerPollTimer) return;
+  clearInterval(playerPollTimer);
+  playerPollTimer = null;
+}
+function openPlayerEvents() {
+  if (evtSource || sseRetryTimer) return;
+  if (!window.EventSource) { startPlayerPoll(); return; } /* 老内核浏览器直接走轮询 */
+  var es;
+  try {
+    es = new EventSource('/api/events');
+  } catch (e) { startPlayerPoll(); return; }
+  evtSource = es;
+  es.onmessage = function (ev) {
+    /* 收到推送即视为 SSE 正常：停掉降级轮询，走与轮询相同的渲染路径 */
+    stopPlayerPoll();
+    var d;
+    try { d = JSON.parse(ev.data); } catch (e) { return; }
+    handlePlayerData(d);
+  };
+  es.onerror = function () {
+    /* SSE 断开：降级回 2s 轮询，30 秒后重试 SSE，成功（收到推送）后自动停轮询 */
+    es.close();
+    if (evtSource === es) evtSource = null;
+    startPlayerPoll();
+    if (!sseRetryTimer) {
+      sseRetryTimer = setTimeout(function () {
+        sseRetryTimer = null;
+        openPlayerEvents();
+      }, 30000);
+    }
+  };
+}
+function closePlayerEvents() {
+  if (sseRetryTimer) { clearTimeout(sseRetryTimer); sseRetryTimer = null; }
+  if (evtSource) { evtSource.close(); evtSource = null; }
+  stopPlayerPoll();
+}
+
+startStatusPoll();
+openPlayerEvents();
 document.addEventListener('visibilitychange', function () {
-  if (document.hidden) stopPolling();
-  else { loadStatus(); loadPlayer(); startPolling(); }
+  if (document.hidden) {
+    closePlayerEvents();
+    stopStatusPoll();
+  } else {
+    loadStatus();
+    loadPlayer();
+    startStatusPoll();
+    openPlayerEvents();
+  }
 });
 </script>
 </body>
