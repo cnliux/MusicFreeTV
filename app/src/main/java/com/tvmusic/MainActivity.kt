@@ -86,7 +86,6 @@ class MainActivity : ComponentActivity() {
         val navController = rememberNavController()
         val context = LocalContext.current
         val app = TvMusicApp.from(context)
-        val uiState by PlayerManager.uiState.collectAsState()
 
         val needed = navController.currentBackStackEntryAsState().value
         val route = needed?.destination?.route
@@ -228,30 +227,37 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // 全局悬浮歌词层：仅在非播放页叠加（播放页有独立逐行歌词视图）
-                if (route != "player" && uiState.current != null) {
-                    LyricOverlay(
-                        lines = uiState.lrcLines,
-                        currentIndex = uiState.lrcIndex
-                    )
+                // 全局悬浮歌词层：仅在非播放页叠加（播放页有独立逐行歌词视图）。
+                // 就地订阅 uiState，避免在 App 根部订阅导致 ticker 每秒驱动整棵树重组
+                if (route != "player") {
+                    val ps by com.tvmusic.player.PlayerManager.uiState.collectAsState()
+                    if (ps.current != null) {
+                        LyricOverlay(
+                            lines = ps.lrcLines,
+                            currentIndex = ps.lrcIndex
+                        )
+                    }
                 }
             }
 
-            // 迷你播放条
-            if (route != "player" && uiState.current != null) {
-                val lyricCfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
-                MiniPlayerBar(
-                    entry = uiState.current!!,
-                    isPlaying = uiState.isPlaying,
-                    positionMs = uiState.positionMs,
-                    durationMs = uiState.durationMs,
-                    lyricLine = if (lyricCfg.enabled)
-                        uiState.lrcLines.getOrNull(uiState.lrcIndex)?.text ?: "" else "",
-                    onPrev = { PlayerManager.prev() },
-                    onToggle = { PlayerManager.playPause() },
-                    onNext = { PlayerManager.next() },
-                    onClick = { navController.navigate("player") }
-                )
+            // 迷你播放条：同上，订阅粒度收敛到本作用域（标题栏/NavHost 不再每秒重组）
+            if (route != "player") {
+                val ps by com.tvmusic.player.PlayerManager.uiState.collectAsState()
+                if (ps.current != null) {
+                    val lyricCfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
+                    MiniPlayerBar(
+                        entry = ps.current!!,
+                        isPlaying = ps.isPlaying,
+                        positionMs = ps.positionMs,
+                        durationMs = ps.durationMs,
+                        lyricLine = if (lyricCfg.enabled)
+                            ps.lrcLines.getOrNull(ps.lrcIndex)?.text ?: "" else "",
+                        onPrev = { PlayerManager.prev() },
+                        onToggle = { PlayerManager.playPause() },
+                        onNext = { PlayerManager.next() },
+                        onClick = { navController.navigate("player") }
+                    )
+                }
             }
         }
 
@@ -264,6 +270,9 @@ class MainActivity : ComponentActivity() {
                 confirmButton = {
                     androidx.compose.material3.TextButton(onClick = {
                         showExitDialog.value = false
+                        // 先无条件暂停：ExoPlayer 由 PlayerManager 单例持有，
+                        // 仅 stopService 不会停播，进程存活时音频会继续放（与提示文案矛盾）
+                        com.tvmusic.player.PlayerManager.pause()
                         context.stopService(
                             android.content.Intent(context, com.tvmusic.player.PlaybackService::class.java)
                         )

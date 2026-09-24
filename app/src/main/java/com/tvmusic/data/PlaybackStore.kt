@@ -394,13 +394,8 @@ class PlaybackStore(context: Context) {
         }
     }
 
-    /** 用插件 primaryKey 去重，缺省回退 title+artist。 */
-    private fun primaryKey(o: JSONObject): String {
-        val platform = o.optString("platform", "")
-        val id = o.optString("id", "")
-        if (id.isNotBlank()) return "$platform::$id"
-        return "$platform::${o.optString("title", "")}::${o.optString("artist", "")}"
-    }
+    /** 用插件 primaryKey 去重，缺省回退 title+artist。UI 层判断收藏状态也用同一规则。 */
+    fun primaryKey(o: JSONObject): String = favKeyOf(o)
 
     private fun readList(file: File): List<JSONObject> {
         if (!file.exists()) return emptyList()
@@ -425,5 +420,13 @@ class PlaybackStore(context: Context) {
 
     companion object {
         const val DEFAULT_FAV_ID = "fav_default"
+
+        /** 收藏主键规则：platform::id，缺失时回退 platform::标题::歌手。UI 层无实例场景（行内状态判断）也走同一规则。 */
+        fun favKeyOf(o: JSONObject): String {
+            val platform = o.optString("platform", "")
+            val id = o.optString("id", "")
+            if (id.isNotBlank()) return "$platform::$id"
+            return "$platform::${o.optString("title", "")}::${o.optString("artist", "")}"
+        }
     }
 }

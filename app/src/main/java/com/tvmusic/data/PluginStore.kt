@@ -114,6 +114,9 @@ class PluginStore(context: Context) {
         return out
     }
 
+    /** 读取可选字符串字段：缺失/NULL/空串统一返回 null（避免 optString(key, null) 的类型不匹配警告）。 */
+    private fun optStr(o: JSONObject, key: String): String? = o.optString(key).takeIf { it.isNotEmpty() }
+
     private fun parseInfo(json: String?): PluginInfo? {
         if (json.isNullOrBlank()) return null
         return try {
@@ -121,17 +124,17 @@ class PluginStore(context: Context) {
             val userVars = o.optJSONArray("userVariables")?.let { arr ->
                 (0 until arr.length()).map { i ->
                     val x = arr.optJSONObject(i) ?: JSONObject()
-                    UserVarDef(x.optString("key"), x.optString("name"), x.optString("type", null))
+                    UserVarDef(x.optString("key"), x.optString("name"), optStr(x, "type"))
                 }
             } ?: emptyList()
             PluginInfo(
                 platform = o.optString("platform"),
-                version = o.optString("version", null),
-                author = o.optString("author", null),
-                srcUrl = o.optString("srcUrl", null),
-                appVersion = o.optString("appVersion", null),
-                description = o.optString("description", null),
-                cacheControl = o.optString("cacheControl", null),
+                version = optStr(o, "version"),
+                author = optStr(o, "author"),
+                srcUrl = optStr(o, "srcUrl"),
+                appVersion = optStr(o, "appVersion"),
+                description = optStr(o, "description"),
+                cacheControl = optStr(o, "cacheControl"),
                 primaryKey = o.optJSONArray("primaryKey")?.let { a ->
                     (0 until a.length()).map { i -> a.getString(i) }
                 } ?: emptyList(),
@@ -198,10 +201,46 @@ class PluginStore(context: Context) {
             "user_variables", null, cv,
             SQLiteDatabase.CONFLICT_REPLACE
         )
+        invalidateVarCache()
+    }
+
+    /** 整组替换某插件的用户变量：单事务删旧+写新，避免逐行写入的多次磁盘同步。 */
+    @Synchronized
+    fun replaceVariables(pluginKey: String, vars: Map<String, String>) {
+        val db = helper.writableDatabase
+        db.beginTransaction()
+        try {
+            db.delete("user_variables", "plugin_key=?", arrayOf(pluginKey))
+            vars.forEach { (k, v) ->
+                val cv = ContentValues().apply {
+                    put("plugin_key", pluginKey)
+                    put("var_key", k)
+                    put("var_value", v)
+                }
+                db.insertWithOnConflict("user_variables", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        invalidateVarCache()
+    }
+
+    /**
+     * 用户变量内存缓存：插件每次经 JS 桥取变量都会调 allVariablesMerged()，
+     * 旧实现每次全表查 SQLite 并在 JS 线程上阻塞。写入后统一失效。
+     */
+    private var mergedVarCache: Map<String, String>? = null
+    private val pluginVarCache = HashMap<String, Map<String, String>>()
+
+    private fun invalidateVarCache() {
+        mergedVarCache = null
+        pluginVarCache.clear()
     }
 
     @Synchronized
     fun loadVariables(pluginKey: String): Map<String, String> {
+        pluginVarCache[pluginKey]?.let { return it }
         val out = LinkedHashMap<String, String>()
         val c = helper.readableDatabase.query(
             "user_variables", arrayOf("var_key", "var_value"),
@@ -213,11 +252,13 @@ class PluginStore(context: Context) {
                     it.getString(it.getColumnIndexOrThrow("var_value"))
             }
         }
+        pluginVarCache[pluginKey] = out
         return out
     }
 
     @Synchronized
     fun allVariablesMerged(): Map<String, String> {
+        mergedVarCache?.let { return it }
         val out = LinkedHashMap<String, String>()
         val c = helper.readableDatabase.query("user_variables", arrayOf("var_key", "var_value"), null, null, null, null, null)
         c.use {
@@ -226,6 +267,7 @@ class PluginStore(context: Context) {
                     it.getString(it.getColumnIndexOrThrow("var_value"))
             }
         }
+        mergedVarCache = out
         return out
     }
 }

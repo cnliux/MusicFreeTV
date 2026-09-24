@@ -89,6 +89,8 @@ class PlaybackService : MediaSessionService() {
                 if (done) return
                 done = true
                 toFire = pending.toList()
+                // 唤醒所有在 get() 上等待的线程，否则无超时等待只能靠虚假唤醒返回（可能永久挂起）
+                lock.notifyAll()
             }
             toFire.forEach { (r, e) -> safeRun(r, e) }
         }
@@ -120,7 +122,11 @@ class PlaybackService : MediaSessionService() {
 
         override fun get(timeout: Long, unit: TimeUnit): android.graphics.Bitmap? {
             synchronized(lock) {
-                if (!done) unit.timedWait(lock, timeout)
+                if (!done) {
+                    unit.timedWait(lock, timeout)
+                    // Future 契约：超时未完成必须抛 TimeoutException，不能静默返回 null
+                    if (!done) throw java.util.concurrent.TimeoutException("bitmap load timeout")
+                }
                 return result
             }
         }

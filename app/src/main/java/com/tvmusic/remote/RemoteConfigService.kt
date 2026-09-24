@@ -38,6 +38,25 @@ class RemoteConfigService : Service() {
         private const val TAG = "RemoteConfigService"
         const val PORT = 9527
         private const val NOTIFICATION_ID = 101
+
+        /** SSE 长连接并发上限：超出直接 503，浏览器自动降级 2s 轮询。 */
+        private const val MAX_SSE_CLIENTS = 6
+
+        /** 图片代理单张上限 10MB，防止异常大图整张入内存 OOM。 */
+        private const val MAX_IMAGE_BYTES = 10L * 1024 * 1024
+
+        /** 图片代理重定向上限（手动逐跳跟随，每跳都做内网地址校验）。 */
+        private const val MAX_IMAGE_HOPS = 5
+
+        /** 图片代理专用共享 OkHttpClient：自身不自动跟随重定向，由代码逐跳校验后跟随。 */
+        private val imageHttpClient by lazy {
+            okhttp3.OkHttpClient.Builder()
+                .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .build()
+        }
         private val SORT_KEYS = setOf(
             com.tvmusic.config.SearchSettings.SORT_DEFAULT,
             com.tvmusic.config.SearchSettings.SORT_DURATION,
@@ -72,12 +91,32 @@ class RemoteConfigService : Service() {
     private var serverSocket: ServerSocket? = null
     private var acceptThread: Thread? = null
 
-    /** 并发处理 HTTP 连接的小线程池：核心线程常驻，空闲回收，上限防止浏览器多标签打爆。 */
+    /**
+     * HTTP 线程池（含 SSE 长连接）。
+     * 用 SynchronousQueue + 较大 max：并发一上来立即扩线程，而不是等队列塞满才扩——
+     * 旧设计 LinkedBlockingQueue(64) 在队列不满时永远不会超过 core=2 条线程，
+     * 1~2 个标签页的 SSE 长连接就能占死全部核心线程，让 /api/status、/api/plugins
+     * 等短请求无限排队，远程页面表现为"无法动态加载数据"。
+     */
     private val httpPool: java.util.concurrent.ThreadPoolExecutor by lazy {
         java.util.concurrent.ThreadPoolExecutor(
-            2, 8, 30L, java.util.concurrent.TimeUnit.SECONDS,
-            java.util.concurrent.LinkedBlockingQueue(64)
+            2, 16, 30L, java.util.concurrent.TimeUnit.SECONDS,
+            java.util.concurrent.SynchronousQueue()
         ).apply { allowCoreThreadTimeOut(true) }
+    }
+
+    /** SSE 并发限流：长连接最多占 MAX_SSE_CLIENTS 条线程，剩余线程永远留给短请求。 */
+    private val sseSlots = java.util.concurrent.Semaphore(MAX_SSE_CLIENTS)
+
+    /**
+     * SSE 写 watchdog：Java socket 写操作没有超时可用（soTimeout 只管读），
+     * 客户端锁屏/休眠/半开连接会让 out.write 永久阻塞并占死线程。
+     * 每帧写之前挂一个"8 秒未完成就强制关 socket"的定时任务，写完取消，兜底释放线程。
+     */
+    private val sseWatchdog: java.util.concurrent.ScheduledExecutorService by lazy {
+        java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+            Thread(r, "remote-sse-watchdog").apply { isDaemon = true }
+        }
     }
 
     override fun onCreate() {
@@ -310,22 +349,54 @@ class RemoteConfigService : Service() {
                 val entries = (0 until arr.length()).mapNotNull { i ->
                     arr.optJSONObject(i)?.let { raw ->
                         if (raw.optString("platform").isBlank()) raw.put("platform", plugin)
-                        com.tvmusic.player.QueueEntry(plugin, raw)
+                        // 每条目可自带 platform（跨源"播放全部"）：缺省才用请求级 plugin
+                        val pf = raw.optString("platform").ifBlank { plugin }
+                        com.tvmusic.player.QueueEntry(pf, raw)
                     }
                 }
                 if (entries.isEmpty()) {
                     respond(socket, 400, JSONObject().put("ok", false).put("error", "no valid items").toString())
                     return
                 }
-                com.tvmusic.player.PlayerManager.play(plugin, entries.first(), entries, 0)
+                // 首条用其自身来源插件播放，队列内条目解析时各自走粘性引擎
+                com.tvmusic.player.PlayerManager.play(entries.first().plugin, entries.first(), entries, 0)
                 respond(socket, 200, JSONObject().put("ok", true).put("count", entries.size).put("message", "已加入播放列表并开始播放").toString())
             }
             method == "GET" && path == "/api/player" -> {
                 respond(socket, 200, playerStatusJson().toString())
             }
+            method == "GET" && path == "/api/history" -> {
+                // 播放历史（最多 100 条，新→旧）：供远程页"历史"页签一键回放
+                val hist = app().playback.history.value.take(100)
+                val arr = JSONArray()
+                hist.forEach { raw ->
+                    arr.put(
+                        JSONObject()
+                            .put("title", raw.optString("title", ""))
+                            .put("artist", raw.optString("artist", ""))
+                            .put("platform", raw.optString("platform", ""))
+                            .put("raw", raw)
+                    )
+                }
+                respond(socket, 200, JSONObject().put("ok", true).put("total", arr.length()).put("items", arr).toString())
+            }
+            method == "POST" && path == "/api/history/clear" -> {
+                app().playback.clearHistory()
+                respond(socket, 200, JSONObject().put("ok", true).put("message", "播放历史已清空").toString())
+            }
             method == "GET" && path == "/api/events" -> {
-                // SSE 长连接：推送播放器状态，取代浏览器端 2s 轮询
-                respondEvents(socket)
+                // SSE 长连接：推送播放器状态，取代浏览器端 2s 轮询。
+                // 长连接会长期占用工作线程，必须限流：占满时立刻 503，
+                // 浏览器 EventSource 报错后自动降级 2s 轮询，30s 后再重试 SSE。
+                if (!sseSlots.tryAcquire()) {
+                    respond(socket, 503, JSONObject().put("ok", false).put("error", "sse busy").toString())
+                    return
+                }
+                try {
+                    respondEvents(socket)
+                } finally {
+                    sseSlots.release()
+                }
             }
             method == "GET" && path == "/api/themes" -> {
                 respond(socket, 200, themesJson().toString())
@@ -443,6 +514,27 @@ class RemoteConfigService : Service() {
                 }
                 val fav = app().playback.toggleFavorite(item, listId)
                 respond(socket, 200, JSONObject().put("ok", true).put("favorited", fav).toString())
+            }
+            method == "POST" && path == "/api/fav/addAll" -> {
+                // 全部收藏：把搜索结果当前列表批量加入指定收藏夹（按主键自动去重）
+                val body = readBody(input, headers)
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                val listId = json?.optString("listId", "") ?: ""
+                val arr = json?.optJSONArray("items")
+                if (listId.isBlank() || arr == null || arr.length() == 0) {
+                    respond(socket, 400, JSONObject().put("ok", false).put("error", "missing listId/items").toString())
+                    return
+                }
+                val items = (0 until arr.length()).mapNotNull { arr.optJSONObject(it) ?: return@mapNotNull null }
+                    .onEach { item ->
+                        // 搜索结果 raw 不带 platform，收藏前补全，否则"我的列表"回放取不到插件
+                        if (item.optString("platform").isBlank()) {
+                            val p = json?.optString("plugin", "") ?: ""
+                            if (p.isNotBlank()) item.put("platform", p)
+                        }
+                    }
+                val added = app().playback.addAllToList(listId, items)
+                respond(socket, 200, JSONObject().put("ok", true).put("added", added).toString())
             }
             method == "POST" && path == "/api/player/favorite" -> {
                 val body = readBody(input, headers)
@@ -621,7 +713,10 @@ class RemoteConfigService : Service() {
     private fun readBody(input: InputStream, headers: Map<String, String>): String {
         val len = headers["content-length"]?.toIntOrNull() ?: 0
         if (len <= 0) return ""
-        val buf = ByteArray(len.coerceAtMost(4 * 1024 * 1024))
+        // 上限 4MB：导入配置/批量收藏足够；超过直接拒绝，
+        // 旧实现按 4MB 分配缓冲却用原始 len 作读取长度，超大请求必数组越界
+        if (len > 4 * 1024 * 1024) throw IllegalArgumentException("payload too large")
+        val buf = ByteArray(len)
         var read = 0
         while (read < len) {
             val n = input.read(buf, read, len - read)
@@ -648,7 +743,9 @@ class RemoteConfigService : Service() {
                 JSONObject()
                     .put("id", t.id).put("name", t.name)
                     .put("accent", t.accent).put("accent2", t.accent2)
-                    .put("bg", t.bg).put("card", t.card).put("radius", t.radiusPx)
+                    .put("bg", t.bg).put("card", t.card)
+                    .put("text", t.text).put("muted", t.muted).put("line", t.line)
+                    .put("radius", t.radiusPx)
             )
         }
         return JSONObject()
@@ -908,7 +1005,7 @@ class RemoteConfigService : Service() {
             } finally {
                 session.finished = true
             }
-        }, "search-session").start()
+        }, "search-session").apply { isDaemon = true }.start()
         respond(socket, 200, JSONObject().put("ok", true).put("id", session.id).put("message", "搜索中").toString())
     }
 
@@ -957,32 +1054,77 @@ class RemoteConfigService : Service() {
             return
         }
         try {
-            val conn = java.net.URL(target).openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 8000
-            conn.readTimeout = 8000
-            conn.instanceFollowRedirects = true
-            conn.setRequestProperty(
-                "User-Agent",
-                "Mozilla/5.0 (Linux; Android 7.1.2) AppleWebKit/537.36 Chrome/109.0 Mobile Safari/537.36"
-            )
-            runCatching {
-                val u = java.net.URL(target)
+            // 手动逐跳跟随重定向：每一跳都校验目标主机不是内网地址（SSRF 防护），
+            // 同时保留图床 302 跳 CDN 的正常能力（OkHttp 客户端自身关闭自动跟随）
+            var url = target
+            var response: okhttp3.Response? = null
+            var hops = 0
+            while (true) {
+                val u = java.net.URL(url)
+                if (isBlockedHost(u.host)) {
+                    response?.close()
+                    respond(socket, 403, "{\"ok\":false}")
+                    return
+                }
                 val host = u.host.lowercase()
                 val ref = when {
                     host.contains("hdslb") || host.contains("bilibili") -> "https://www.bilibili.com/"
                     else -> u.protocol + "://" + u.host + "/"
                 }
-                conn.setRequestProperty("Referer", ref)
+                val req = okhttp3.Request.Builder().url(url)
+                    .header(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 7.1.2) AppleWebKit/537.36 Chrome/109.0 Mobile Safari/537.36"
+                    )
+                    .header("Referer", ref)
+                    .build()
+                response?.close()
+                response = imageHttpClient.newCall(req).execute()
+                val code = response.code
+                if (code in 300..399) {
+                    val loc = response.header("Location")
+                    if (loc.isNullOrBlank() || ++hops > MAX_IMAGE_HOPS) {
+                        response.close()
+                        respond(socket, 404, "{\"ok\":false}")
+                        return
+                    }
+                    url = java.net.URL(java.net.URL(url), loc).toString()
+                    continue
+                }
+                if (code != 200) {
+                    response.close()
+                    respond(socket, 404, "{\"ok\":false}")
+                    return
+                }
+                break
             }
-            val code = conn.responseCode
-            if (code != 200) {
-                conn.disconnect()
-                respond(socket, 404, "{\"ok\":false}")
+            val body = response!!.body!!
+            // 超大图直接拒绝，防止整张入内存导致 OOM
+            val declared = body.contentLength()
+            if (declared > MAX_IMAGE_BYTES) {
+                response.close()
+                respond(socket, 413, "{\"ok\":false}")
                 return
             }
-            val bytes = conn.inputStream.use { it.readBytes() }
-            val ctype = conn.contentType ?: "image/jpeg"
-            conn.disconnect()
+            val bytes = body.byteStream().use { input ->
+                val out = java.io.ByteArrayOutputStream(declared.coerceAtLeast(64 * 1024L).toInt())
+                val tmp = ByteArray(16 * 1024)
+                var total = 0L
+                while (true) {
+                    val n = input.read(tmp)
+                    if (n < 0) break
+                    total += n
+                    if (total > MAX_IMAGE_BYTES) { response.close(); return@use null }
+                    out.write(tmp, 0, n)
+                }
+                out.toByteArray()
+            }
+            val ctype = body.contentType()?.toString() ?: "image/jpeg"
+            response.close()
+            if (bytes == null) {
+                respond(socket, 413, "{\"ok\":false}")
+                return
+            }
             val head = "HTTP/1.1 200 OK\r\n" +
                 "Content-Type: $ctype\r\n" +
                 "Content-Length: ${bytes.size}\r\n" +
@@ -1000,10 +1142,26 @@ class RemoteConfigService : Service() {
         }
     }
 
+    /** 判断目标主机是否解析到回环/内网/链路本地地址（SSRF 防护）。 */
+    private fun isBlockedHost(host: String): Boolean {
+        val h = host.lowercase().removePrefix("[").substringBefore(']').substringBefore(':')
+        if (h == "localhost" || h.isBlank()) return true
+        return try {
+            java.net.InetAddress.getAllByName(h).any { addr ->
+                addr.isLoopbackAddress || addr.isAnyLocalAddress ||
+                    addr.isLinkLocalAddress || addr.isSiteLocalAddress ||
+                    addr.isMulticastAddress
+            }
+        } catch (_: Exception) {
+            true // 解析失败不代理
+        }
+    }
+
     private fun respond(socket: Socket, code: Int, body: String) {
         val status = when (code) {
             200 -> "OK"
             400 -> "Bad Request"
+            503 -> "Service Unavailable"
             else -> "Not Found"
         }
         val head = "HTTP/1.1 $code $status\r\n" +
@@ -1061,9 +1219,8 @@ class RemoteConfigService : Service() {
     /**
      * SSE 推送（GET /api/events）：每 1000ms 发一帧 `data: <播放器状态JSON>\n\n`。
      * 状态组装复用 playerStatusJson()，与 /api/player 完全同源，不另写状态逻辑。
-     * 线程池约束：SSE 是长连接，会长期占用一个工作线程；本服务线程池上限 8，
-     * 若多个标签页同时挂 SSE 可能挤占普通请求的处理线程，浏览器端断开后会自动
-     * 降级回 2s 轮询，正常场景每页仅占 1 条连接。
+     * 并发约束：由 sseSlots 限流（最多 MAX_SSE_CLIENTS 条），超出 503 后浏览器自动降级轮询；
+     * 每帧写有 8 秒 watchdog 兜底，客户端停滞时强制断开，线程不会被永久占死。
      */
     private fun respondEvents(socket: Socket) {
         val out = socket.getOutputStream()
@@ -1076,12 +1233,10 @@ class RemoteConfigService : Service() {
                 "Cache-Control: no-cache\r\n" +
                 "Access-Control-Allow-Origin: *\r\n" +
                 "Connection: keep-alive\r\n\r\n"
-            out.write(head.toByteArray(Charsets.UTF_8))
-            out.flush()
+            writeFrame(socket, out, head.toByteArray(Charsets.UTF_8))
             while (true) {
                 val frame = "data: ${playerStatusJson().toString()}\n\n"
-                out.write(frame.toByteArray(Charsets.UTF_8))
-                out.flush()
+                writeFrame(socket, out, frame.toByteArray(Charsets.UTF_8))
                 try {
                     Thread.sleep(1000)
                 } catch (_: InterruptedException) {
@@ -1089,10 +1244,21 @@ class RemoteConfigService : Service() {
                 }
             }
         } catch (e: java.io.IOException) {
-            // SocketException 是 IOException 子类：客户端断开/写失败，干净退出循环
+            // SocketException 是 IOException 子类：客户端断开/写失败/watchdog 强制断开，干净退出循环
             Log.i(TAG, "events: ${e.message}")
         } finally {
             try { socket.close() } catch (_: Exception) {}
+        }
+    }
+
+    /** 带 watchdog 的一帧写入：8 秒写不完（客户端停滞/半开连接）就强制关 socket 让 write 抛异常解锁。 */
+    private fun writeFrame(socket: Socket, out: java.io.OutputStream, bytes: ByteArray) {
+        val wd = sseWatchdog.schedule({ runCatching { socket.close() } }, 8, java.util.concurrent.TimeUnit.SECONDS)
+        try {
+            out.write(bytes)
+            out.flush()
+        } finally {
+            wd.cancel(false)
         }
     }
 
@@ -1142,14 +1308,15 @@ class RemoteConfigService : Service() {
         val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(this, channelId)
         } else {
+            // 通知渠道前时代（API 24/25）：只能用过期的 priority 控制通知级别，
+            // O 及以上已由 NotificationChannel 的 IMPORTANCE_LOW 承担
             @Suppress("DEPRECATION")
-            Notification.Builder(this)
+            Notification.Builder(this).setPriority(Notification.PRIORITY_LOW)
         }
         return builder
             .setContentTitle(getString(com.tvmusic.R.string.app_name))
             .setContentText("远程配置服务运行中 · 端口 $port")
             .setSmallIcon(com.tvmusic.R.drawable.ic_stat_remote)
-            .setPriority(Notification.PRIORITY_LOW)
             .setOngoing(true)
             .build()
     }
@@ -1158,6 +1325,7 @@ class RemoteConfigService : Service() {
         instance = null
         try { serverSocket?.close() } catch (_: Exception) {}
         try { httpPool.shutdownNow() } catch (_: Exception) {}
+        try { sseWatchdog.shutdownNow() } catch (_: Exception) {}
         super.onDestroy()
     }
 }
@@ -1360,6 +1528,7 @@ private val PAGE_HTML = """<!DOCTYPE html>
       </div>
       <div class="row" style="border:none;padding:10px 0 6px;">
         <button class="ghost small" id="playAllBtn" onclick="playAllSearch()" style="display:none;">▶ 播放全部结果</button>
+        <button class="ghost small" id="collectAllBtn" onclick="openCollectAll()" style="display:none;">♡ 全部收藏</button>
         <span class="muted" id="searchInfo"></span>
       </div>
       <div id="searchFilters">
@@ -1406,6 +1575,18 @@ private val PAGE_HTML = """<!DOCTYPE html>
       <div id="favActions"></div>
       <div id="favItems"></div>
       <div class="pager" id="favPager"></div>
+    </div>
+  </section>
+
+  <!-- 播放历史 -->
+  <section class="page" id="page-history">
+    <div class="card">
+      <h2>播放历史</h2>
+      <div class="row" style="border:none;padding:0 0 10px;">
+        <span class="muted" style="flex:1;">电视端最近播放（最多 100 条），点「播放」一键回放。</span>
+        <button class="ghost small" onclick="clearHistory()">清空</button>
+      </div>
+      <div id="historyItems"></div>
     </div>
   </section>
 
@@ -1511,10 +1692,24 @@ private val PAGE_HTML = """<!DOCTYPE html>
   </div>
 </div>
 
+<div id="collectModal" onclick="if(event.target===this)closeCollectAll()">
+  <div class="sheet">
+    <h3 id="collectModalTitle">全部收藏到…</h3>
+    <div class="muted" id="collectModalSub"></div>
+    <div id="collectList"></div>
+    <div class="newrow">
+      <input type="text" id="collectNewName" placeholder="新收藏夹名称">
+      <button class="small" onclick="createCollectAndAdd()">新建并收藏</button>
+    </div>
+    <div class="newrow"><button class="ghost small" style="flex:1;" onclick="closeCollectAll()">关闭</button></div>
+  </div>
+</div>
+
 <nav>
   <button class="on" data-tab="player" onclick="switchTab('player')"><span class="ic">🎵</span>播放</button>
   <button data-tab="search" onclick="switchTab('search')"><span class="ic">🔍</span>搜索</button>
   <button data-tab="fav" onclick="switchTab('fav')"><span class="ic">❤️</span>收藏</button>
+  <button data-tab="history" onclick="switchTab('history')"><span class="ic">🕘</span>历史</button>
   <button data-tab="manage" onclick="switchTab('manage')"><span class="ic">⚙️</span>管理</button>
 </nav>
 
@@ -1551,6 +1746,7 @@ function switchTab(name) {
   for (var j = 0; j < btns.length; j++) btns[j].className = btns[j].getAttribute('data-tab') === name ? 'on' : '';
   if (name === 'player') loadPlayer();
   if (name === 'fav') loadFavLists();
+  if (name === 'history') loadHistory();
   if (name === 'search') loadSearchCfg();
   if (name === 'manage') { loadSubs(); loadPlugins(); loadLyric(); loadSearchCfg(); }
 }
@@ -1891,6 +2087,7 @@ function doSearch() {
   el('searchBox').innerHTML = '<div class="empty">正在搜索…</div>';
   el('searchInfo').textContent = '搜索中…';
   el('playAllBtn').style.display = 'none';
+  el('collectAllBtn').style.display = 'none';
   el('searchCard').style.display = '';
   api(url).then(function (d) {
     if (!d || !d.ok) { toast(d && d.error || '搜索失败'); return; }
@@ -1912,25 +2109,93 @@ function pollSearch(id) {
     var prog = ' · 已搜索 ' + (d.done || 0) + '/' + (d.totalEnabled || 0) + ' 个音源…';
     el('searchInfo').textContent = '共 ' + (d.total || 0) + ' 条' + (d.finished ? '' : prog);
     el('playAllBtn').style.display = searchResults.length ? '' : 'none';
+    el('collectAllBtn').style.display = searchResults.length ? '' : 'none';
     renderSearch();
     if (d.finished) { clearInterval(sTimer); sTimer = null; el('searchInfo').textContent = '共 ' + (d.total || 0) + ' 条'; }
   }).catch(function () { });
 }
 function playAllSearch() {
   if (!searchResults.length) return;
-  var byPlugin = {};
-  searchResults.forEach(function (it) { (byPlugin[it.plugin] = byPlugin[it.plugin] || []).push(it.raw); });
-  var best = null, bestN = 0;
-  Object.keys(byPlugin).forEach(function (p) { if (byPlugin[p].length > bestN) { best = p; bestN = byPlugin[p].length; } });
-  post('/api/play/queue', { plugin: best, items: byPlugin[best] }).then(function (d) {
+  // 跨源全部入队：当前站点过滤下的所有结果，每条 raw 补全自身 platform，
+  // 后端按条目来源插件分别解析（旧实现只播放结果最多的单一音源，其余源被丢弃）
+  var items = collectTargets();
+  if (!items.length) { toast('没有可播放的结果'); return; }
+  post('/api/play/queue', { plugin: items[0].platform, items: items }).then(function (d) {
     toast(d.message || '已播放');
     switchTab('player');
     setTimeout(loadPlayer, 600);
   }).catch(function () { toast('播放失败'); });
 }
+
+/* ---------------- 全部收藏（搜索结果批量加入收藏夹） ---------------- */
+function collectTargets() {
+  // 当前站点过滤下可见的全部歌曲：raw 补全 platform 后返回（收藏/回放需要来源插件）
+  var out = [];
+  searchResults.forEach(function (it) {
+    if (sPlugin && it.plugin !== sPlugin) return;
+    var raw = it.raw || {};
+    if (!raw.platform) {
+      raw = JSON.parse(JSON.stringify(raw));
+      raw.platform = it.plugin;
+    }
+    out.push(raw);
+  });
+  return out;
+}
+function openCollectAll() {
+  var items = collectTargets();
+  if (!items.length) { toast('当前没有可收藏的结果'); return; }
+  el('collectModalTitle').textContent = '全部收藏到…';
+  el('collectModalSub').textContent = '将当前列表的 ' + items.length + ' 首加入所选收藏夹（已收藏的自动跳过）';
+  el('collectNewName').value = '';
+  renderCollectList();
+  el('collectModal').className = 'show';
+}
+function closeCollectAll() { el('collectModal').className = ''; }
+function renderCollectList() {
+  api('/api/fav/lists').then(function (d) {
+    var box = el('collectList');
+    var list = d.lists || [];
+    window._collectLists = list;
+    var items = collectTargets();
+    var html = '';
+    list.forEach(function (l, i) {
+      html += '<div class="fitem" onclick="pickCollectList(' + i + ')">' +
+        '<span class="ck">♡</span>' +
+        '<span class="ellip">' + esc(l.name) + '</span>' +
+        '<span class="cnt">' + l.count + ' 首</span></div>';
+    });
+    box.innerHTML = html || '<div class="empty">还没有收藏夹，可在下方新建</div>';
+  }).catch(function () { toast('加载收藏夹失败'); });
+}
+function doCollectAll(listId, listName) {
+  var items = collectTargets();
+  if (!items.length) { toast('当前没有可收藏的结果'); return; }
+  post('/api/fav/addAll', { listId: listId, items: items }).then(function (d) {
+    if (d.ok) {
+      toast(d.added > 0 ? '已加入「' + listName + '」' + d.added + ' 首' : '「' + listName + '」内已全部收藏');
+      closeCollectAll();
+    } else toast(d.error || '收藏失败');
+  }).catch(function () { toast('收藏失败'); });
+}
+function pickCollectList(i) {
+  var l = (window._collectLists || [])[i];
+  if (l) doCollectAll(l.id, l.name);
+}
+function createCollectAndAdd() {
+  var name = (el('collectNewName').value || '').trim();
+  if (!name) { toast('请输入收藏夹名称'); return; }
+  post('/api/fav/lists/create', { name: name }).then(function (d) {
+    el('collectNewName').value = '';
+    if (d.ok && d.id) doCollectAll(d.id, name);
+    else toast('新建失败');
+  }).catch(function () { toast('新建失败'); });
+}
 function renderSearch() {
   var box = el('searchBox');
   renderPluginBar();
+  el('playAllBtn').style.display = searchResults.length ? '' : 'none';
+  el('collectAllBtn').style.display = searchResults.length ? '' : 'none';
   var view = [];
   searchResults.forEach(function (it, i) { if (!sPlugin || it.plugin === sPlugin) view.push(i); });
   if (!searchResults.length) { box.innerHTML = '<div class="empty">没有结果</div>'; el('searchPager').innerHTML = ''; return; }
@@ -2040,14 +2305,13 @@ function loadFavItems() {
     }
     if (!items.length) { box.innerHTML = '<div class="empty">这个专辑还没有歌。</div>'; el('favPager').innerHTML = ''; return; }
     var html = '';
+    window._favItems = d.items;
     items.forEach(function (it, k) {
-      var i = (favPage - 1) * favSize + k;
-      window._favItems = d.items;
       html += '<div class="row">' +
         '<div class="grow"><div class="ellip" style="font-size:15px;">' + esc(it.title) + '</div>' +
         '<div class="muted ellip">' + esc(it.artist) + ' · ' + esc(it.platform || '') + '</div></div>' +
-        '<button class="small" onclick="playFavItem(' + i + ')">播放</button>' +
-        '<button class="danger small" onclick="removeFavItem(' + i + ')">移出</button></div>';
+        '<button class="small" onclick="playFavItem(' + k + ')">播放</button>' +
+        '<button class="danger small" onclick="removeFavItem(' + k + ')">移出</button></div>';
     });
     box.innerHTML = html;
     var pages = Math.max(1, Math.ceil(d.total / d.size));
@@ -2073,6 +2337,40 @@ function playFavAlbum() {
     toast(d.message || '已开始播放');
     switchTab('player');
     setTimeout(loadPlayer, 600);
+  });
+}
+
+/* ---------------- 播放历史 ---------------- */
+function loadHistory() {
+  api('/api/history').then(function (d) {
+    var box = el('historyItems');
+    var items = d.items || [];
+    if (!items.length) { box.innerHTML = '<div class="empty">还没有播放记录。</div>'; return; }
+    window._histItems = items;
+    var html = '';
+    items.forEach(function (it, k) {
+      html += '<div class="row">' +
+        '<div class="grow"><div class="ellip" style="font-size:15px;">' + esc(it.title) + '</div>' +
+        '<div class="muted ellip">' + esc(it.artist) + ' · ' + esc(it.platform || '') + '</div></div>' +
+        '<button class="small" onclick="playHistoryItem(' + k + ')">播放</button></div>';
+    });
+    box.innerHTML = html;
+  }).catch(function () {});
+}
+function playHistoryItem(i) {
+  var it = (window._histItems || [])[i];
+  if (!it) return;
+  post('/api/play', { plugin: it.platform, raw: it.raw }).then(function (d) {
+    toast(d.message || '已播放');
+    switchTab('player');
+    setTimeout(loadPlayer, 600);
+  }).catch(function () { toast('播放失败'); });
+}
+function clearHistory() {
+  if (!confirm('清空全部播放历史？')) return;
+  post('/api/history/clear', {}).then(function (d) {
+    toast(d.message || '已清空');
+    loadHistory();
   });
 }
 
@@ -2152,6 +2450,10 @@ function applyTheme(id) {
     r.setProperty('--card', '#' + t.card);
     r.setProperty('--card2', '#' + t.card);
   }
+  // 文字/次要文字/描边跟随主题，避免切主题后出现与色板不搭的硬编码灰蓝
+  if (t.text) r.setProperty('--text', '#' + t.text);
+  if (t.muted) r.setProperty('--muted', '#' + t.muted);
+  if (t.line) r.setProperty('--line', '#' + t.line);
   if (t.radius) r.setProperty('--radius', t.radius + 'px');
   curTheme = id;
   renderThemeBar();

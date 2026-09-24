@@ -76,8 +76,20 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
         kind = target.kind
         item = target.item
         importUrl = target.url
+        loadInitial()
+    }
+
+    /** 首次加载/重试共用：SheetTarget 是一次性的，重试不能再读它（否则失败后永远"缺少详情数据"）。 */
+    private fun loadInitial() {
+        if (plugin.isBlank()) {
+            _loading.value = false
+            _error.value = "缺少详情数据"
+            return
+        }
+        nextPage = 1
         viewModelScope.launch {
             _loading.value = true
+            _error.value = null
             _title.value = item.optString("title", "")
                 .ifBlank { item.optString("name", "") }
             _artwork.value = item.optString("artwork", "")
@@ -145,6 +157,8 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
         notImplemented.clear()
         if (_loadingMore.value) {
             loadMore()
+        } else if (plugin.isNotBlank()) {
+            loadInitial()
         } else {
             load()
         }

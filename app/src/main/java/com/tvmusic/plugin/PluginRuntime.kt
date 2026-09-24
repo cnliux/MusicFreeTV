@@ -227,9 +227,13 @@ class PluginRuntime private constructor(
         platformSources[platform] = source
         val targets = lanes.toList()
         val ok = targets.all { it.registerPlugin(platform, source) }
-        if (ok) synchronized(laneLock) {
-            // 只标记注册时的目标引擎；期间新懒创建的引擎保持未注册，走按需注册
-            for (i in targets.indices) laneRegistered.getOrNull(i)?.add(platform)
+        if (ok) {
+            synchronized(laneLock) {
+                // 只标记注册时的目标引擎；期间新懒创建的引擎保持未注册，走按需注册
+                for (i in targets.indices) laneRegistered.getOrNull(i)?.add(platform)
+            }
+            // 插件源码可能更新了方法集，失效该平台的 hasMethod 缓存
+            methodCache.keys.removeAll { it.startsWith("$platform::") }
         }
         ok
     }
@@ -238,9 +242,18 @@ class PluginRuntime private constructor(
         primary.hasPlugin(platform)
     }
 
-    /** 插件是否实现指定方法（用于按能力筛选，如 getRecommendSheetTags / getTopLists）。 */
-    suspend fun hasMethod(platform: String, method: String): Boolean = withContext(Dispatchers.IO) {
-        primary.hasMethod(platform, method)
+    /**
+     * hasMethod 结果缓存：首页/推荐/排行 VM 在每次插件列表刷新时都会对每个启用插件
+     * 同步调用多次，旧实现每次都在 primary 引擎串行锁上执行一次 JS 往返。
+     * 方法集只在 loadPlugin 时变化，故可安全缓存（注册时按 platform 失效）。
+     */
+    private val methodCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    suspend fun hasMethod(platform: String, method: String): Boolean {
+        val key = "$platform::$method"
+        methodCache[key]?.let { return it }
+        return withContext(Dispatchers.IO) { primary.hasMethod(platform, method) }
+            .also { methodCache[key] = it }
     }
 
     suspend fun readInfo(platform: String): JSONObject? = withContext(Dispatchers.IO) {

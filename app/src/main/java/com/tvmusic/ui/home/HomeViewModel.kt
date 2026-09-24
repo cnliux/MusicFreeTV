@@ -42,6 +42,10 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
 
     private val PLUGIN_CALL_TIMEOUT_MS = 8_000L
 
+    /** 首页加载代数：切换音源时 +1，旧加载结果回写前比对，防止旧内容覆盖新音源。 */
+    private var loadGeneration = 0
+    private var loadJob: kotlinx.coroutines.Job? = null
+
     init {
         // 插件列表就绪后，选定第一个可用插件并加载；列表变化时刷新可选项。
         viewModelScope.launch {
@@ -83,8 +87,11 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
     fun load() {
         val platform = _currentPlatform.value ?: return
         val plugin = _availablePlugins.value.firstOrNull { it.info?.platform == platform } ?: return
-        if (_loading.value) return
-        viewModelScope.launch(Dispatchers.Default) {
+        // 切换音源时旧加载必须作废：旧实现 loading 中直接 return，导致切换请求被丢弃，
+        // 旧协程跑完还会把旧音源内容写回（新音源名下显示旧内容）
+        val gen = ++loadGeneration
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch(Dispatchers.Default) {
             _loading.value = true
             _sections.value = emptyList()
             val fresh = mutableListOf<HomeSection>()
@@ -152,8 +159,12 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
             if (fresh.isEmpty()) {
                 fresh += HomeSection.Error(plugin.name, "该插件未提供首页推荐/排行榜数据")
             }
-            _sections.value = fresh
-            _loading.value = false
+            // 回写前校验：期间用户已切换音源则丢弃本次结果（阻塞中的 JS 调用无法中断，
+            // 但至少保证旧内容不覆盖新音源页面）
+            if (gen == loadGeneration && platform == _currentPlatform.value) {
+                _sections.value = fresh
+                _loading.value = false
+            }
         }
     }
 }

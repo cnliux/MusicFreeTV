@@ -66,6 +66,7 @@ import androidx.media3.ui.PlayerView
 import com.tvmusic.player.LrcLine
 import com.tvmusic.player.PlayMode
 import com.tvmusic.player.PlayerManager
+import com.tvmusic.player.PlayerUiState
 import com.tvmusic.ui.components.Artwork
 import com.tvmusic.ui.components.tvFocus
 
@@ -78,6 +79,7 @@ fun PlayerScreen(onBack: () -> Unit) {
     var showFavDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     var showNameDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     var showSleepDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var showEqDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
         // 背景：模糊封面 + 暗色蒙层
@@ -211,7 +213,7 @@ fun PlayerScreen(onBack: () -> Unit) {
                     )
                     Spacer(Modifier.width(22.dp))
                     RoundCtrlButton("⏪", size = 52.dp, iconSize = 20.sp, filled = false) {
-                        PlayerManager.seek(state.positionMs - 30_000)
+                        PlayerManager.seekRelative(-30_000)
                     }
                     Spacer(Modifier.width(22.dp))
                     RoundCtrlButton("⏮", size = 60.dp, iconSize = 26.sp, filled = false) { PlayerManager.prev() }
@@ -221,7 +223,7 @@ fun PlayerScreen(onBack: () -> Unit) {
                     RoundCtrlButton("⏭", size = 60.dp, iconSize = 26.sp, filled = false) { PlayerManager.next() }
                     Spacer(Modifier.width(22.dp))
                     RoundCtrlButton("⏩", size = 52.dp, iconSize = 20.sp, filled = false) {
-                        PlayerManager.seek(state.positionMs + 30_000)
+                        PlayerManager.seekRelative(30_000)
                     }
                     Spacer(Modifier.width(22.dp))
                     RoundCtrlButton(playModeIcon(state.playMode), size = 52.dp, iconSize = 20.sp, filled = false) {
@@ -243,6 +245,14 @@ fun PlayerScreen(onBack: () -> Unit) {
                         iconSize = 16.sp,
                         filled = state.sleepRemainingMs > 0
                     ) { showSleepDialog = true }
+                    Spacer(Modifier.width(22.dp))
+                    // 音效：均衡器 / 低音增强
+                    RoundCtrlButton(
+                        "音效",
+                        size = 52.dp,
+                        iconSize = 14.sp,
+                        filled = state.eqEnabled
+                    ) { showEqDialog = true }
                     Spacer(Modifier.width(22.dp))
                     RoundCtrlButton("↩", size = 52.dp, iconSize = 22.sp, filled = false, onClick = onBack)
                 }
@@ -271,6 +281,9 @@ fun PlayerScreen(onBack: () -> Unit) {
                     showSleepDialog = false
                 }
             )
+        }
+        if (showEqDialog) {
+            EqDialog(state = state, onDismiss = { showEqDialog = false })
         }
         if (showNameDialog) {
             com.tvmusic.ui.mylist.AlbumNameDialog(
@@ -486,6 +499,109 @@ private fun speedLabel(speed: Float): String {
     return "${s}x"
 }
 
+/**
+ * 音效弹层：均衡器开关 + 预设选择 + 低音增强强度（10 档步进）。
+ * 全部 d-pad 可达：预设为可点行，低音用 − / ＋ 按钮而非滑杆（遥控器友好）。
+ */
+@Composable
+private fun EqDialog(state: PlayerUiState, onDismiss: () -> Unit) {
+    val presets by PlayerManager.eqPresets.collectAsState()
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xAA000000)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(420.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("音效（均衡器 / 低音增强）", fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface)
+                androidx.compose.material3.Switch(
+                    checked = state.eqEnabled,
+                    onCheckedChange = { PlayerManager.setEqEnabled(it) },
+                    modifier = Modifier.tvFocus()
+                )
+            }
+            if (state.eqEnabled) {
+                Text("均衡器预设", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                presets.forEachIndexed { idx, name ->
+                    val active = idx == state.eqPreset
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { PlayerManager.setEqPreset(idx) }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            name,
+                            fontSize = 14.sp,
+                            color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                        )
+                        if (active) Text("✓", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp)
+                    }
+                }
+                // 低音增强：0~100%，10% 步进
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("低音增强", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        EqStepButton("－") { PlayerManager.setBassStrength(state.bassStrength - 100) }
+                        Text(
+                            "${state.bassStrength / 10}%",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.width(52.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                        EqStepButton("＋") { PlayerManager.setBassStrength(state.bassStrength + 100) }
+                    }
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .padding(top = 6.dp)
+                    .align(Alignment.End)
+                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable(onClick = onDismiss)
+                    .padding(horizontal = 18.dp, vertical = 9.dp)
+            ) { Text("关闭", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp) }
+        }
+    }
+}
+
+/** 音效弹层的步进小按钮（低音 −/＋）。 */
+@Composable
+private fun EqStepButton(label: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) { Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp) }
+}
+
 /** 圆形控制按钮：filled=主色实心（播放/暂停），否则半透明白底；焦点样式跟随主题 Token。 */
 @Composable
 private fun RoundCtrlButton(
@@ -535,8 +651,13 @@ private fun SeekBar(
 ) {
     var dragFraction by remember { mutableStateOf<Float?>(null) }
     var focused by remember { mutableStateOf(false) }
+    // 遥控快进退的本地基准：positionMs prop 最旧 1 秒一拍，1 秒内连按多键会都基于
+    // 同一个旧值而互相覆盖。手动 seek 后以本地值累加，播放器状态追上后（prop 更新）清除
+    var manualPos by remember { mutableStateOf<Long?>(null) }
+    androidx.compose.runtime.LaunchedEffect(positionMs, durationMs) { manualPos = null }
+    val effectivePos = manualPos ?: positionMs
     val fraction = dragFraction
-        ?: if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
+        ?: if (durationMs > 0) (effectivePos.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
     val primary = MaterialTheme.colorScheme.primary
     BoxWithConstraints(
         modifier = modifier
@@ -556,14 +677,18 @@ private fun SeekBar(
                     else -> return@onKeyEvent false
                 }
                 if (event.nativeKeyEvent.action == android.view.KeyEvent.ACTION_UP) {
-                    onSeek((positionMs + delta).coerceIn(0L, durationMs))
+                    val target = (effectivePos + delta).coerceIn(0L, durationMs)
+                    manualPos = target
+                    onSeek(target)
                 }
                 true
             }
             .pointerInput(durationMs) {
                 detectTapGestures { off ->
                     if (durationMs > 0) {
-                        onSeek(((off.x / size.width).coerceIn(0f, 1f) * durationMs).toLong())
+                        val target = ((off.x / size.width).coerceIn(0f, 1f) * durationMs).toLong()
+                        manualPos = target
+                        onSeek(target)
                     }
                 }
             }
@@ -573,7 +698,11 @@ private fun SeekBar(
                     onDragEnd = {
                         val f = dragFraction
                         dragFraction = null
-                        if (f != null && durationMs > 0) onSeek((f * durationMs).toLong())
+                        if (f != null && durationMs > 0) {
+                            val target = (f * durationMs).toLong()
+                            manualPos = target
+                            onSeek(target)
+                        }
                     },
                     onDragCancel = { dragFraction = null }
                 ) { change, _ ->

@@ -292,7 +292,8 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             _loadingMore.value = group.plugin
             val my = session
             try {
-                val res = runtime.callAsync(group.plugin, "search", listOf(q, next.toString(), type))
+                // 粘性 home 引擎：与聚合搜索同路由，避免翻页请求长期占用 primary 拖慢播放解析
+                val res = runtime.callParallel(group.plugin, "search", listOf(q, next.toString(), type))
                 if (my != session) return@launch
                 val obj = res as? JSONObject
                 val arr = obj?.optJSONArray("data") ?: (res as? JSONArray)
@@ -323,7 +324,8 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
         viewModelScope.launch(Dispatchers.Default) {
             val my = session
             try {
-                val res = runtime.callAsync(group.plugin, "search", listOf(q, "1", type))
+                // 粘性 home 引擎：与聚合搜索同路由，避免占用 primary 拖慢播放解析
+                val res = runtime.callParallel(group.plugin, "search", listOf(q, "1", type))
                 if (my != session) return@launch
                 val obj = res as? JSONObject
                 val arr = obj?.optJSONArray("data") ?: (res as? JSONArray)

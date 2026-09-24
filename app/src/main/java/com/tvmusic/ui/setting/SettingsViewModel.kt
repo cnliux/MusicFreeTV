@@ -8,6 +8,7 @@ import com.tvmusic.plugin.PlatformHealth
 import com.tvmusic.plugin.PluginRepository
 import com.tvmusic.plugin.PluginRuntime
 import com.tvmusic.remote.RemoteConfigService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -23,6 +24,9 @@ class SettingsViewModel(app: TvMusicApp) : ViewModel() {
     val plugins: StateFlow<List<PluginRecord>> = repo.plugins
     val subscribed: StateFlow<List<String>> = repo.subscribed
     val syncing: StateFlow<Boolean> = repo.syncing
+
+    /** 最近一次手动"检查更新"的结果（null 表示还未手动同步过）。 */
+    val syncReport: StateFlow<PluginRepository.SyncReport?> = repo.syncReport
 
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
@@ -95,7 +99,11 @@ class SettingsViewModel(app: TvMusicApp) : ViewModel() {
     fun loadVarsAsDraft(pluginKey: String) {
         val existing = _drafts.value
         if (existing.containsKey(pluginKey)) return
-        _drafts.value = existing + (pluginKey to store.loadVariables(pluginKey))
+        // SQLite 查询放后台，避免展开变量区时阻塞主线程
+        viewModelScope.launch(Dispatchers.IO) {
+            val vars = store.loadVariables(pluginKey)
+            _drafts.value = _drafts.value + (pluginKey to vars)
+        }
     }
 
     fun toggleExpanded(pluginKey: String) {
@@ -105,13 +113,18 @@ class SettingsViewModel(app: TvMusicApp) : ViewModel() {
 
     fun setDraft(pluginKey: String, varKey: String, value: String) {
         val cur = _drafts.value
-        val pk = cur[pluginKey] ?: store.loadVariables(pluginKey)
+        // 草稿在展开时已由 loadVarsAsDraft 后台加载；此处缺失用空表即可，
+        // 绝不在主线程同步查库（旧实现在每次输入时都可能触发一次全键查询）
+        val pk = cur[pluginKey] ?: emptyMap()
         _drafts.value = cur + (pluginKey to (pk + (varKey to value)))
     }
 
     fun saveVars(pluginKey: String) {
         val map = _drafts.value[pluginKey] ?: return
-        map.forEach { (k, v) -> store.upsertVariable(pluginKey, k, v) }
-        _message.value = "已保存用户变量：$pluginKey"
+        viewModelScope.launch(Dispatchers.IO) {
+            // 逐行写改单次事务，大幅减少 SQLite 磁盘同步次数
+            store.replaceVariables(pluginKey, map)
+            _message.value = "已保存用户变量：$pluginKey"
+        }
     }
 }

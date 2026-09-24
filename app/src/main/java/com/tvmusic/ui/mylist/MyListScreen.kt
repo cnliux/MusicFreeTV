@@ -183,7 +183,17 @@ fun MyListScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 32.dp)
                 ) {
-                    itemsIndexed(queue, key = { i, _ -> "q-$i" }) { index, entry ->
+                    itemsIndexed(
+                        queue,
+                        // 稳定 key：用来源插件+条目 id；id 缺失（少数插件）退回索引保证唯一
+                        key = { i, e ->
+                            val id = e.raw.optString(
+                                "id",
+                                e.raw.optString("songmid", e.raw.optString("lid", ""))
+                            )
+                            if (id.isNotBlank()) "q-${e.plugin}-$id" else "q-idx-$i"
+                        }
+                    ) { index, entry ->
                         QueueRow(
                             index = index,
                             title = entry.title,

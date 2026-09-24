@@ -43,6 +43,7 @@ import com.tvmusic.ui.components.MediaCard
 import com.tvmusic.ui.components.MusicRow
 import com.tvmusic.ui.components.SectionHeader
 import com.tvmusic.ui.components.tvFocus
+import com.tvmusic.ui.components.withPlatform
 import com.tvmusic.ui.sheet.DetailTarget
 
 @Composable
@@ -176,7 +177,7 @@ private fun ControlLabel(text: String) {
     )
 }
 
-/** 结果面板：站点过滤条 + 结果列表（Ready 与渐进式 Searching 共用）。 */
+/** 结果面板：站点过滤条 + 全部收藏 + 结果列表（Ready 与渐进式 Searching 共用）。 */
 @Composable
 private fun ColumnScope.ResultsPanel(
     groups: List<SearchGroup>,
@@ -191,24 +192,65 @@ private fun ColumnScope.ResultsPanel(
     val plugins = remember(groups) { groups.map { it.plugin }.distinct() }
     var selectedPlugin by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(plugins) { if (plugins.isEmpty()) selectedPlugin = null }
+
+    val playback = com.tvmusic.core.TvMusicApp.from(
+        androidx.compose.ui.platform.LocalContext.current
+    ).playback
+    val favorites by playback.favorites.collectAsState()
+    val favKeys = remember(favorites) { playback.favoriteKeys() }
+    var showCollectAll by remember { mutableStateOf(false) }
+    // 单曲收藏弹层目标：null 表示未打开
+    var pickFavItem by remember { mutableStateOf<org.json.JSONObject?>(null) }
+
+    // 当前过滤结果中可收藏的曲目（仅歌曲类型；补全 platform 保证收藏后可回放）
+    val visibleSongs = remember(groups, selectedPlugin, type) {
+        if (type != "music") emptyList()
+        else (if (selectedPlugin == null) groups else groups.filter { it.plugin == selectedPlugin })
+            .flatMap { g -> g.entries.map { e -> withPlatform(e.raw, e.plugin) } }
+    }
+
     Column(Modifier.weight(1f)) {
-        if (plugins.size > 1) {
-            LazyRow(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                item(key = "__res_all__") {
-                    FilterChip(
-                        label = "全部",
-                        selected = selectedPlugin == null,
-                        onClick = { selectedPlugin = null }
-                    )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (plugins.size > 1) {
+                LazyRow(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    item(key = "__res_all__") {
+                        FilterChip(
+                            label = "全部",
+                            selected = selectedPlugin == null,
+                            onClick = { selectedPlugin = null }
+                        )
+                    }
+                    items(plugins, key = { "res_$it" }) { p ->
+                        FilterChip(
+                            label = p,
+                            selected = p == selectedPlugin,
+                            onClick = { selectedPlugin = p }
+                        )
+                    }
                 }
-                items(plugins, key = { "res_$it" }) { p ->
-                    FilterChip(
-                        label = p,
-                        selected = p == selectedPlugin,
-                        onClick = { selectedPlugin = p }
+            } else {
+                androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
+            }
+            if (visibleSongs.isNotEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .padding(start = 10.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                        .clickable { showCollectAll = true }
+                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                ) {
+                    Text(
+                        "♡ 全部收藏（${visibleSongs.size}）",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 13.sp
                     )
                 }
             }
@@ -217,10 +259,27 @@ private fun ColumnScope.ResultsPanel(
             groups = if (selectedPlugin == null) groups else groups.filter { it.plugin == selectedPlugin },
             type = type,
             loadingMore = loadingMore,
+            favKeys = favKeys,
             onLoadMore = onLoadMore,
             onRetry = onRetry,
             onPlay = onPlay,
+            onPickFav = { pickFavItem = it },
             onOpenDetail = onOpenDetail
+        )
+    }
+
+    if (showCollectAll) {
+        com.tvmusic.ui.components.CollectSongsDialog(
+            entries = visibleSongs,
+            playback = playback,
+            onDismiss = { showCollectAll = false }
+        )
+    }
+    pickFavItem?.let { item ->
+        com.tvmusic.ui.components.PickFavDialog(
+            item = item,
+            playback = playback,
+            onDismiss = { pickFavItem = null }
         )
     }
 }
@@ -331,9 +390,11 @@ private fun ResultList(
     groups: List<SearchGroup>,
     type: String,
     loadingMore: String?,
+    favKeys: Set<String>,
     onLoadMore: (SearchGroup) -> Unit,
     onRetry: (SearchGroup) -> Unit,
     onPlay: (SearchEntry) -> Unit,
+    onPickFav: (org.json.JSONObject) -> Unit,
     onOpenDetail: (SearchEntry) -> Unit
 ) {
     val rows = remember(groups, loadingMore, type) {
@@ -418,12 +479,32 @@ private fun ResultList(
                 }
                 is ResultRow.Song -> {
                     val entry = row.e
+                    // 补全 platform 后算收藏主键（与 PlaybackStore 同规则）
+                    val favRaw = remember(entry) { withPlatform(entry.raw, entry.plugin) }
+                    val favKey = remember(favRaw) { com.tvmusic.data.PlaybackStore.favKeyOf(favRaw) }
                     MusicRow(
                         index = 0,
                         title = entry.title,
                         artist = entry.artist,
                         album = entry.album,
-                        onClick = { onPlay(entry) }
+                        onClick = { onPlay(entry) },
+                        trailing = {
+                            // 单曲收藏：弹出收藏夹选择（可加入任意自定义收藏夹）
+                            val fav = favKey in favKeys
+                            Box(
+                                modifier = Modifier
+                                    .tvFocus()
+                                    .clickable { onPickFav(favRaw) }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    if (fav) "♥" else "♡",
+                                    fontSize = 18.sp,
+                                    color = if (fav) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     )
                 }
                 is ResultRow.Cards -> {

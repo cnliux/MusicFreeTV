@@ -57,6 +57,34 @@ class PluginRepository(
     private val _syncing = MutableStateFlow(false)
     val syncing: StateFlow<Boolean> = _syncing.asStateFlow()
 
+    /**
+     * 一次手动"检查更新"的结果汇总。
+     * @param updated 本次源码指纹变化、实际重装的插件名
+     * @param installed 本次新装的插件名
+     * @param failed 失败项（插件名: 原因）
+     * @param totalSeen 订阅源里声明的插件总数
+     */
+    data class SyncReport(
+        val timeMs: Long,
+        val updated: List<String>,
+        val installed: List<String>,
+        val failed: List<String>,
+        val totalSeen: Int
+    )
+
+    private val _syncReport = MutableStateFlow<SyncReport?>(null)
+    /** 最近一次手动同步（检查更新）的结果；自动同步不产生报告。 */
+    val syncReport: StateFlow<SyncReport?> = _syncReport.asStateFlow()
+
+    /** install() 过程中记录的事件（name, kind, err?）：手动同步开始时清空，结束后汇总成 SyncReport。 */
+    private val installEvents = java.util.concurrent.ConcurrentLinkedQueue<Triple<String, String, String?>>()
+
+    /** 手动同步期间订阅源声明的插件条目总数（含未变化跳过的），结束时清零。 */
+    private val syncSeenCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 同步防重入原子闸门（_syncing StateFlow 的 check-then-set 非原子，不能做并发闸门）。 */
+    private val syncGate = java.util.concurrent.atomic.AtomicBoolean(false)
+
     /** DB 中已有插件已全部注册进引擎（warmup 完成）。 */
     private val _ready = MutableStateFlow(false)
     val ready: StateFlow<Boolean> = _ready.asStateFlow()
@@ -162,9 +190,18 @@ class PluginRepository(
      *              是"启动后插件迟迟不可用"的主要根因。
      */
     fun syncAll(force: Boolean = false) {
-        if (_syncing.value) return
-        if (!force && !autoSyncDue()) return
+        // check-then-set 必须原子：UI 线程与远程 HTTP 线程可并发触发，
+        // 旧实现两段式判断会双跑（重复下载/注册，marker 注释要求串行）
+        if (!syncGate.compareAndSet(false, true)) return
+        if (!force && !autoSyncDue()) {
+            syncGate.set(false)
+            return
+        }
         _syncing.value = true
+        if (force) {
+            installEvents.clear()
+            syncSeenCount.set(0)
+        }
         scope.launch {
             try {
                 for (sub in _subscribed.value) {
@@ -172,11 +209,32 @@ class PluginRepository(
                         syncOne(sub)
                     } catch (e: Exception) {
                         Log.w("PluginRepository", "sync $sub failed: ${e.message}")
+                        installEvents.add(Triple(sub, "failed", e.message))
                     }
                 }
             } finally {
                 _syncing.value = false
+                syncGate.set(false)
                 syncPrefs.edit().putLong(KEY_LAST_AUTO_SYNC, System.currentTimeMillis()).apply()
+                if (force) {
+                    val updated = mutableListOf<String>()
+                    val installed = mutableListOf<String>()
+                    val failed = mutableListOf<String>()
+                    installEvents.forEach { (name, kind, err) ->
+                        when (kind) {
+                            "updated" -> updated.add(name)
+                            "installed" -> installed.add(name)
+                            else -> failed.add("$name（${err ?: "未知原因"}）")
+                        }
+                    }
+                    _syncReport.value = SyncReport(
+                        timeMs = System.currentTimeMillis(),
+                        updated = updated,
+                        installed = installed,
+                        failed = failed,
+                        totalSeen = syncSeenCount.get()
+                    )
+                }
             }
             refreshFromDb()
         }
@@ -207,6 +265,7 @@ class PluginRepository(
             importListJson(body)
             return null
         }
+        syncSeenCount.incrementAndGet()
         return installFromBody(url, body)
     }
 
@@ -257,10 +316,9 @@ class PluginRepository(
                 Log.i("PluginRepository", "skip duplicate source: ${dup.name} ($name)")
                 return@withContext null
             }
-            // 幂等：同名插件已安装则跳过（更新需先卸载）。
-            if (existing.firstOrNull { it.name == name } != null) {
-                return@withContext null
-            }
+            // 同名插件：指纹不同说明订阅源发布了更新，走更新路径（重新注册 + upsert，
+            // 保留原启用状态与安装时间）。旧实现此处静默 return，订阅插件更新永远无法下发
+            val oldRecord = existing.firstOrNull { it.name == name }
             val platform = detectPlatform(js) ?: return@withContext "无法解析插件 platform"
             // 崩溃看门狗：写标记，若注册时 native crash，下次启动跳过该插件
             val marker = File(appContext.filesDir, "plugin_load_marker")
@@ -270,22 +328,29 @@ class PluginRepository(
             if (!loaded) return@withContext "插件注册失败: $platform"
             val infoRaw = runtime.readInfo(platform) ?: return@withContext "读取插件信息失败: $platform"
             val info = parseInfo(infoRaw)
+            if (oldRecord != null) {
+                Log.i("PluginRepository", "update plugin $name ${oldRecord.hash.take(6)} -> ${hash.take(6)}")
+            }
             store.upsertPlugin(
                 PluginRecord(
                     name = name.ifBlank { info.platform },
                     url = url,
                     version = version ?: info.version,
-                    enabled = keepEnabled,
-                    installedAt = System.currentTimeMillis(),
+                    enabled = oldRecord?.enabled ?: keepEnabled,
+                    installedAt = oldRecord?.installedAt ?: System.currentTimeMillis(),
                     source = js,
                     info = info,
                     loadError = null,
                     hash = hash
                 )
             )
+            installEvents.add(
+                Triple(name.ifBlank { info.platform }, if (oldRecord != null) "updated" else "installed", null)
+            )
             refreshFromDb()
             null
         } catch (e: Throwable) {
+            installEvents.add(Triple(name, "failed", e.message))
             refreshFromDb()
             "安装失败: ${e.message}"
         }
@@ -318,11 +383,12 @@ class PluginRepository(
      */
     private suspend fun importListJson(body: String) {
         val arr = runCatching { JSONObject(body).optJSONArray("plugins") }.getOrNull() ?: return
+        syncSeenCount.addAndGet(arr.length())
         for (i in 0 until arr.length()) {
             val item = arr.optJSONObject(i) ?: continue
             val name = item.optString("name")
             val pluginUrl = item.optString("url")
-            val version = item.optString("version", null)
+            val version = optStr(item, "version")
             if (pluginUrl.isEmpty()) continue
             // 不再使用白名单限制，否则订阅里绝大多数音源都会被静默丢弃，
             // 表现为"首页只装上一个插件"。崩溃防护由看门狗 + 永久黑名单负责。
@@ -358,6 +424,9 @@ class PluginRepository(
         return null
     }
 
+    /** 读取可选字符串字段：缺失/NULL/空串统一返回 null（避免 optString(key, null) 的类型不匹配警告）。 */
+    private fun optStr(o: JSONObject, key: String): String? = o.optString(key).takeIf { it.isNotEmpty() }
+
     private fun parseInfo(json: JSONObject): PluginInfo {
         fun JSONArray.toStrings(): List<String> =
             (0 until length()).map { i -> optString(i) }
@@ -368,19 +437,19 @@ class PluginRepository(
                 UserVarDef(
                     key = o.optString("key"),
                     name = o.optString("name", o.optString("key")),
-                    type = o.optString("type", null)
+                    type = optStr(o, "type")
                 )
             }
         } ?: emptyList()
 
         return PluginInfo(
             platform = json.optString("platform", ""),
-            version = json.optString("version", null),
-            author = json.optString("author", null),
-            srcUrl = json.optString("srcUrl", null),
-            appVersion = json.optString("appVersion", null),
-            description = json.optString("description", null),
-            cacheControl = json.optString("cacheControl", null),
+            version = optStr(json, "version"),
+            author = optStr(json, "author"),
+            srcUrl = optStr(json, "srcUrl"),
+            appVersion = optStr(json, "appVersion"),
+            description = optStr(json, "description"),
+            cacheControl = optStr(json, "cacheControl"),
             primaryKey = json.optJSONArray("primaryKey")?.toStrings() ?: emptyList(),
             supportedSearchType = json.optJSONArray("supportedSearchType")?.toStrings() ?: emptyList(),
             userVariables = vars,

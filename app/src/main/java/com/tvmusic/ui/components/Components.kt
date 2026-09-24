@@ -439,6 +439,206 @@ fun LoadingBox(modifier: Modifier = Modifier.fillMaxSize()) {
     }
 }
 
+/* ---------------- 收藏对话框（详情页 / 搜索结果共用） ---------------- */
+
+/** 补全条目的 platform 字段（收藏/历史需要来源插件名才能回放）。 */
+fun withPlatform(o: org.json.JSONObject, plugin: String): org.json.JSONObject =
+    if (o.optString("platform").isNotBlank() || plugin.isBlank()) o
+    else org.json.JSONObject(o.toString()).put("platform", plugin)
+
+/** 收藏弹层公共骨架：半透明遮罩 + 居中卡片 + 标题/副标题 + 关闭按钮。 */
+@Composable
+private fun FavDialogBox(
+    title: String,
+    subtitle: String,
+    onDismiss: () -> Unit,
+    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xAA000000)),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(460.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(title, fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface)
+            Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            content()
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                modifier = Modifier.padding(top = 4.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .clickable(onClick = onDismiss)
+                        .padding(horizontal = 18.dp, vertical = 9.dp)
+                ) { Text("关闭", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp) }
+            }
+        }
+    }
+}
+
+/** 新建收藏夹行：输入名称后点「新建」回调（TV 遥控可调起 IME 输入）。 */
+@Composable
+private fun NewFavListRow(onCreate: (String) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        androidx.compose.material3.OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            placeholder = { Text("新建收藏夹名称", fontSize = 13.sp) },
+            singleLine = true,
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier
+                .weight(1f)
+                .tvFocus(shapeOverride = RoundedCornerShape(10.dp)),
+            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                cursorColor = MaterialTheme.colorScheme.primary
+            )
+        )
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.primary)
+                .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                .clickable {
+                    val n = name.trim()
+                    if (n.isNotEmpty()) { onCreate(n); name = "" }
+                }
+                .padding(horizontal = 18.dp, vertical = 10.dp)
+        ) { Text("新建", color = MaterialTheme.colorScheme.onPrimary, fontSize = 14.sp) }
+    }
+}
+
+/**
+ * 全部收藏弹层：把 entries 批量加入所选收藏夹（已收录的自动去重）。
+ * 收藏夹列表含「我的收藏」与全部自定义收藏夹；底部可直接新建收藏夹并加入，
+ * 不必先退出到「我的歌单」页建夹。
+ */
+@Composable
+fun CollectSongsDialog(
+    entries: List<org.json.JSONObject>,
+    playback: com.tvmusic.data.PlaybackStore,
+    onDismiss: () -> Unit
+) {
+    val lists by playback.lists.collectAsState()
+    var lastMsg by remember { mutableStateOf<String?>(null) }
+    FavDialogBox(
+        title = "全部收藏到…",
+        subtitle = "将本页已加载的 ${entries.size} 首加入所选收藏夹（已收藏的自动跳过）",
+        onDismiss = onDismiss
+    ) {
+        androidx.compose.foundation.lazy.LazyColumn(modifier = Modifier.height(280.dp)) {
+            items(lists.size) { i ->
+                val fl = lists[i]
+                val keys = remember(fl) { fl.items.map { playback.primaryKey(it) }.toSet() }
+                val have = entries.count { playback.primaryKey(it) in keys }
+                val all = entries.isNotEmpty() && have >= entries.size
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .tvFocus()
+                        .clickable {
+                            val added = playback.addAllToList(fl.id, entries)
+                            lastMsg = if (added > 0) "已加入「${fl.name}」$added 首"
+                            else "「${fl.name}」内已全部收藏"
+                        }
+                        .padding(vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        if (all) "✓ " else "　",
+                        color = MaterialTheme.colorScheme.primary,
+                        fontSize = 16.sp
+                    )
+                    Text(fl.name, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "（$have/${entries.size}）",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+            }
+        }
+        lastMsg?.let { Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary) }
+        NewFavListRow { name ->
+            val id = playback.addList(name)
+            if (id != null) {
+                val added = playback.addAllToList(id, entries)
+                lastMsg = "已新建「$name」并收藏 $added 首"
+            }
+        }
+    }
+}
+
+/**
+ * 单曲收藏弹层：点击收藏夹切换该曲在其中的收藏状态（♥ 表示已收录）。
+ * 可加入任意自定义收藏夹（而非固定「我的收藏」）；底部可新建收藏夹并直接收藏。
+ */
+@Composable
+fun PickFavDialog(
+    item: org.json.JSONObject,
+    playback: com.tvmusic.data.PlaybackStore,
+    onDismiss: () -> Unit
+) {
+    val lists by playback.lists.collectAsState()
+    val key = remember(item) { playback.primaryKey(item) }
+    val songName = item.optString("title", "").ifBlank { "该曲目" }
+    FavDialogBox(
+        title = "收藏到…",
+        subtitle = songName + "（点击收藏夹加入/移出）",
+        onDismiss = onDismiss
+    ) {
+        androidx.compose.foundation.lazy.LazyColumn(modifier = Modifier.height(280.dp)) {
+            items(lists.size) { i ->
+                val fl = lists[i]
+                val has = fl.items.any { playback.primaryKey(it) == key }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .tvFocus()
+                        .clickable { playback.toggleFavorite(item, fl.id) }
+                        .padding(vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        if (has) "♥" else "♡",
+                        color = if (has) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 18.sp,
+                        modifier = Modifier.width(28.dp)
+                    )
+                    Text(fl.name, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
+                    Text(
+                        "（${fl.items.size}）",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 8.dp)
+                    )
+                }
+            }
+        }
+        NewFavListRow { name ->
+            playback.addList(name)?.let { id -> playback.toggleFavorite(item, id) }
+        }
+    }
+}
+
 @Composable
 fun ErrorBox(message: String?, onRetry: (() -> Unit)? = null) {
     if (message == null) return

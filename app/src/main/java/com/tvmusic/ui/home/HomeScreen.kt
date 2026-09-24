@@ -120,7 +120,17 @@ fun HomeScreen(
                             onOpenMyList = onOpenMyList
                         )
                     }
-                    items(sections.size, key = { it }) { i ->
+                    items(
+                        sections.size,
+                        // 稳定 key：旧实现用 Int 索引，刷新/换音源后焦点位置与复用会错位
+                        key = { i ->
+                            when (val s = sections[i]) {
+                                is HomeSection.Recommend -> "rec-${s.plugin}-${s.tagTitle}"
+                                is HomeSection.Ranking -> "rank-${s.plugin}-${s.listTitle}"
+                                is HomeSection.Error -> "err-${s.plugin}-$i"
+                            }
+                        }
+                    ) { i ->
                         val section = sections[i]
                         when (section) {
                             is HomeSection.Recommend -> {

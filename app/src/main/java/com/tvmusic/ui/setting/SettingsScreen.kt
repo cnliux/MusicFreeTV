@@ -49,6 +49,7 @@ fun SettingsScreen(
     val expandedVars by viewModel.expandedVars.collectAsState()
     val drafts by viewModel.drafts.collectAsState()
     val health by viewModel.health.collectAsState()
+    val syncReport by viewModel.syncReport.collectAsState()
     val healthByPlatform = remember(health) { health.associateBy { it.platform } }
 
     var subUrl by remember { mutableStateOf("") }
@@ -91,6 +92,80 @@ fun SettingsScreen(
             }
         }
 
+        item(key = "eq") {
+            SectionHeader("音效")
+            SettingsCard {
+                // 预设列表来自播放器音效实例：进入设置页即确保播放器已创建（否则列表只有"原声"）
+                androidx.compose.runtime.LaunchedEffect(Unit) { com.tvmusic.player.PlayerManager.ensurePlayer() }
+                val pmState by com.tvmusic.player.PlayerManager.uiState.collectAsState()
+                val presets by com.tvmusic.player.PlayerManager.eqPresets.collectAsState()
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "均衡器 / 低音增强",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 15.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = pmState.eqEnabled,
+                        onCheckedChange = { com.tvmusic.player.PlayerManager.setEqEnabled(it) },
+                        modifier = Modifier.tvFocus()
+                    )
+                }
+                if (pmState.eqEnabled) {
+                    Text(
+                        "预设",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        presets.take(6).forEachIndexed { idx, name ->
+                            val active = idx == pmState.eqPreset
+                            Box(
+                                modifier = Modifier
+                                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        if (active) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                    .clickable { com.tvmusic.player.PlayerManager.setEqPreset(idx) }
+                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                            ) {
+                                Text(
+                                    name,
+                                    fontSize = 12.sp,
+                                    color = if (active) MaterialTheme.colorScheme.onPrimary
+                                    else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "低音增强  ${pmState.bassStrength / 10}%",
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 13.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        ActionButton("－") { com.tvmusic.player.PlayerManager.setBassStrength(pmState.bassStrength - 100) }
+                        Spacer(Modifier.width(10.dp))
+                        ActionButton("＋") { com.tvmusic.player.PlayerManager.setBassStrength(pmState.bassStrength + 100) }
+                    }
+                }
+            }
+        }
+
         item(key = "sub") {
             SectionHeader("订阅源")
             SettingsCard {
@@ -120,7 +195,47 @@ fun SettingsScreen(
                 )
                 Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     ActionButton("添加订阅并同步") { viewModel.addSubscription(subUrl) }
-                    ActionButton(if (syncing) "同步中…" else "立即同步全部") { viewModel.sync() }
+                    ActionButton(if (syncing) "检查中…" else "检查插件更新") { viewModel.sync() }
+                }
+                // 手动"检查更新"的结果汇总：新装 / 更新 / 失败分组列出
+                val report = syncReport
+                if (report != null && !syncing) {
+                    Column(Modifier.fillMaxWidth().padding(top = 12.dp)) {
+                        Text(
+                            buildString {
+                                append("本次检查：订阅声明 ${report.totalSeen} 个插件")
+                                if (report.updated.isEmpty() && report.installed.isEmpty() && report.failed.isEmpty()) {
+                                    append("，全部已是最新")
+                                }
+                            },
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 13.sp
+                        )
+                        if (report.updated.isNotEmpty()) {
+                            Text(
+                                "更新（${report.updated.size}）：${report.updated.joinToString("、")}",
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        if (report.installed.isNotEmpty()) {
+                            Text(
+                                "新装（${report.installed.size}）：${report.installed.joinToString("、")}",
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                        if (report.failed.isNotEmpty()) {
+                            Text(
+                                "失败（${report.failed.size}）：${report.failed.joinToString("、")}",
+                                color = MaterialTheme.colorScheme.error,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
