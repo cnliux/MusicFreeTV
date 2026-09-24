@@ -34,6 +34,24 @@ class PlaybackStore(context: Context) {
     private val favoritesFile = File(dir, "favorites.json")
     private val listsFile = File(dir, "favorite_lists.json")
 
+    /**
+     * 磁盘写入统一放到单线程后台执行（保序）：
+     * addHistory 由 ExoPlayer 主线程监听器在每次切歌时调用，
+     * 收藏操作也来自 UI/远程端——同步写整个 JSON 文件会阻塞主线程造成切歌卡顿。
+     * 内存状态仍同步更新，UI 不受影响。
+     */
+    private val writeExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "playback-store-writer").apply { isDaemon = true }
+    }
+
+    private fun writeAsync(file: File, list: List<JSONObject>) {
+        writeExecutor.execute { writeList(file, list) }
+    }
+
+    private fun saveListsAsync(lists: List<FavList>) {
+        writeExecutor.execute { saveLists(lists) }
+    }
+
     private val _history = MutableStateFlow<List<JSONObject>>(emptyList())
     val history: StateFlow<List<JSONObject>> = _history.asStateFlow()
 
@@ -99,9 +117,9 @@ class PlaybackStore(context: Context) {
         }
         if (changed) {
             _history.value = newHistory
-            writeList(historyFile, newHistory)
+            writeAsync(historyFile, newHistory)
             _lists.value = newLists
-            saveLists(newLists)
+            saveListsAsync(newLists)
             Log.i("PlaybackStore", "backfilled missing platform for legacy entries")
         }
     }
@@ -114,12 +132,12 @@ class PlaybackStore(context: Context) {
         list.add(0, item)
         val trimmed = if (list.size > max) list.subList(0, max) else list
         _history.value = trimmed
-        writeList(historyFile, trimmed)
+        writeAsync(historyFile, trimmed)
     }
 
     fun clearHistory() {
         _history.value = emptyList()
-        writeList(historyFile, emptyList())
+        writeAsync(historyFile, emptyList())
     }
 
     // ---------------- 收藏专辑 ----------------
@@ -161,7 +179,7 @@ class PlaybackStore(context: Context) {
         }
         lists[idx] = target.copy(items = items)
         _lists.value = lists
-        saveLists(lists)
+        saveListsAsync(lists)
         publishMerged()
         return nowFav
     }
@@ -170,7 +188,7 @@ class PlaybackStore(context: Context) {
     fun removeFavorite(item: JSONObject) {
         val key = primaryKey(item)
         _lists.value = _lists.value.map { l -> l.copy(items = l.items.filterNot { primaryKey(it) == key }) }
-        saveLists(_lists.value)
+        saveListsAsync(_lists.value)
         publishMerged()
     }
 
@@ -181,7 +199,7 @@ class PlaybackStore(context: Context) {
         _lists.value.firstOrNull { it.name == trimmed }?.let { return it.id }
         val id = "fav_" + System.currentTimeMillis().toString(36)
         _lists.value = _lists.value + FavList(id, trimmed, emptyList())
-        saveLists(_lists.value)
+        saveListsAsync(_lists.value)
         publishMerged()
         return id
     }
@@ -190,7 +208,7 @@ class PlaybackStore(context: Context) {
     fun removeList(id: String) {
         if (id == DEFAULT_FAV_ID) return
         _lists.value = _lists.value.filterNot { it.id == id }
-        saveLists(_lists.value)
+        saveListsAsync(_lists.value)
         publishMerged()
     }
 
@@ -200,14 +218,14 @@ class PlaybackStore(context: Context) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
         _lists.value = _lists.value.map { if (it.id == id) it.copy(name = trimmed) else it }
-        saveLists(_lists.value)
+        saveListsAsync(_lists.value)
         publishMerged()
     }
 
     /** 整体替换收藏专辑（导入配置用）。 */
     fun replaceAllLists(lists: List<FavList>) {
         _lists.value = lists
-        saveLists(lists)
+        saveListsAsync(lists)
         publishMerged()
     }
 

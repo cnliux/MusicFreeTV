@@ -72,6 +72,14 @@ class RemoteConfigService : Service() {
     private var serverSocket: ServerSocket? = null
     private var acceptThread: Thread? = null
 
+    /** 并发处理 HTTP 连接的小线程池：核心线程常驻，空闲回收，上限防止浏览器多标签打爆。 */
+    private val httpPool: java.util.concurrent.ThreadPoolExecutor by lazy {
+        java.util.concurrent.ThreadPoolExecutor(
+            2, 8, 30L, java.util.concurrent.TimeUnit.SECONDS,
+            java.util.concurrent.LinkedBlockingQueue(64)
+        ).apply { allowCoreThreadTimeOut(true) }
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -103,11 +111,21 @@ class RemoteConfigService : Service() {
 
             while (!ss.isClosed) {
                 val sock = try { ss.accept() } catch (_: Exception) { break }
+                // 每个连接交给线程池并发处理：浏览器会并发多条轮询/封面代理连接，
+                // 单线程串行会让一条慢请求（如 /api/img 代理最坏阻塞十几秒）卡死整个服务。
                 try {
-                    handle(sock)
-                } catch (e: Exception) {
-                    Log.w(TAG, "handle: ${e.message}")
-                } finally {
+                    httpPool.execute {
+                        try {
+                            sock.soTimeout = 15_000
+                            handle(sock)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "handle: ${e.message}")
+                        } finally {
+                            try { sock.close() } catch (_: Exception) {}
+                        }
+                    }
+                } catch (_: Exception) {
+                    // 线程池已满：直接拒绝，关闭连接，避免 accept 循环被拖住
                     try { sock.close() } catch (_: Exception) {}
                 }
             }
@@ -161,7 +179,7 @@ class RemoteConfigService : Service() {
                 }
                 val repo = app().repository
                 repo.addSubscription(url)
-                repo.syncAll()
+                repo.syncAll(force = true)
                 respond(socket, 200, JSONObject().put("ok", true).put("message", "已添加订阅并同步").toString())
             }
             method == "POST" && path == "/api/subscriptions/remove" -> {
@@ -191,7 +209,7 @@ class RemoteConfigService : Service() {
                 respond(socket, 200, JSONObject().put("ok", true).toString())
             }
             method == "POST" && path == "/api/sync" -> {
-                app().repository.syncAll()
+                app().repository.syncAll(force = true)
                 respond(socket, 200, JSONObject().put("ok", true).put("message", "开始同步订阅").toString())
             }
             method == "GET" && path == "/api/search/config" -> {
@@ -846,10 +864,12 @@ class RemoteConfigService : Service() {
                         enabled.forEachIndexed { idx, platform ->
                             launch(Dispatchers.IO) {
                                 val arr = try {
-                                    withTimeoutOrNull(11_000) {
+                                    // 粘性引擎路由下，同引擎多平台会排队；引擎级超时 60s，
+                                    // 这里给足排队余量，宁慢勿丢源（超时即整源无结果）
+                                    withTimeoutOrNull(25_000) {
                                         app.runtime.callParallel(
                                             platform, "search", listOf(keyword, page.toString(), "music"),
-                                            timeoutMs = 10_000
+                                            timeoutMs = 20_000
                                         )
                                     }?.let { res ->
                                         (res as? JSONObject)?.optJSONArray("data") ?: (res as? JSONArray)
@@ -890,13 +910,15 @@ class RemoteConfigService : Service() {
 
     /** 轮询会话：返回已积累的结果快照与完成进度。 */
     private fun respondSearchPoll(socket: Socket, session: SearchSession) {
+        // 直接引用条目对象：聚合逻辑只会 clear() 列表、不会改动单个 JSONObject，
+        // 无需每次轮询都 toString 再重新解析做深拷贝（大结果集下开销显著）。
         val results = JSONArray()
         synchronized(session.results) {
-            session.results.forEach { results.put(JSONObject(it.toString())) }
+            session.results.forEach { results.put(it) }
         }
         val perSource = JSONArray()
         synchronized(session.perSource) {
-            session.perSource.forEach { perSource.put(JSONObject(it.toString())) }
+            session.perSource.forEach { perSource.put(it) }
         }
         respond(
             socket, 200,
@@ -1092,6 +1114,7 @@ class RemoteConfigService : Service() {
     override fun onDestroy() {
         instance = null
         try { serverSocket?.close() } catch (_: Exception) {}
+        try { httpPool.shutdownNow() } catch (_: Exception) {}
         super.onDestroy()
     }
 }
@@ -1505,8 +1528,13 @@ function cycleMode() {
   }).catch(function () { toast('操作失败'); });
 }
 
+var playerFetching = false;
 function loadPlayer() {
+  // 同一时刻只允许一条 /api/player 在途：慢网下响应未回时跳过本轮，避免请求堆积
+  if (playerFetching) return;
+  playerFetching = true;
   api('/api/player').then(function (d) {
+    playerFetching = false;
     lastStatus = d;
     if (!d.title) {
       el('pTitle').textContent = '未在播放';
@@ -1546,7 +1574,7 @@ function loadPlayer() {
       el('pPos').textContent = fmtPos(d.position);
     }
     renderQueue(d, d.index);
-  }).catch(function () {});
+  }).catch(function () { playerFetching = false; });
 }
 
 /* 进度条拖动：拖动中本地预览，松手提交 seek */
@@ -1636,11 +1664,26 @@ function volume(delta) {
   post('/api/player/volume', { delta: delta }).then(function () { loadPlayer(); });
 }
 
+var lastQueueSig = '';
 function renderQueue(d, currentIdx) {
   var q = d.queue || [];
   el('qCount').textContent = q.length ? '· ' + q.length + ' 首' : '';
   var box = el('queueBox');
-  if (!q.length) { box.innerHTML = '<div class="empty">队列为空，去搜索推歌吧</div>'; return; }
+  if (!q.length) { lastQueueSig = ''; box.innerHTML = '<div class="empty">队列为空，去搜索推歌吧</div>'; return; }
+  // 队列内容播放期间不变，仅高亮行移动：签名相同就只切换 .cur，避免每 2 秒整表重建 DOM 卡顿
+  var sig = q.map(function (it) { return it.title + '\u0000' + it.artist; }).join('\u0001');
+  if (sig === lastQueueSig && box.children.length === q.length) {
+    for (var k = 0; k < box.children.length; k++) {
+      var c = box.children[k];
+      var isCur = k === currentIdx;
+      if (isCur !== c.classList.contains('cur')) {
+        c.className = 'qitem' + (isCur ? ' cur' : '');
+        c.children[0].textContent = isCur ? '▶' : (k + 1);
+      }
+    }
+    return;
+  }
+  lastQueueSig = sig;
   var html = '';
   q.forEach(function (it) {
     html += '<div class="qitem' + (it.index === currentIdx ? ' cur' : '') + '" onclick="skipTo(' + it.index + ')">' +
@@ -2203,10 +2246,14 @@ function importConfig(input) {
 }
 
 /* ---------------- 状态与轮询 ---------------- */
+var statusFetching = false;
 function loadStatus() {
+  if (statusFetching) return;
+  statusFetching = true;
   api('/api/status').then(function (d) {
+    statusFetching = false;
     if (d.status === 'ok') el('statusLine').textContent = '电视 ' + d.host + ':' + d.port + ' · v' + d.version + ' · 在线';
-  }).catch(function () { el('statusLine').textContent = '无法连接电视端'; });
+  }).catch(function () { statusFetching = false; el('statusLine').textContent = '无法连接电视端'; });
 }
 
 loadStatus();
@@ -2216,8 +2263,24 @@ loadPlayer();
 loadFavLists();
 loadSubs();
 loadPlugins();
-setInterval(loadStatus, 15000);
-setInterval(loadPlayer, 2000);
+
+/* 页面切到后台时暂停轮询：手机浏览器后台节流定时器不可靠，
+   继续轮询会在网络差时堆积请求把页面拖死；回到前台立即刷新一次并恢复。 */
+var pollTimers = null;
+function startPolling() {
+  if (pollTimers) return;
+  pollTimers = [setInterval(loadStatus, 15000), setInterval(loadPlayer, 2000)];
+}
+function stopPolling() {
+  if (!pollTimers) return;
+  pollTimers.forEach(clearInterval);
+  pollTimers = null;
+}
+startPolling();
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) stopPolling();
+  else { loadStatus(); loadPlayer(); startPolling(); }
+});
 </script>
 </body>
 </html>

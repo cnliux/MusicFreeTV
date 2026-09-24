@@ -202,7 +202,7 @@ JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17.0.x
 - [quickjs-android](https://github.com/taoweiji/quickjs-android)（陶维佳）
 - [Media3 / ExoPlayer](https://developer.android.com/media/media3)
 - [Coil](https://coil-kt.github.io/coil/) / [CameraX](https://developer.android.com/media/camera/camerax) / [zxing](https://github.com/zxing/zxing)
-
+> 感谢 MusicFree 项目及其插件作者社区
 > 本项目由 **opencode**（[https://opencode.ai](https://opencode.ai)）辅助开发与调试。
 
 ---

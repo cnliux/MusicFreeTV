@@ -38,7 +38,7 @@ class SettingsViewModel(app: TvMusicApp) : ViewModel() {
         if (url.isBlank()) return
         repo.addSubscription(url.trim())
         _message.value = "已添加订阅：$url"
-        repo.syncAll()
+        repo.syncAll(force = true)
     }
 
     fun removeSubscription(url: String) {
@@ -47,7 +47,7 @@ class SettingsViewModel(app: TvMusicApp) : ViewModel() {
     }
 
     fun sync() {
-        repo.syncAll()
+        repo.syncAll(force = true)
     }
 
     fun togglePlugin(name: String, enabled: Boolean) {

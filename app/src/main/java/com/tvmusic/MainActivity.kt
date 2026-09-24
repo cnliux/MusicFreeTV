@@ -70,9 +70,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** 调试：确认遥控器按键是否到达 Activity（logcat -s DpadDebug）。 */
+    /** 调试：确认遥控器按键是否到达 Activity（logcat -s DpadDebug）。仅 debug 构建启用。 */
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
-        if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+        if (BuildConfig.DEBUG && event.action == android.view.KeyEvent.ACTION_DOWN) {
             android.util.Log.d(
                 "DpadDebug",
                 "key=${event.keyCode} (${android.view.KeyEvent.keyCodeToString(event.keyCode)}) repeat=${event.repeatCount}"
@@ -93,8 +93,17 @@ class MainActivity : ComponentActivity() {
         val tabKey = when {
             route == "search" -> "search"
             route == "settings" -> "settings"
+            route == "mylist" -> "mylist"
             route == "about" -> "about"
             else -> "home"
+        }
+
+        // 主界面按返回：弹退出确认，避免遥控器返回键一按就直接退出应用
+        val showExitDialog = androidx.compose.runtime.remember {
+            androidx.compose.runtime.mutableStateOf(false)
+        }
+        androidx.activity.compose.BackHandler(enabled = route == "home" || route == null) {
+            showExitDialog.value = true
         }
 
         Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
@@ -107,6 +116,7 @@ class MainActivity : ComponentActivity() {
                         }
                         "search" -> navController.navigate("search")
                         "settings" -> navController.navigate("settings")
+                        "mylist" -> navController.navigate("mylist")
                         "about" -> navController.navigate("about")
                     }
                 }
@@ -243,6 +253,30 @@ class MainActivity : ComponentActivity() {
                     onClick = { navController.navigate("player") }
                 )
             }
+        }
+
+        // 退出确认对话框
+        if (showExitDialog.value) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showExitDialog.value = false },
+                title = { Text("退出应用") },
+                text = { Text("确定要退出 MusicFree TV 吗？退出后播放也会停止。") },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = {
+                        showExitDialog.value = false
+                        context.stopService(
+                            android.content.Intent(context, com.tvmusic.player.PlaybackService::class.java)
+                        )
+                        context.stopService(
+                            android.content.Intent(context, com.tvmusic.remote.RemoteConfigService::class.java)
+                        )
+                        (context as? android.app.Activity)?.finishAffinity()
+                    }) { Text("退出") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { showExitDialog.value = false }) { Text("取消") }
+                }
+            )
         }
     }
 }

@@ -38,6 +38,16 @@ class PluginRepository(
         .readTimeout(20, TimeUnit.SECONDS)
         .build()
 
+    /** 自动同步节流用的偏好存储。 */
+    private val syncPrefs by lazy {
+        appContext.getSharedPreferences("plugin_sync_prefs", Context.MODE_PRIVATE)
+    }
+
+    private companion object {
+        const val KEY_LAST_AUTO_SYNC = "last_auto_sync_at"
+        const val AUTO_SYNC_INTERVAL_MS = 4 * 60 * 60 * 1000L
+    }
+
     private val _plugins = MutableStateFlow<List<PluginRecord>>(emptyList())
     val plugins: StateFlow<List<PluginRecord>> = _plugins.asStateFlow()
 
@@ -94,6 +104,8 @@ class PluginRepository(
                 marker.delete()
                 if (loaded) {
                     okCount++
+                    // 每注册成功一个就刷新列表：首页/搜索侧插件渐进可见，不必等全部完成
+                    refreshFromDb()
                 } else {
                     store.markLoadErrorByName(p.name, "register failed")
                     Log.w("PluginRepository", "register failed: ${p.id}")
@@ -103,6 +115,9 @@ class PluginRepository(
             Log.i("PluginRepository", "warmup done: $okCount/${records.size} plugins loaded")
             _ready.value = true
             refreshFromDb()
+            // 自动同步放在 warmup 之后串行执行：不与插件注册抢 JS 引擎锁；
+            // 且带 4 小时节流，正常启动直接跳过重复下载。
+            syncAll(force = false)
         }
     }
 
@@ -139,9 +154,16 @@ class PluginRepository(
         refreshFromDb()
     }
 
-    /** 遍历所有订阅源并安装/更新其中的插件。 */
-    fun syncAll() {
+    /**
+     * 遍历所有订阅源并安装/更新其中的插件。
+     * @param force 手动触发（设置页 / web 控制台 / 新增订阅）时为 true，跳过节流立即同步。
+     *              自动触发（启动 warmup 完成后）走 4 小时节流：已装插件时跳过重复
+     *              下载与注册——此前每次启动都与 warmup 并发抢 JS 引擎锁，
+     *              是"启动后插件迟迟不可用"的主要根因。
+     */
+    fun syncAll(force: Boolean = false) {
         if (_syncing.value) return
+        if (!force && !autoSyncDue()) return
         _syncing.value = true
         scope.launch {
             try {
@@ -154,9 +176,19 @@ class PluginRepository(
                 }
             } finally {
                 _syncing.value = false
+                syncPrefs.edit().putLong(KEY_LAST_AUTO_SYNC, System.currentTimeMillis()).apply()
             }
             refreshFromDb()
         }
+    }
+
+    /** 自动同步节流：4 小时内且已有可用插件时跳过（全新安装不跳）。 */
+    private fun autoSyncDue(): Boolean {
+        val last = syncPrefs.getLong(KEY_LAST_AUTO_SYNC, 0L)
+        if (System.currentTimeMillis() - last <= AUTO_SYNC_INTERVAL_MS && _plugins.value.any { it.enabled }) {
+            return false
+        }
+        return true
     }
 
     /** 下载 url 内容，失败返回 null。 */

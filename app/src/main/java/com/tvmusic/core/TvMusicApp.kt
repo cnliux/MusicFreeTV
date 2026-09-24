@@ -51,7 +51,7 @@ class TvMusicApp : Application() {
         // 不内置任何插件/订阅源：音源一律由用户添加（订阅同步 / 设备 plugin_sources 文件 / 手动安装）。
 
         repository.warmup()
-        repository.syncAll()
+        // 自动同步由 warmup 完成后串行触发（带 4h 节流），避免启动时与插件注册抢 JS 引擎锁
 
         RemoteConfigService.ensureStarted(this)
     }

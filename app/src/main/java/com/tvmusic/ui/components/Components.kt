@@ -244,6 +244,7 @@ fun AppTitleBar(
         TabItem("首页", "home", selected, onSelect, initialFocus = true)
         TabItem("搜索", "search", selected, onSelect)
         TabItem("设置", "settings", selected, onSelect)
+        TabItem("我的歌单", "mylist", selected, onSelect)
         TabItem("关于", "about", selected, onSelect)
     }
 }
@@ -313,18 +314,18 @@ fun FilterChip(
 ) {
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(20.dp))
+            .clip(RoundedCornerShape(14.dp))
             .background(
                 if (selected) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.surface
             )
-            .tvFocus(shapeOverride = RoundedCornerShape(20.dp))
+            .tvFocus(shapeOverride = RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 10.dp)
+            .padding(horizontal = 13.dp, vertical = 6.dp)
     ) {
         Text(
             label,
-            fontSize = 14.sp,
+            fontSize = 12.sp,
             maxLines = 1,
             color = if (selected) MaterialTheme.colorScheme.onPrimary
             else MaterialTheme.colorScheme.onSurfaceVariant

@@ -33,12 +33,13 @@ class PluginRuntime private constructor(
     private val laneBusy = IntArray(poolSize)
     private val laneLock = Any()
 
-    private fun pickLane(): Int = synchronized(laneLock) {
-        var best = 0
-        for (i in 1 until poolSize) if (laneBusy[i] < laneBusy[best]) best = i
-        laneBusy[best]++
-        best
-    }
+    /**
+     * 平台 → 归属引擎（粘性路由）。插件的 JS 模块级状态（cookie/登录态/token/缓存）
+     * 只在其首次运行的引擎上建立；跨引擎分发会导致状态分裂——聚合搜索里部分源
+     * 无结果、而单独搜索（总是落到 primary）却有结果的根因。
+     * 粘住 home 引擎后，不同平台仍分布在不同引擎上，保持真正的并行 I/O。
+     */
+    private val platformLane = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
     private fun releaseLane(lane: Int) = synchronized(laneLock) {
         laneBusy[lane]--
@@ -125,7 +126,9 @@ class PluginRuntime private constructor(
     }
 
     /**
-     * 并行搜索调用：分发到最空闲的引擎执行，多个音源可真正同时搜。
+     * 并行搜索调用：分发到平台归属引擎（粘性）执行，多个音源可真正同时搜。
+     * 首次出现的平台按"最空闲引擎"分配并记住归属；同一引擎上的多个平台
+     * 由引擎自身的 invokeLock 串行（排序正确，只是不并行）。
      * 要求插件已通过 [loadPlugin] 注册到所有引擎。
      */
     suspend fun callParallel(
@@ -134,7 +137,13 @@ class PluginRuntime private constructor(
         args: List<String> = emptyList(),
         timeoutMs: Long = primary.timeoutMillis
     ): Any {
-        val lane = pickLane()
+        val lane = synchronized(laneLock) {
+            platformLane.getOrPut(platform) {
+                var best = 0
+                for (i in 1 until poolSize) if (laneBusy[i] < laneBusy[best]) best = i
+                best
+            }
+        }
         return withContext(Dispatchers.IO) {
             try {
                 val argsJson = JSONArray(args).toString()

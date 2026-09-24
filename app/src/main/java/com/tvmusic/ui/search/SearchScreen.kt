@@ -9,8 +9,10 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -58,21 +60,24 @@ fun SearchScreen(
     val sortBy by viewModel.sortBy.collectAsState()
     val sortAsc by viewModel.sortAsc.collectAsState()
 
-    Column(Modifier.fillMaxSize().padding(horizontal = 28.dp)) {
-        // 搜索输入行
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 28.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+    Row(Modifier.fillMaxSize().padding(horizontal = 28.dp)) {
+        // 左半边：搜索控制区（输入 / 类型 / 音源 / 筛选排序）——窄栏，把空间留给结果
+        Column(
+            modifier = Modifier
+                .weight(0.35f)
+                .fillMaxHeight()
+                .padding(end = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             OutlinedTextField(
                 value = query,
                 onValueChange = viewModel::setQuery,
-                placeholder = { Text("搜索音乐，输入后点「搜索」") },
+                placeholder = { Text("搜索音乐") },
                 singleLine = true,
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier
-                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(top = 24.dp)
                     .tvFocus(shapeOverride = RoundedCornerShape(10.dp)),
                 textStyle = MaterialTheme.typography.bodyLarge,
                 colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
@@ -80,85 +85,101 @@ fun SearchScreen(
                     cursorColor = MaterialTheme.colorScheme.primary
                 )
             )
-            SubmitButton("搜索") { viewModel.submit() }
-        }
+            SubmitButton(
+                "搜 索",
+                Modifier.fillMaxWidth()
+            ) { viewModel.submit() }
 
-        // 类型页签：对应 RN 结果页的 单曲/专辑/歌手/歌单 TabView
-        if (phase !is SearchPhase.Idle) {
-            TypeTabs(selectedType = selectedType, onSelect = viewModel::setType)
-        }
-
-        // 音源筛选条：全部 + 各平台（多选）
-        if (phase !is SearchPhase.Idle && searchablePlatforms.isNotEmpty()) {
-            PlatformFilterRow(
-                platforms = searchablePlatforms,
-                selected = selectedSources,
-                onToggle = viewModel::toggleSource,
-                onAll = viewModel::selectAllSources
-            )
-        }
-
-        // 结果过滤 + 排序条
-        if (phase !is SearchPhase.Idle) {
-            FilterSortRow(
-                durFilter = durFilter,
-                needArtwork = needArtwork,
-                sortBy = sortBy,
-                sortAsc = sortAsc,
-                onDur = viewModel::setDurFilter,
-                onArtwork = viewModel::setNeedArtwork,
-                onSort = viewModel::setSortBy,
-                onToggleAsc = viewModel::toggleSortAsc
-            )
-        }
-
-        when (phase) {
-            is SearchPhase.Idle -> HistoryPanel(viewModel, history, query)
-            is SearchPhase.Searching -> {
-                val s = phase as SearchPhase.Searching
-                if (groups.isEmpty()) {
-                    LoadingBox(Modifier.weight(1f).fillMaxWidth())
-                } else {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            if (s.done < s.total)
-                                "正在搜索 ${s.done}/${s.total} 个音源…（结果边到边显示）"
-                            else
-                                "正在整理已返回的结果…",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)
-                        )
-                        ResultsPanel(
-                            groups = groups,
-                            type = selectedType,
-                            loadingMore = loadingMore,
-                            onLoadMore = viewModel::loadMore,
-                            onRetry = viewModel::retry,
-                            onPlay = viewModel::play,
-                            onOpenDetail = { entry ->
-                                viewModel.openDetail(entry)?.let(onOpenDetail)
-                            }
-                        )
-                    }
-                }
-            }
-            is SearchPhase.NoResult -> EmptyResult(message = (phase as SearchPhase.NoResult).message)
-            is SearchPhase.Ready -> {
-                ResultsPanel(
-                    groups = groups,
-                    type = selectedType,
-                    loadingMore = loadingMore,
-                    onLoadMore = viewModel::loadMore,
-                    onRetry = viewModel::retry,
-                    onPlay = viewModel::play,
-                    onOpenDetail = { entry ->
-                        viewModel.openDetail(entry)?.let(onOpenDetail)
-                    }
+            if (phase !is SearchPhase.Idle) {
+                ControlLabel("类型")
+                TypeTabs(selectedType = selectedType, onSelect = viewModel::setType)
+                ControlLabel("音源")
+                PlatformFilterRow(
+                    platforms = searchablePlatforms,
+                    selected = selectedSources,
+                    onToggle = viewModel::toggleSource,
+                    onAll = viewModel::selectAllSources
+                )
+                ControlLabel("筛选与排序")
+                FilterSortPanel(
+                    durFilter = durFilter,
+                    needArtwork = needArtwork,
+                    sortBy = sortBy,
+                    sortAsc = sortAsc,
+                    onDur = viewModel::setDurFilter,
+                    onArtwork = viewModel::setNeedArtwork,
+                    onSort = viewModel::setSortBy,
+                    onToggleAsc = viewModel::toggleSortAsc
                 )
             }
         }
+
+        // 右半边：结果区——占大头
+        Column(
+            modifier = Modifier
+                .weight(0.65f)
+                .fillMaxHeight()
+                .padding(start = 20.dp)
+        ) {
+            when (phase) {
+                is SearchPhase.Idle -> HistoryPanel(viewModel, history, query)
+                is SearchPhase.Searching -> {
+                    val s = phase as SearchPhase.Searching
+                    if (groups.isEmpty()) {
+                        LoadingBox(Modifier.weight(1f).fillMaxWidth())
+                    } else {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                if (s.done < s.total)
+                                    "正在搜索 ${s.done}/${s.total} 个音源…（结果边到边显示）"
+                                else
+                                    "正在整理已返回的结果…",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)
+                            )
+                            ResultsPanel(
+                                groups = groups,
+                                type = selectedType,
+                                loadingMore = loadingMore,
+                                onLoadMore = viewModel::loadMore,
+                                onRetry = viewModel::retry,
+                                onPlay = viewModel::play,
+                                onOpenDetail = { entry ->
+                                    viewModel.openDetail(entry)?.let(onOpenDetail)
+                                }
+                            )
+                        }
+                    }
+                }
+                is SearchPhase.NoResult -> EmptyResult(message = (phase as SearchPhase.NoResult).message)
+                is SearchPhase.Ready -> {
+                    ResultsPanel(
+                        groups = groups,
+                        type = selectedType,
+                        loadingMore = loadingMore,
+                        onLoadMore = viewModel::loadMore,
+                        onRetry = viewModel::retry,
+                        onPlay = viewModel::play,
+                        onOpenDetail = { entry ->
+                            viewModel.openDetail(entry)?.let(onOpenDetail)
+                        }
+                    )
+                }
+            }
+        }
     }
+}
+
+/** 左栏分组小标题。 */
+@Composable
+private fun ControlLabel(text: String) {
+    Text(
+        text,
+        fontSize = 12.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 6.dp)
+    )
 }
 
 /** 结果面板：站点过滤条 + 结果列表（Ready 与渐进式 Searching 共用）。 */
@@ -255,9 +276,9 @@ private fun PlatformFilterRow(
     }
 }
 
-/** 结果过滤（时长/封面）与排序条。 */
+/** 结果过滤（时长/封面）与排序面板：左半栏内竖排两行（可横向滚动），避免溢出。 */
 @Composable
-private fun FilterSortRow(
+private fun FilterSortPanel(
     durFilter: DurationFilter,
     needArtwork: Boolean,
     sortBy: String,
@@ -267,31 +288,47 @@ private fun FilterSortRow(
     onSort: (String) -> Unit,
     onToggleAsc: () -> Unit
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text("时长", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        DurationFilter.entries.forEach { f ->
-            FilterChip(label = f.label, selected = durFilter == f, onClick = { onDur(f) })
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            item(key = "__dur_label__") {
+                Text("时长", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            items(DurationFilter.entries, key = { "d_${it.name}" }) { f ->
+                FilterChip(label = f.label, selected = durFilter == f, onClick = { onDur(f) })
+            }
         }
-        FilterChip(
-            label = if (needArtwork) "有封面✓" else "有封面",
-            selected = needArtwork,
-            onClick = { onArtwork(!needArtwork) }
-        )
-        Text("排序", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        val sortLabels = mapOf(
-            SearchSettings.SORT_DEFAULT to "默认",
-            SearchSettings.SORT_DURATION to "时长",
-            SearchSettings.SORT_TITLE to "歌名",
-            SearchSettings.SORT_ARTIST to "歌手"
-        )
-        sortLabels.forEach { (k, v) ->
-            FilterChip(label = v, selected = sortBy == k, onClick = { onSort(k) })
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            item(key = "__art__") {
+                FilterChip(
+                    label = if (needArtwork) "有封面✓" else "有封面",
+                    selected = needArtwork,
+                    onClick = { onArtwork(!needArtwork) }
+                )
+            }
+            item(key = "__sort_label__") {
+                Text("排序", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            val sortLabels = mapOf(
+                SearchSettings.SORT_DEFAULT to "默认",
+                SearchSettings.SORT_DURATION to "时长",
+                SearchSettings.SORT_TITLE to "歌名",
+                SearchSettings.SORT_ARTIST to "歌手"
+            )
+            sortLabels.forEach { (k, v) ->
+                item(key = "s_$k") {
+                    FilterChip(label = v, selected = sortBy == k, onClick = { onSort(k) })
+                }
+            }
+            item(key = "__asc__") {
+                FilterChip(label = if (sortAsc) "升序" else "降序", selected = true, onClick = onToggleAsc)
+            }
         }
-        FilterChip(label = if (sortAsc) "升序" else "降序", selected = true, onClick = onToggleAsc)
     }
 }
 
@@ -472,11 +509,11 @@ private fun HistoryPanel(
                 modifier = Modifier.padding(horizontal = 28.dp)
             )
         } else {
-            Row(
+            LazyRow(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                history.take(8).forEach { w ->
+                items(history.take(8), key = { "h_$it" }) { w ->
                     Chip(
                         label = w,
                         onSelect = { viewModel.useHistory(w) },
@@ -491,11 +528,11 @@ private fun HistoryPanel(
             SectionHeader("热门搜索")
         }
         val hot = listOf("周杰伦", "林俊杰", "陈奕迅", "邓紫棋", "许嵩", "赵雷", "新歌榜", "纯音乐")
-        Row(
+        LazyRow(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            hot.forEach { w ->
+            items(hot, key = { "hot_$it" }) { w ->
                 Chip(label = w, onSelect = { viewModel.useHistory(w) }, onClose = null)
             }
         }
@@ -546,9 +583,9 @@ private fun EmptyResult(message: String) {
 }
 
 @Composable
-private fun SubmitButton(label: String, onClick: () -> Unit) {
+private fun SubmitButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.primary)
             .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
@@ -558,7 +595,8 @@ private fun SubmitButton(label: String, onClick: () -> Unit) {
         Text(
             label,
             color = MaterialTheme.colorScheme.onPrimary,
-            fontSize = 15.sp
+            fontSize = 15.sp,
+            modifier = Modifier.align(Alignment.Center)
         )
     }
 }

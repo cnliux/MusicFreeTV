@@ -77,7 +77,7 @@ fun MyListScreen(
                     .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
             ) { Text("‹ 返回", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp) }
             Text(
-                "我的列表",
+                "我的歌单",
                 fontSize = 20.sp,
                 color = MaterialTheme.colorScheme.onBackground,
                 modifier = Modifier.padding(start = 16.dp)
@@ -102,16 +102,33 @@ fun MyListScreen(
             }
         }
 
-        // 当前专辑操作条
-        if (currentList != null && currentList.id != PlaybackStore.DEFAULT_FAV_ID) {
+        // 播放全部 + 当前专辑操作条（队列页签没有播放全部——它本身就是队列）
+        if (!isQueue && list.isNotEmpty()) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                SmallAction("重命名") { showNameDialog = currentList.name }
-                SmallAction("删除专辑") {
-                    playback.removeList(currentList.id)
-                    selectedListId = null
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.primary)
+                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                        .clickable { playAll(list) }
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        "▶ 播放全部 (${list.size})",
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        fontSize = 14.sp
+                    )
+                }
+                if (currentList != null && currentList.id != PlaybackStore.DEFAULT_FAV_ID) {
+                    SmallAction("重命名") { showNameDialog = currentList.name }
+                    SmallAction("删除专辑") {
+                        playback.removeList(currentList.id)
+                        selectedListId = null
+                    }
                 }
             }
         }
@@ -383,4 +400,14 @@ private fun playItem(item: JSONObject) {
     if (plugin.isBlank()) return
     val entry = QueueEntry(plugin, item)
     PlayerManager.play(plugin, entry, listOf(entry), 0)
+}
+
+/** 播放整个列表：所有有效条目组成队列，从第一首开始播。 */
+private fun playAll(items: List<JSONObject>) {
+    val entries = items.mapNotNull { item ->
+        val plugin = item.optString("platform", "")
+        if (plugin.isBlank()) null else QueueEntry(plugin, item)
+    }
+    if (entries.isEmpty()) return
+    PlayerManager.play(entries[0].plugin, entries[0], entries, 0)
 }

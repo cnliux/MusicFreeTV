@@ -322,7 +322,7 @@ private fun OperationsRow(
     ) {
         ActionEntry("🔥", "推荐歌单", "按标签发现好歌单", Modifier.weight(1f), onOpenRecommend)
         ActionEntry("🏆", "排行榜", "各平台权威榜单", Modifier.weight(1f), onOpenTopList)
-        ActionEntry("📻", "我的列表", "历史 / 收藏", Modifier.weight(1f), onOpenMyList)
+        ActionEntry("📻", "我的歌单", "历史 / 收藏", Modifier.weight(1f), onOpenMyList)
     }
 }
 

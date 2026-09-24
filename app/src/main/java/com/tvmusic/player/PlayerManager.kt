@@ -3,7 +3,9 @@ package com.tvmusic.player
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Tracks
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultHttpDataSource
@@ -58,7 +60,9 @@ data class PlayerUiState(
     val lrcIndex: Int = -1,
     val isFavorite: Boolean = false,
     val volume: Int = 100,
-    val playMode: PlayMode = PlayMode.ORDER
+    val playMode: PlayMode = PlayMode.ORDER,
+    /** 当前条目含视频轨（由 ExoPlayer 轨道检测得出，仅真实视频流为 true）。 */
+    val isVideo: Boolean = false
 )
 
 /**
@@ -97,6 +101,14 @@ object PlayerManager {
 
     /** 连续播放失败计数：达到阈值则停止自动跳下一曲，避免整队列快速空转。 */
     private var errorStreak = 0
+
+    /**
+     * 播放会话代数：每次 play() 自增。getMediaSource 是异步解析，快速连点两首歌时
+     * 旧歌的解析结果可能后返回并 setMediaItem 覆盖新歌（表现为"点了新歌放的还是旧歌"）。
+     * 过期的解析结果直接丢弃。
+     */
+    @Volatile
+    private var playSession = 0
 
     /**
      * 统一处理播放失败：记录错误并自动跳到队列下一曲。
@@ -188,6 +200,20 @@ object PlayerManager {
             reportPlayError("播放失败：${error.errorCodeName}")
         }
 
+        /**
+         * 视频检测：轨道变化时判断当前是否有被选中的视频轨。
+         * 比按 URL 后缀嗅探可靠——mp4 也可能是纯音频，而真实视频轨不会误判。
+         * 音频条目恒为 false；视频条目自动切换 UI 到视频渲染模式。
+         */
+        override fun onTracksChanged(tracks: Tracks) {
+            val hasVideo = tracks.groups.any { group ->
+                group.type == C.TRACK_TYPE_VIDEO && group.isSelected
+            }
+            if (_uiState.value.isVideo != hasVideo) {
+                _uiState.value = _uiState.value.copy(isVideo = hasVideo)
+            }
+        }
+
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (mediaItem == null) return
             val idx = _uiState.value.queueIndex
@@ -242,6 +268,7 @@ object PlayerManager {
     ) {
         // 插件解析（含阻塞式 JS 调用）放 Default 线程；
         // ExoPlayer 只能在主线程访问，拿到地址后必须切回主线程。
+        val my = ++playSession
         scope.launch(Dispatchers.Default) {
             try {
                 _uiState.value = _uiState.value.copy(
@@ -298,6 +325,9 @@ object PlayerManager {
                     .build()
 
                 withContext(Dispatchers.Main) {
+                    // 会话守卫：解析期间用户又点了别的歌，本次过期结果直接丢弃，
+                    // 否则旧地址 setMediaItem 会覆盖新歌（"点新歌放旧歌"）
+                    if (my != playSession) return@withContext
                     // 每个音源可能带不同请求头：更新 DataSourceFactory（同一 DefaultMediaSourceFactory 实例）
                     val p = requirePlayer()
                     if (headers.isNotEmpty()) {
@@ -376,18 +406,24 @@ object PlayerManager {
         val st = _uiState.value
         if (st.queue.isEmpty()) return
         when (st.playMode) {
-            PlayMode.LOOP_ONE -> {
-                // 单曲循环：从头重播当前曲，无需重新解析音源
-                player?.let { p ->
-                    p.seekTo(0)
-                    p.playWhenReady = true
-                }
-            }
+            PlayMode.LOOP_ONE -> replayCurrent()
             PlayMode.SHUFFLE -> {
                 val idx = shuffleTarget(st)
-                if (idx >= 0) skipTo(idx) else { player?.let { it.seekTo(0); it.playWhenReady = true } }
+                if (idx >= 0) skipTo(idx) else replayCurrent()
             }
-            PlayMode.ORDER -> next()
+            PlayMode.ORDER -> {
+                // 队列只剩一首时 next() 的目标等于当前索引，skipTo 会直接跳过，
+                // 播放器将永远停在 ENDED 不再出声——此时从头重播。
+                if (st.queue.size <= 1) replayCurrent() else next()
+            }
+        }
+    }
+
+    /** 从头重播当前曲目（不重新解析音源）。 */
+    private fun replayCurrent() {
+        player?.let { p ->
+            p.seekTo(0)
+            p.playWhenReady = true
         }
     }
 
@@ -436,15 +472,23 @@ object PlayerManager {
 
     // ---------------- 歌词 ----------------
 
+    /** 歌词请求代数：防止慢响应覆盖新歌歌词（旧请求返回时已过期，直接丢弃）。 */
+    @Volatile
+    private var lrcGeneration = 0
+
     private fun fetchLyric(entry: QueueEntry) {
+        val gen = ++lrcGeneration
         scope.launch(Dispatchers.Default) {
             try {
                 val rt = runtime ?: return@launch
                 val result = rt.callAsync(entry.plugin, "getLyric", listOf(entry.raw.toString()))
+                if (gen != lrcGeneration) return@launch // 已切歌，丢弃过期歌词
                 val lines = parseLyricResult(result)
                 _uiState.value = _uiState.value.copy(lrcLines = lines.sortedBy { it.timeMs }, lrcIndex = -1)
             } catch (_: Exception) {
-                _uiState.value = _uiState.value.copy(lrcLines = emptyList())
+                if (gen == lrcGeneration) {
+                    _uiState.value = _uiState.value.copy(lrcLines = emptyList())
+                }
             }
         }
     }

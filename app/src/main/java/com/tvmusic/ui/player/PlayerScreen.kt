@@ -61,6 +61,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.ui.PlayerView
 import com.tvmusic.player.LrcLine
 import com.tvmusic.player.PlayMode
 import com.tvmusic.player.PlayerManager
@@ -88,6 +90,21 @@ fun PlayerScreen(onBack: () -> Unit) {
             Box(Modifier.fillMaxSize().background(Color(0xFF0B0D12)))
         }
 
+        // 视频渲染层：当前条目含视频轨时全屏显示（控件仍浮在其上）
+        if (state.isVideo) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        useController = false // TV 上用应用自己的 d-pad 控制条
+                        resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    }
+                },
+                update = { it.player = PlayerManager.player },
+                onRelease = { it.player = null }
+            )
+        }
+
         if (state.current == null) {
             Text(
                 "暂无播放",
@@ -106,27 +123,30 @@ fun PlayerScreen(onBack: () -> Unit) {
                 // 上：左大封面（圆角+阴影） + 右逐行歌词
                 Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                     val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
-                    Box(
-                        modifier = Modifier
-                            .size(340.dp)
-                            .graphicsLayer {
-                                shadowElevation = 26.dp.toPx()
-                                clip = true
-                                shape = RoundedCornerShape(tokens.radius * 2)
+                    // 视频模式隐藏大封面：画面已全屏，封面只会在视频上挡视线
+                    if (!state.isVideo) {
+                        Box(
+                            modifier = Modifier
+                                .size(340.dp)
+                                .graphicsLayer {
+                                    shadowElevation = 26.dp.toPx()
+                                    clip = true
+                                    shape = RoundedCornerShape(tokens.radius * 2)
+                                }
+                                .tvFocus(1.03f, shapeOverride = RoundedCornerShape(tokens.radius * 2))
+                                .clickable(onClick = onBack)
+                        ) {
+                            Artwork(state.current!!.artwork, Modifier.fillMaxSize())
+                            if (state.buffering) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.align(Alignment.Center).size(36.dp),
+                                    strokeWidth = 3.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
                             }
-                            .tvFocus(1.03f, shapeOverride = RoundedCornerShape(tokens.radius * 2))
-                            .clickable(onClick = onBack)
-                    ) {
-                        Artwork(state.current!!.artwork, Modifier.fillMaxSize())
-                        if (state.buffering) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.align(Alignment.Center).size(36.dp),
-                                strokeWidth = 3.dp,
-                                color = MaterialTheme.colorScheme.primary
-                            )
                         }
+                        Spacer(Modifier.width(48.dp))
                     }
-                    Spacer(Modifier.width(48.dp))
                     Column(Modifier.weight(1f)) {
                         Text(
                             text = state.current!!.title,
@@ -149,12 +169,17 @@ fun PlayerScreen(onBack: () -> Unit) {
                                 modifier = Modifier.padding(top = 10.dp))
                         }
                         // 逐行歌词（内嵌于播放页布局，非悬浮层；悬浮层仅用于非播放页）
-                        Spacer(Modifier.height(20.dp))
-                        PlayerLyricLines(
-                            lines = state.lrcLines,
-                            currentIndex = state.lrcIndex,
-                            modifier = Modifier.fillMaxWidth().weight(1f)
-                        )
+                        // 视频模式不渲染歌词：画面与歌词叠加不可读
+                        if (!state.isVideo) {
+                            Spacer(Modifier.height(20.dp))
+                            PlayerLyricLines(
+                                lines = state.lrcLines,
+                                currentIndex = state.lrcIndex,
+                                modifier = Modifier.fillMaxWidth().weight(1f)
+                            )
+                        } else {
+                            Spacer(Modifier.fillMaxWidth().weight(1f))
+                        }
                     }
                 }
 
