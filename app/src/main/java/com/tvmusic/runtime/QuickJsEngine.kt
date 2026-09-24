@@ -259,7 +259,13 @@ class QuickJsEngine(
             } else {
                 Log.i(TAG, "invoke done $platform.$method cb=$cbId")
             }
-            return future.get(5, TimeUnit.SECONDS)
+            // 解包 ExecutionException：调用方按异常类型分支（如 PluginCallException ->
+            // 友好提示），包装类会让类型判断失效、把 cause.toString() 原样漏给 UI
+            try {
+                return future.get(5, TimeUnit.SECONDS)
+            } catch (e: java.util.concurrent.ExecutionException) {
+                throw (e.cause ?: e)
+            }
         } finally {
             pending.remove(cbId)
         }
