@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tvmusic.config.SearchSettings
 import com.tvmusic.data.SearchEntry
 import com.tvmusic.ui.components.FilterChip
 import com.tvmusic.ui.components.LoadingBox
@@ -49,11 +51,12 @@ fun SearchScreen(
     val history by viewModel.history.collectAsState()
     val loadingMore by viewModel.loadingMore.collectAsState()
     val selectedType by viewModel.selectedType.collectAsState()
-    val filterPlatform by viewModel.filterPlatform.collectAsState()
+    val selectedSources by viewModel.selectedSources.collectAsState()
     val searchablePlatforms by viewModel.searchablePlatforms.collectAsState()
-    // 结果内站点过滤：仅过滤已返回的分组，不重新请求
-    var selectedPlugin by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(phase) { if (phase !is SearchPhase.Ready) selectedPlugin = null }
+    val durFilter by viewModel.durFilter.collectAsState()
+    val needArtwork by viewModel.needArtwork.collectAsState()
+    val sortBy by viewModel.sortBy.collectAsState()
+    val sortAsc by viewModel.sortAsc.collectAsState()
 
     Column(Modifier.fillMaxSize().padding(horizontal = 28.dp)) {
         // 搜索输入行
@@ -85,57 +88,125 @@ fun SearchScreen(
             TypeTabs(selectedType = selectedType, onSelect = viewModel::setType)
         }
 
-        // 音源筛选条：全部 + 各平台
+        // 音源筛选条：全部 + 各平台（多选）
         if (phase !is SearchPhase.Idle && searchablePlatforms.isNotEmpty()) {
             PlatformFilterRow(
                 platforms = searchablePlatforms,
-                selected = filterPlatform,
-                onSelect = viewModel::setFilterPlatform
+                selected = selectedSources,
+                onToggle = viewModel::toggleSource,
+                onAll = viewModel::selectAllSources
+            )
+        }
+
+        // 结果过滤 + 排序条
+        if (phase !is SearchPhase.Idle) {
+            FilterSortRow(
+                durFilter = durFilter,
+                needArtwork = needArtwork,
+                sortBy = sortBy,
+                sortAsc = sortAsc,
+                onDur = viewModel::setDurFilter,
+                onArtwork = viewModel::setNeedArtwork,
+                onSort = viewModel::setSortBy,
+                onToggleAsc = viewModel::toggleSortAsc
             )
         }
 
         when (phase) {
             is SearchPhase.Idle -> HistoryPanel(viewModel, history, query)
-            is SearchPhase.Searching -> LoadingBox(Modifier.weight(1f).fillMaxWidth())
+            is SearchPhase.Searching -> {
+                val s = phase as SearchPhase.Searching
+                if (groups.isEmpty()) {
+                    LoadingBox(Modifier.weight(1f).fillMaxWidth())
+                } else {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            if (s.done < s.total)
+                                "正在搜索 ${s.done}/${s.total} 个音源…（结果边到边显示）"
+                            else
+                                "正在整理已返回的结果…",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)
+                        )
+                        ResultsPanel(
+                            groups = groups,
+                            type = selectedType,
+                            loadingMore = loadingMore,
+                            onLoadMore = viewModel::loadMore,
+                            onRetry = viewModel::retry,
+                            onPlay = viewModel::play,
+                            onOpenDetail = { entry ->
+                                viewModel.openDetail(entry)?.let(onOpenDetail)
+                            }
+                        )
+                    }
+                }
+            }
             is SearchPhase.NoResult -> EmptyResult(message = (phase as SearchPhase.NoResult).message)
             is SearchPhase.Ready -> {
-                val plugins = remember(groups) { groups.map { it.plugin }.distinct() }
-                Column(Modifier.weight(1f)) {
-                    if (plugins.size > 1) {
-                        LazyRow(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            item(key = "__res_all__") {
-                                FilterChip(
-                                    label = "全部",
-                                    selected = selectedPlugin == null,
-                                    onClick = { selectedPlugin = null }
-                                )
-                            }
-                            items(plugins, key = { "res_$it" }) { p ->
-                                FilterChip(
-                                    label = p,
-                                    selected = p == selectedPlugin,
-                                    onClick = { selectedPlugin = p }
-                                )
-                            }
-                        }
+                ResultsPanel(
+                    groups = groups,
+                    type = selectedType,
+                    loadingMore = loadingMore,
+                    onLoadMore = viewModel::loadMore,
+                    onRetry = viewModel::retry,
+                    onPlay = viewModel::play,
+                    onOpenDetail = { entry ->
+                        viewModel.openDetail(entry)?.let(onOpenDetail)
                     }
-                    ResultList(
-                        groups = if (selectedPlugin == null) groups else groups.filter { it.plugin == selectedPlugin },
-                        type = selectedType,
-                        loadingMore = loadingMore,
-                        onLoadMore = viewModel::loadMore,
-                        onRetry = viewModel::retry,
-                        onPlay = viewModel::play,
-                        onOpenDetail = { entry ->
-                            viewModel.openDetail(entry)?.let(onOpenDetail)
-                        }
+                )
+            }
+        }
+    }
+}
+
+/** 结果面板：站点过滤条 + 结果列表（Ready 与渐进式 Searching 共用）。 */
+@Composable
+private fun ColumnScope.ResultsPanel(
+    groups: List<SearchGroup>,
+    type: String,
+    loadingMore: String?,
+    onLoadMore: (SearchGroup) -> Unit,
+    onRetry: (SearchGroup) -> Unit,
+    onPlay: (SearchEntry) -> Unit,
+    onOpenDetail: (SearchEntry) -> Unit
+) {
+    // 结果内站点过滤：仅过滤已返回的分组，不重新请求
+    val plugins = remember(groups) { groups.map { it.plugin }.distinct() }
+    var selectedPlugin by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(plugins) { if (plugins.isEmpty()) selectedPlugin = null }
+    Column(Modifier.weight(1f)) {
+        if (plugins.size > 1) {
+            LazyRow(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                item(key = "__res_all__") {
+                    FilterChip(
+                        label = "全部",
+                        selected = selectedPlugin == null,
+                        onClick = { selectedPlugin = null }
+                    )
+                }
+                items(plugins, key = { "res_$it" }) { p ->
+                    FilterChip(
+                        label = p,
+                        selected = p == selectedPlugin,
+                        onClick = { selectedPlugin = p }
                     )
                 }
             }
         }
+        ResultList(
+            groups = if (selectedPlugin == null) groups else groups.filter { it.plugin == selectedPlugin },
+            type = type,
+            loadingMore = loadingMore,
+            onLoadMore = onLoadMore,
+            onRetry = onRetry,
+            onPlay = onPlay,
+            onOpenDetail = onOpenDetail
+        )
     }
 }
 
@@ -155,12 +226,13 @@ private fun TypeTabs(selectedType: String, onSelect: (String) -> Unit) {
     }
 }
 
-/** 音源筛选条：全部 + 各平台名。 */
+/** 音源筛选条：全部 + 各平台名（多选）。 */
 @Composable
 private fun PlatformFilterRow(
     platforms: List<String>,
-    selected: String?,
-    onSelect: (String?) -> Unit
+    selected: Set<String>,
+    onToggle: (String) -> Unit,
+    onAll: () -> Unit
 ) {
     LazyRow(
         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -169,17 +241,57 @@ private fun PlatformFilterRow(
         item(key = "__all__") {
             FilterChip(
                 label = "全部",
-                selected = selected == null,
-                onClick = { onSelect(null) }
+                selected = selected.isEmpty(),
+                onClick = onAll
             )
         }
         items(platforms, key = { it }) { p ->
             FilterChip(
                 label = p,
-                selected = p == selected,
-                onClick = { onSelect(p) }
+                selected = p in selected,
+                onClick = { onToggle(p) }
             )
         }
+    }
+}
+
+/** 结果过滤（时长/封面）与排序条。 */
+@Composable
+private fun FilterSortRow(
+    durFilter: DurationFilter,
+    needArtwork: Boolean,
+    sortBy: String,
+    sortAsc: Boolean,
+    onDur: (DurationFilter) -> Unit,
+    onArtwork: (Boolean) -> Unit,
+    onSort: (String) -> Unit,
+    onToggleAsc: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("时长", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        DurationFilter.entries.forEach { f ->
+            FilterChip(label = f.label, selected = durFilter == f, onClick = { onDur(f) })
+        }
+        FilterChip(
+            label = if (needArtwork) "有封面✓" else "有封面",
+            selected = needArtwork,
+            onClick = { onArtwork(!needArtwork) }
+        )
+        Text("排序", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        val sortLabels = mapOf(
+            SearchSettings.SORT_DEFAULT to "默认",
+            SearchSettings.SORT_DURATION to "时长",
+            SearchSettings.SORT_TITLE to "歌名",
+            SearchSettings.SORT_ARTIST to "歌手"
+        )
+        sortLabels.forEach { (k, v) ->
+            FilterChip(label = v, selected = sortBy == k, onClick = { onSort(k) })
+        }
+        FilterChip(label = if (sortAsc) "升序" else "降序", selected = true, onClick = onToggleAsc)
     }
 }
 

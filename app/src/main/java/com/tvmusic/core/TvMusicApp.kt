@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
+import java.io.File
 
 class TvMusicApp : Application() {
 
@@ -41,24 +42,12 @@ class TvMusicApp : Application() {
         PlayerManager.attach(runtime)
         PlayerManager.attachPlaybackStore(playback)
 
-        val subs = store.listSubscriptions()
-        if (subs.isEmpty()) {
-            store.addSubscription(DEFAULT_SUBSCRIPTION)
-            repository.refreshFromDb()
-        } else {
-            // 迁移旧版默认订阅源到最新仓库
-            val oldUrls = setOf(
-                "https://cdn.jsdelivr.net/gh/maotoumao/MusicFreePlugins@latest/plugins.json",
-                "https://cdn.jsdelivr.net/gh/buaiwanyouxi/musicfreemusicfree-all@main/musicfree-tianpeng.json"
-            )
-            if (subs.any { it.url in oldUrls }) {
-                oldUrls.forEach { store.removeSubscription(it) }
-                if (store.listSubscriptions().none { it.url == DEFAULT_SUBSCRIPTION }) {
-                    store.addSubscription(DEFAULT_SUBSCRIPTION)
-                }
-                repository.refreshFromDb()
-            }
-        }
+        // 插件订阅源：不留任何默认地址。用户自行添加（插件设置 / web 控制台 / 设备上的 plugin_sources.* 文件）。
+        // 这里只做“读取”：若设备上存在用户放置的 plugin_sources 文件，则幂等补全到订阅列表。
+        val sources = readPluginSourcesFromDevice().orEmpty()
+        val subscribed = store.listSubscriptions().map { it.url }.toSet()
+        sources.filter { it !in subscribed }.forEach { store.addSubscription(it) }
+        repository.refreshFromDb()
 
         // 首启兜底：DB 为空时装入 assets/plugins 下打包的已知可用插件，
         // 保证即使订阅源同步失败，首页/搜索仍有数据可加载。
@@ -104,10 +93,50 @@ class TvMusicApp : Application() {
         }
     }
 
-    companion object {
-        const val DEFAULT_SUBSCRIPTION =
-            "https://cdn.jsdelivr.net/gh/buaiwanyouxi/musicfreemusicfree-all@main/musicfree-tianpeng.json"
+    /**
+     * 读取设备上的插件订阅源文件（用户可自行放置/编辑，无需重打包）。
+     * 查找顺序：外部文件目录（/sdcard/Android/data/<pkg>/files/plugin_sources*） → 内部 files 目录。
+     * 支持纯文本（一行一个 URL，# 注释）与 JSON（{"sources":[...]} 或裸数组）。
+     */
+    private fun readPluginSourcesFromDevice(): List<String>? {
+        fun from(f: File): List<String>? {
+            if (!f.exists()) return null
+            val text = runCatching { f.readText(Charsets.UTF_8) }.getOrNull() ?: return null
+            return parsePluginSources(text)?.let { if (it.isEmpty()) null else it }
+        }
+        getExternalFilesDir(null)?.let {
+            for (name in listOf("plugin_sources", "plugin_sources.json", "plugin_sources.txt")) {
+                from(File(it, name))?.let { return it }
+            }
+        }
+        for (name in listOf("plugin_sources", "plugin_sources.json", "plugin_sources.txt")) {
+            from(File(filesDir, name))?.let { return it }
+        }
+        return null
+    }
 
+    /** 解析订阅源：兼容纯文本行、{"sources":[...]}、{"plugins":[{url}]} 与裸 JSON 数组。 */
+    private fun parsePluginSources(text: String): List<String>? {
+        val t = text.trim()
+        if (t.isEmpty()) return null
+        if (t.startsWith("[")) {
+            val arr = runCatching { org.json.JSONArray(t) }.getOrNull() ?: return null
+            return (0 until arr.length()).mapNotNull { i -> arr.optString(i).trim() }
+                .filter { it.startsWith("http") }
+        }
+        if (t.startsWith("{")) {
+            val o = runCatching { org.json.JSONObject(t) }.getOrNull() ?: return null
+            val arr = o.optJSONArray("sources") ?: o.optJSONArray("plugins") ?: return null
+            return (0 until arr.length()).mapNotNull { i ->
+                arr.optJSONObject(i)?.optString("url")?.trim() ?: arr.optString(i).trim()
+            }.filter { it.startsWith("http") }
+        }
+        return text.lineSequence().map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") && it.startsWith("http") }
+            .toList()
+    }
+
+    companion object {
         fun from(context: Context): TvMusicApp =
             context.applicationContext as TvMusicApp
     }

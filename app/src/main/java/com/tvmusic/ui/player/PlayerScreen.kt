@@ -263,21 +263,38 @@ private fun PlayerLyricLines(
         item { Spacer(Modifier.height(60.dp)) }
         items(lines.size) { i ->
             val isCurrent = i == currentIndex
-            Text(
-                text = lines[i].text,
-                color = if (isCurrent) lrcColor else lrcColor.copy(alpha = 0.35f),
-                fontSize = if (isCurrent) (cfg.fontSizeSp + 4).sp else cfg.fontSizeSp.sp,
-                fontWeight = if (isCurrent)
-                    androidx.compose.ui.text.font.FontWeight.Bold
-                else androidx.compose.ui.text.font.FontWeight.Normal,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
+            val line = lines[i]
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 6.dp)
                     .graphicsLayer { alpha = if (isCurrent) 1f else 0.6f }
-            )
+            ) {
+                Text(
+                    text = line.text,
+                    color = if (isCurrent) lrcColor else lrcColor.copy(alpha = 0.35f),
+                    fontSize = if (isCurrent) (cfg.fontSizeSp + 4).sp else cfg.fontSizeSp.sp,
+                    fontWeight = if (isCurrent)
+                        androidx.compose.ui.text.font.FontWeight.Bold
+                    else androidx.compose.ui.text.font.FontWeight.Normal,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                // 译文：主文案下方的次要行，选中时同样高亮
+                line.translation?.takeIf { it.isNotBlank() }?.let { t ->
+                    Text(
+                        text = t,
+                        color = if (isCurrent) lrcColor.copy(alpha = 0.85f) else lrcColor.copy(alpha = 0.28f),
+                        fontSize = (cfg.fontSizeSp - 2).coerceAtLeast(10).sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
+            }
         }
         item { Spacer(Modifier.height(60.dp)) }
     }

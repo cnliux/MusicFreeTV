@@ -2,6 +2,7 @@ package com.tvmusic.ui.search
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.tvmusic.config.SearchSettings
 import com.tvmusic.core.TvMusicApp
 import com.tvmusic.data.SearchEntry
 import com.tvmusic.player.PlayerManager
@@ -9,6 +10,7 @@ import com.tvmusic.player.QueueEntry
 import com.tvmusic.ui.sheet.DetailKind
 import com.tvmusic.ui.sheet.DetailTarget
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,10 +33,18 @@ data class SearchGroup(
     val hasContent: Boolean get() = entries.isNotEmpty()
 }
 
+/** 结果时长筛选预设（duration 为 0 的未知条目在不限时放行，选具体范围时排除）。 */
+enum class DurationFilter(val label: String, val minSec: Int?, val maxSec: Int?) {
+    ALL("不限", null, null),
+    SHORT("<1分钟", 1, 59),
+    MID("1-5分钟", 60, 299),
+    LONG(">5分钟", 300, null)
+}
+
 /** 搜索页面的整体阶段。 */
 sealed interface SearchPhase {
     object Idle : SearchPhase
-    object Searching : SearchPhase
+    data class Searching(val done: Int, val total: Int) : SearchPhase
     object Ready : SearchPhase
     data class NoResult(val message: String = "没有搜索结果，换个关键词，或确认已启用能搜索的插件。") : SearchPhase
 }
@@ -43,6 +53,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
 
     private val runtime = app.runtime
     private val repository = app.repository
+    private val context = app.applicationContext
 
     private val prefs = app.getSharedPreferences("search_prefs", android.content.Context.MODE_PRIVATE)
 
@@ -53,9 +64,26 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
     private val _selectedType = MutableStateFlow(TYPE_MUSIC)
     val selectedType: StateFlow<String> = _selectedType.asStateFlow()
 
-    /** 音源筛选：null 表示全平台聚合，非 null 表示只搜该音源。 */
-    private val _filterPlatform = MutableStateFlow<String?>(null)
-    val filterPlatform: StateFlow<String?> = _filterPlatform.asStateFlow()
+    /** 音源筛选：空集合表示全平台聚合，非空表示只搜选中的音源。 */
+    private val _selectedSources = MutableStateFlow<Set<String>>(emptySet())
+    val selectedSources: StateFlow<Set<String>> = _selectedSources.asStateFlow()
+
+    /** 结果属性过滤。 */
+    private val _durFilter = MutableStateFlow(DurationFilter.ALL)
+    val durFilter: StateFlow<DurationFilter> = _durFilter.asStateFlow()
+
+    private val _needArtwork = MutableStateFlow(false)
+    val needArtwork: StateFlow<Boolean> = _needArtwork.asStateFlow()
+
+    /** 结果排序：分组内排序字段（与后台配置共享语义），default = 保持插件顺序。 */
+    private val _sortBy = MutableStateFlow(SearchSettings.SORT_DEFAULT)
+    val sortBy: StateFlow<String> = _sortBy.asStateFlow()
+
+    private val _sortAsc = MutableStateFlow(true)
+    val sortAsc: StateFlow<Boolean> = _sortAsc.asStateFlow()
+
+    /** 用户手动改过排序后，不再跟随后台默认排序。 */
+    private var sortManuallyTouched = false
 
     /** 当前可搜索的音源名称列表（用于筛选条）。 */
     private val _searchablePlatforms = MutableStateFlow<List<String>>(emptyList())
@@ -80,6 +108,9 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
 
     init {
         loadHistory()
+        val cfg = SearchSettings.load(app)
+        _sortBy.value = cfg.sortBy
+        _sortAsc.value = cfg.asc
         // 插件列表变化（如远程启用/停用）时刷新：仅已在结果页时重建。
         viewModelScope.launch {
             repository.plugins.collect {
@@ -126,13 +157,42 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
         }
     }
 
-    /** 设置音源筛选；null = 全平台聚合。若已有搜索词则立即重搜。 */
-    fun setFilterPlatform(platform: String?) {
-        if (platform == _filterPlatform.value) return
-        _filterPlatform.value = platform
-        if (currentQuery.isNotBlank()) {
-            submit(currentQuery, _selectedType.value)
-        }
+    /** 切换音源多选；空集 = 全部。已搜索则立即重搜。 */
+    fun toggleSource(platform: String) {
+        val cur = _selectedSources.value
+        _selectedSources.value = if (platform in cur) cur - platform else cur + platform
+        if (currentQuery.isNotBlank()) submit(currentQuery, _selectedType.value)
+    }
+
+    fun selectAllSources() {
+        if (_selectedSources.value.isEmpty()) return
+        _selectedSources.value = emptySet()
+        if (currentQuery.isNotBlank()) submit(currentQuery, _selectedType.value)
+    }
+
+    fun setDurFilter(filter: DurationFilter) {
+        if (filter == _durFilter.value) return
+        _durFilter.value = filter
+        if (currentQuery.isNotBlank()) submit(currentQuery, _selectedType.value)
+    }
+
+    fun setNeedArtwork(need: Boolean) {
+        if (need == _needArtwork.value) return
+        _needArtwork.value = need
+        if (currentQuery.isNotBlank()) submit(currentQuery, _selectedType.value)
+    }
+
+    fun setSortBy(sort: String) {
+        if (sort == _sortBy.value) return
+        sortManuallyTouched = true
+        _sortBy.value = sort
+        if (currentQuery.isNotBlank()) submit(currentQuery, _selectedType.value)
+    }
+
+    fun toggleSortAsc() {
+        sortManuallyTouched = true
+        _sortAsc.value = !_sortAsc.value
+        if (currentQuery.isNotBlank()) submit(currentQuery, _selectedType.value)
     }
 
     fun submit(phrase: String = _query.value, type: String = _selectedType.value) {
@@ -140,43 +200,79 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
         if (q.isEmpty()) return
         viewModelScope.launch(Dispatchers.Default) {
             // 全局串行：QuickJS 单线程引擎并发 invoke 会死锁，搜索内部本身也是逐插件调用。
+            // 每次重读后台配置，保证 web 管理台改的优先级/默认排序实时生效。
+            val cfg = SearchSettings.load(context)
+            if (!sortManuallyTouched) {
+                _sortBy.value = cfg.sortBy
+                _sortAsc.value = cfg.asc
+            }
             _query.value = q
             _selectedType.value = type
-            _phase.value = SearchPhase.Searching
             _groups.value = emptyList()
             _loadingMore.value = null
             currentQuery = q
             val my = ++session
-            val out = mutableListOf<SearchGroup>()
-            val filter = _filterPlatform.value
-            for (plugin in repository.listEnabled()) {
-                if (plugin.info == null || plugin.loadError != null) continue
-                val platform = plugin.info!!.platform
-                if (filter != null && platform != filter) continue
-                // 对齐 RN getSearchablePlugins(type)：插件声明了 supportedSearchType 时必须包含该类型
-                val supported = plugin.info!!.supportedSearchType
-                if (supported.isNotEmpty() && type !in supported) continue
-                val group = try {
-                    val res = runtime.callAsync(platform, "search", listOf(q, "1", type))
-                    if (my != session) return@launch
-                    if (res is NotImplementedError) continue
-                    val obj = res as? JSONObject
-                    val arr = obj?.optJSONArray("data") ?: (res as? JSONArray)
-                    val isEnd = obj?.optBoolean("isEnd", false) ?: true
-                    if (arr == null) continue
-                    val list = parseEntries(arr, type, platform)
-                    if (list.isEmpty()) continue
-                    SearchGroup(platform, type, list, page = 1, isEnd = isEnd)
-                } catch (e: Exception) {
-                    if (my != session) return@launch
-                    SearchGroup(platform, type, emptyList(), page = 1, isEnd = true, error = e.message ?: "搜索失败")
+            val filter = _selectedSources.value
+            val records = repository.listEnabled()
+                .filter { it.info != null && it.loadError == null }
+            val byPlatform = records.associateBy { it.info!!.platform }
+            val ordered = SearchSettings.ordered(
+                records.map { it.info!!.platform }
+                    .filter { filter.isEmpty() || it in filter },
+                cfg.sourceOrder
+            )
+            _phase.value = SearchPhase.Searching(0, ordered.size)
+            val groupsArr = arrayOfNulls<SearchGroup>(ordered.size)
+            val completed = java.util.concurrent.atomic.AtomicInteger(0)
+            val pubLock = Any()
+            coroutineScope {
+                ordered.forEachIndexed { idx, platform ->
+                    launch(Dispatchers.IO) {
+                        if (my != session) return@launch
+                        val plugin = byPlatform.getValue(platform)
+                        // 对齐 RN getSearchablePlugins(type)：插件声明了 supportedSearchType 时必须包含该类型
+                        val supported = plugin.info!!.supportedSearchType
+                        val group: SearchGroup?
+                        if (supported.isNotEmpty() && type !in supported) {
+                            group = null
+                        } else {
+                            group = try {
+                                val res = runtime.callParallel(platform, "search", listOf(q, "1", type))
+                                if (my != session) return@launch
+                                if (res is NotImplementedError) {
+                                    null
+                                } else {
+                                    val obj = res as? JSONObject
+                                    val arr = obj?.optJSONArray("data") ?: (res as? JSONArray)
+                                    val isEnd = obj?.optBoolean("isEnd", false) ?: true
+                                    if (arr == null) null
+                                    else {
+                                        val list = parseEntries(arr, type, platform).filter { passFilter(it) }
+                                        if (list.isEmpty()) null
+                                        else SearchGroup(platform, type, sortEntries(list), page = 1, isEnd = isEnd)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                if (my != session) return@launch
+                                SearchGroup(platform, type, emptyList(), page = 1, isEnd = true, error = e.message ?: "搜索失败")
+                            }
+                        }
+                        var visible: List<SearchGroup>? = null
+                        synchronized(pubLock) {
+                            if (group != null) groupsArr[idx] = group
+                            completed.incrementAndGet()
+                            if (my == session) visible = groupsArr.filterNotNull()
+                        }
+                        if (my != session) return@launch
+                        if (visible != null && visible.isNotEmpty()) {
+                            _phase.value = SearchPhase.Searching(completed.get(), ordered.size)
+                            _groups.value = visible
+                        }
+                    }
                 }
-                out += group
-                if (my != session) return@launch
-                _groups.value = out.toList()
             }
             if (my != session) return@launch
-            _searchingDone(out.none { it.hasContent })
+            _searchingDone(groupsArr.none { it?.hasContent == true })
             addHistory(q)
         }
     }
@@ -203,7 +299,8 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
                 val isEnd = obj?.optBoolean("isEnd", false) ?: true
                 _groups.value = _groups.value.map { g ->
                     if (g.plugin == group.plugin && arr != null) {
-                        g.copy(page = next, isEnd = isEnd, entries = g.entries + parseEntries(arr, type, group.plugin), error = null)
+                        val more = parseEntries(arr, type, group.plugin).filter { passFilter(it) }
+                        g.copy(page = next, isEnd = isEnd, entries = g.entries + sortEntries(more), error = null)
                     } else g
                 }
             } catch (e: Exception) {
@@ -233,7 +330,8 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
                 val isEnd = obj?.optBoolean("isEnd", false) ?: true
                 _groups.value = _groups.value.map { g ->
                     if (g.plugin == group.plugin && arr != null) {
-                        g.copy(type = type, entries = parseEntries(arr, type, group.plugin), page = 1, isEnd = isEnd, error = null)
+                        val list = parseEntries(arr, type, group.plugin).filter { passFilter(it) }
+                        g.copy(type = type, entries = sortEntries(list), page = 1, isEnd = isEnd, error = null)
                     } else g
                 }
             } catch (e: Exception) {
@@ -251,6 +349,29 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
         val enabled = repository.listEnabled().filter { it.info != null && it.loadError == null }
             .map { it.info!!.platform }.toSet()
         _groups.value = _groups.value.filter { it.plugin in enabled }
+    }
+
+    /** 结果属性过滤：时长范围 + 必须要有封面。 */
+    private fun passFilter(e: SearchEntry): Boolean {
+        val f = _durFilter.value
+        if (f != DurationFilter.ALL) {
+            val sec = e.duration / 1000
+            if (sec <= 0) return false
+            if (f.minSec != null && sec < f.minSec) return false
+            if (f.maxSec != null && sec > f.maxSec) return false
+        }
+        if (_needArtwork.value && e.artwork.isBlank()) return false
+        return true
+    }
+
+    /** 按当前排序配置排序；default 时保持插件原始顺序。 */
+    private fun sortEntries(list: List<SearchEntry>): List<SearchEntry> {
+        if (_sortBy.value == SearchSettings.SORT_DEFAULT) return list
+        val cmp = SearchSettings.comparator<SearchEntry>(
+            _sortBy.value, _sortAsc.value,
+            { it.title }, { it.artist }, { it.duration }
+        )
+        return list.sortedWith(cmp)
     }
 
     private fun parseEntries(arr: JSONArray, type: String, fallbackPlatform: String): List<SearchEntry> {

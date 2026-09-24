@@ -154,21 +154,37 @@ fun LyricOverlay(lines: List<com.tvmusic.player.LrcLine>, currentIndex: Int) {
                 item { Spacer(Modifier.height(120.dp)) }
                 items(lines.size) { i ->
                     val isCurrent = i == currentIndex
-                    Text(
-                        text = lines[i].text,
-                        color = if (isCurrent) lrcColor else lrcColor.copy(alpha = 0.35f),
-                        fontSize = if (isCurrent) (cfg.fontSizeSp + 4).sp else cfg.fontSizeSp.sp,
-                        fontWeight = if (isCurrent)
-                            androidx.compose.ui.text.font.FontWeight.Bold
-                        else androidx.compose.ui.text.font.FontWeight.Normal,
-                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
+                    val line = lines[i]
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 6.dp)
                             .graphicsLayer { alpha = if (isCurrent) 1f else 0.6f }
-                    )
+                    ) {
+                        Text(
+                            text = line.text,
+                            color = if (isCurrent) lrcColor else lrcColor.copy(alpha = 0.35f),
+                            fontSize = if (isCurrent) (cfg.fontSizeSp + 4).sp else cfg.fontSizeSp.sp,
+                            fontWeight = if (isCurrent)
+                                androidx.compose.ui.text.font.FontWeight.Bold
+                            else androidx.compose.ui.text.font.FontWeight.Normal,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        line.translation?.takeIf { it.isNotBlank() }?.let { t ->
+                            Text(
+                                text = t,
+                                color = if (isCurrent) lrcColor.copy(alpha = 0.85f) else lrcColor.copy(alpha = 0.28f),
+                                fontSize = (cfg.fontSizeSp - 2).coerceAtLeast(10).sp,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+                    }
                 }
                 item { Spacer(Modifier.height(120.dp)) }
             }

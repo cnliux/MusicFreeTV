@@ -5,6 +5,17 @@
 (function (global) {
     'use strict';
 
+    // ---- 全局第三方库 ----
+    // 部分插件不 require 而直接引用全局 axios 等标识符（如 migu.js 的 axios.get）。
+    // 已注册的库原样暴露为全局，避免这类插件因 "xxx is not defined" 运行失败。
+    ['axios', 'dayjs', 'he', 'qs', 'cheerio', 'crypto-js', 'big-integer', 'webdav'].forEach(function (name) {
+        try {
+            if (global.__requireExists && global.__requireExists(name) && global[name] === undefined) {
+                global[name] = global.__require(name);
+            }
+        } catch (e) { /* 忽略：库缺失不影响其它功能 */ }
+    });
+
     // ---- env（插件协议里的 env.getUserVariables） ----
     if (!global.env) {
         global.env = {

@@ -9,3 +9,10 @@ build/
 .cxx
 .kotlin
 local.properties
+
+# stray build artifacts
+/AndroidManifest.xml
+/R.txt
+/annotations.zip
+/classes.jar
+/proguard.txt

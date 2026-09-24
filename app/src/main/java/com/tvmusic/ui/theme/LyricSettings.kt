@@ -9,7 +9,7 @@ import kotlin.math.roundToInt
 
 /** 歌词显示配置：开关/字体大小/颜色/位置（顶部/居中/底部）/垂直微调偏移(dp)。 */
 data class LyricConfig(
-    val enabled: Boolean = true,
+    val enabled: Boolean = false,
     val fontSizeSp: Int = 16,
     val colorHex: String = "FFFFFF",
     val position: LyricPosition = LyricPosition.CENTER,
@@ -38,7 +38,7 @@ object LyricSettings {
         appContext = context.applicationContext
         val p = prefs() ?: return
         _config.value = LyricConfig(
-            enabled = p.getBoolean(KEY_ENABLED, true),
+            enabled = p.getBoolean(KEY_ENABLED, false),
             fontSizeSp = p.getInt(KEY_SIZE, 16),
             colorHex = p.getString(KEY_COLOR, "FFFFFF") ?: "FFFFFF",
             position = try { LyricPosition.valueOf(p.getString(KEY_POS, "CENTER") ?: "CENTER") }

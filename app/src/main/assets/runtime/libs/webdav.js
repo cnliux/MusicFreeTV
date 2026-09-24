@@ -42,9 +42,13 @@
         options = options || {};
         var username = options.username || '';
         var password = options.password || '';
+        var token = options.token || '';
+        // authType：'password'（默认，Basic）/ 'digest' / 'token'（Bearer）
+        var authType = options.authType || (options.token ? 'token' : 'password');
         var base = String(url).replace(/\/+$/, '');
 
         function authHeader() {
+            if (authType === 'token' || token) return { Authorization: 'Bearer ' + token };
             if (!username) return {};
             var raw = username + ':' + password;
             var b64 = globalThis.btoa(raw);
@@ -72,6 +76,12 @@
             },
             getFileDownloadLink: function (path) {
                 var href = joinPath(path);
+                if (authType === 'token' || token) {
+                    // Bearer 认证无法通过 URL 传递（仅 Basic 支持 userinfo）。
+                    // 返回原始链接，播放若需要 Authorization 头需插件在 getMediaSource 中
+                    // 自行返回 headers（原生桥已支持 Authorization 透传）。
+                    return href;
+                }
                 if (username) {
                     var scheme = base.indexOf('https://') === 0 ? 'https://' : 'http://';
                     var rest = base.slice(scheme.length);

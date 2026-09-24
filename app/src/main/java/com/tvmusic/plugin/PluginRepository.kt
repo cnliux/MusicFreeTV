@@ -114,10 +114,7 @@ class PluginRepository(
     }
 
     /** 从 DB 未解析源码时临时探测 platform 的兜底。 */
-    private fun detectPlatformSafe(source: String): String? {
-        val matches = Regex("platform\\s*:\\s*\"([^\"]*)\"").findAll(source).toList()
-        return matches.lastOrNull()?.groupValues?.get(1)?.trim()?.ifEmpty { null }
-    }
+    private fun detectPlatformSafe(source: String): String? = detectPlatform(source)
 
     fun addSubscription(url: String) {
         if (url.isBlank()) return
@@ -162,24 +159,39 @@ class PluginRepository(
         }
     }
 
+    /** 下载 url 内容，失败返回 null。 */
+    private fun fetchOk(url: String): String? = try {
+        okHttp.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+            if (resp.isSuccessful) resp.body?.string() else null
+        }
+    } catch (e: Exception) {
+        null
+    }
+
+    /** 内容识别安装：plugins.json 列表 → 逐个安装；否则按单个 .js 插件安装。 */
+    private suspend fun installContent(url: String, body: String): String? {
+        val arr = runCatching { JSONObject(body).optJSONArray("plugins") }.getOrNull()
+        if (arr != null && arr.length() > 0) {
+            importListJson(body)
+            return null
+        }
+        return installFromBody(url, body)
+    }
+
+    /** 单个插件源码安装入口（探测 platform 后交给 install）。 */
+    private suspend fun installFromBody(url: String, body: String): String? {
+        val platform = detectPlatform(body) ?: return "无法解析插件 platform"
+        return install(platform, url, source = body)
+    }
+
     /**
-     * 从 url 导入：.js 视为单个插件；否则视为插件列表 JSON（plugins.json）。
+     * 从 url 导入：内容为 plugins.json 列表则批量安装，否则视为单个插件 .js。
      * 返回错误信息，成功返回 null。
      */
     suspend fun importFromUrl(url: String): String? = withContext(Dispatchers.IO) {
         try {
-            val req = Request.Builder().url(url).build()
-            okHttp.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return@withContext "下载失败: HTTP ${resp.code}"
-                val body = resp.body?.string() ?: return@withContext "空响应"
-                if (url.trim().endsWith(".js", ignoreCase = true)) {
-                    val platform = detectPlatform(body) ?: return@withContext "无法解析插件 platform"
-                    return@withContext install(platform, url, source = body)
-                } else {
-                    importListJson(body)
-                    null
-                }
-            }
+            val body = fetchOk(url) ?: return@withContext "下载失败: HTTP 无法访问"
+            installContent(url, body)
         } catch (e: Exception) {
             "拉取失败: ${e.message}"
         }
@@ -260,11 +272,8 @@ class PluginRepository(
 
     private suspend fun syncOne(subUrl: String) = withContext(Dispatchers.IO) {
         try {
-            val req = Request.Builder().url(subUrl).build()
-            val body = okHttp.newCall(req).execute().use {
-                it.body?.string() ?: return@withContext
-            }
-            importListJson(body)
+            val body = fetchOk(subUrl) ?: return@withContext
+            installContent(subUrl, body)?.let { Log.w("PluginRepository", "syncOne $subUrl: $it") }
         } catch (e: Exception) {
             Log.w("PluginRepository", "syncOne $subUrl: ${e.message}")
         }
@@ -292,18 +301,29 @@ class PluginRepository(
 
     /**
      * 从源码中探测真实 platform：取源码中"最后一次出现"的 `platform: "xxx"` 或 `platform: 'xxx'`。
-     * 同时兼容 `platform = "..."` 赋值写法。
+     * 同时兼容 `platform = "..."` 赋值写法，以及 `var PLATFORM = "xxx"; platform: PLATFORM` 这类变量引用写法。
      * Parcel 打包产物与 TS 编译产物都把插件对象里的 platform 放在文件末尾附近，
      * 内层调用里的 platform（如 "yqq.json"、"WebFilter"）都出现在前面。
      */
     private fun detectPlatform(source: String): String? {
-        val matches = Regex("""platform\s*[:=]\s*["']([^"']*)["']""").findAll(source).toList()
-        if (matches.isEmpty()) return null
-        // 过滤掉明显非平台名的值（如文件名、WebFilter、pc、web 等内部标识）
-        val candidates = matches.map { it.groupValues[1].trim() }
-            .filter { it.isNotEmpty() && it != "pc" && it != "web" && it != "WebFilter" && !it.endsWith(".json") }
-        val platform = (candidates.lastOrNull() ?: matches.last().groupValues[1].trim())
-        return platform.ifEmpty { null }
+        // 1) 字面量形式（优先）
+        val literal = Regex("""platform\s*[:=]\s*["']([^"']*)["']""").findAll(source).toList()
+            .map { it.groupValues[1].trim() }
+            .filter { it.isNotEmpty() && it != "pc" && it != "web" && it != "WebFilter" && it != "H5" && it != "h5" && !it.endsWith(".json") }
+        if (literal.isNotEmpty()) return literal.last()
+
+        // 2) 变量引用形式：先收集 var/let/const X = 'xxx' 映射，
+        //    再找源码中 platform: X / platform = X 引用的标识符，取最后一次的对应字面量。
+        val vars = Regex("""(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*["']([^"']*)["']""")
+            .findAll(source).toList()
+            .associate { it.groupValues[1] to it.groupValues[2].trim() }
+        if (vars.isEmpty()) return null
+        val refs = Regex("""platform\s*[:=]\s*([A-Za-z_$][\w$]*)""").findAll(source).toList()
+        for (m in refs.reversed()) {
+            val v = vars[m.groupValues[1]] ?: continue
+            if (v.isNotEmpty() && v != "pc" && v != "web" && v != "WebFilter" && v != "H5" && v != "h5" && !v.endsWith(".json")) return v
+        }
+        return null
     }
 
     private fun parseInfo(json: JSONObject): PluginInfo {

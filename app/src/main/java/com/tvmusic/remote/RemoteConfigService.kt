@@ -13,6 +13,8 @@ import com.tvmusic.BuildConfig
 import com.tvmusic.core.TvMusicApp
 import com.tvmusic.data.FavList
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -23,6 +25,7 @@ import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 局域网远程管理服务。
@@ -35,9 +38,12 @@ class RemoteConfigService : Service() {
         private const val TAG = "RemoteConfigService"
         const val PORT = 9527
         private const val NOTIFICATION_ID = 101
-        private const val MAX_TOTAL = 60
-        private const val MAX_PLUGINS_PER_SEARCH = 5
-
+        private val SORT_KEYS = setOf(
+            com.tvmusic.config.SearchSettings.SORT_DEFAULT,
+            com.tvmusic.config.SearchSettings.SORT_DURATION,
+            com.tvmusic.config.SearchSettings.SORT_TITLE,
+            com.tvmusic.config.SearchSettings.SORT_ARTIST
+        )
         @Volatile
         var instance: RemoteConfigService? = null
             private set
@@ -188,14 +194,75 @@ class RemoteConfigService : Service() {
                 app().repository.syncAll()
                 respond(socket, 200, JSONObject().put("ok", true).put("message", "开始同步订阅").toString())
             }
+            method == "GET" && path == "/api/search/config" -> {
+                val s = com.tvmusic.config.SearchSettings.load(app())
+                respond(
+                    socket, 200,
+                    JSONObject()
+                        .put("ok", true)
+                        .put("sourceOrder", JSONArray().apply { s.sourceOrder.forEach { put(it) } })
+                        .put("sortBy", s.sortBy)
+                        .put("asc", s.asc)
+                        .put("maxTotal", s.maxTotal).toString()
+                )
+            }
+            method == "POST" && path == "/api/search/config" -> {
+                val body = readBody(input, headers)
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                val order = runCatching {
+                    (json?.optJSONArray("sourceOrder") ?: JSONArray()).let { a ->
+                        (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() }
+                    }
+                }.getOrDefault(emptyList())
+                val sortBy = json?.optString("sortBy", "") ?: ""
+                val asc = json?.optBoolean("asc", true) ?: true
+                val maxTotal = (json?.optInt("maxTotal", 60) ?: 60).coerceIn(20, 200)
+                val settings = com.tvmusic.config.SearchSettings(
+                    sourceOrder = order,
+                    sortBy = if (sortBy in SORT_KEYS) sortBy else com.tvmusic.config.SearchSettings.SORT_DEFAULT,
+                    asc = asc,
+                    maxTotal = maxTotal
+                )
+                com.tvmusic.config.SearchSettings.save(app(), settings)
+                respond(socket, 200, JSONObject().put("ok", true).put("message", "已保存搜索设置").toString())
+            }
+            method == "GET" && path == "/api/search/poll" -> {
+                val id = runCatching {
+                    java.net.URLDecoder.decode(query.substringAfter("id=", "").substringBefore("&"), Charsets.UTF_8.name())
+                }.getOrDefault("")
+                val session = searchSessions[id]
+                if (session == null) {
+                    respond(socket, 404, JSONObject().put("ok", false).put("error", "会话不存在或已过期").toString())
+                } else {
+                    respondSearchPoll(socket, session)
+                }
+            }
             method == "GET" && path.startsWith("/api/search") -> {
-                val q = query.substringAfter("q=", "").substringBefore("&").trim()
-                val page = query.substringAfter("page=", "1").substringBefore("&").toIntOrNull()?.coerceAtLeast(1) ?: 1
-                if (q.isEmpty()) {
+                val decode: (String) -> String = { s ->
+                    runCatching { java.net.URLDecoder.decode(s, Charsets.UTF_8.name()) }.getOrDefault(s)
+                }
+                val param: (String, String) -> String = { name, def ->
+                    query.split("&").firstOrNull { it.startsWith("$name=") }?.substringAfter("=") ?: def
+                }
+                val qRaw = param("q", "")
+                if (qRaw.isEmpty()) {
                     respond(socket, 400, JSONObject().put("ok", false).put("error", "missing q").toString())
                     return
                 }
-                searchAndRespond(socket, q, page)
+                val q = decode(qRaw)
+                val page = param("page", "1").toIntOrNull()?.coerceAtLeast(1) ?: 1
+                val sources = if (param("sources", "").isBlank()) emptySet()
+                    else decode(param("sources", "")).split(",").map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+                val minD = decode(param("minD", "")).toIntOrNull()
+                val maxD = decode(param("maxD", "")).toIntOrNull()
+                val needArt = param("art", "") == "1"
+                val sortBy = decode(param("sort", ""))
+                val asc = when (param("asc", "")) {
+                    "0" -> false
+                    "1" -> true
+                    else -> null
+                }
+                searchAndStart(socket, q, page, SearchReq(sources, minD, maxD, needArt, sortBy, asc))
             }
             method == "POST" && path == "/api/play" -> {
                 val body = readBody(input, headers)
@@ -656,76 +723,193 @@ class RemoteConfigService : Service() {
     }
 
     /**
-     * 远程搜索：对所有启用插件并发搜索（仿 lx-music 的做法：单个失败降级为空，合并结果去重），
-     * 发起后在后台执行并返回前 MAX_TOTAL 条。
+     * 单次搜索的请求参数。sources 为空表示搜全部启用插件；
+     * sortBy/asc 为空/为空 时回落到后台配置。
      */
-    private fun searchAndRespond(socket: Socket, q: String, page: Int) {
+    private data class SearchReq(
+        val sources: Set<String> = emptySet(),
+        val minDurSec: Int? = null,
+        val maxDurSec: Int? = null,
+        val needArt: Boolean = false,
+        val sortBy: String = "",
+        val asc: Boolean? = null
+    )
+
+    /** 渐进式搜索会话：后台线程逐个插件搜索，前台轮询拿到已积累的结果。 */
+    private class SearchSession(
+        val id: String,
+        val keyword: String,
+        val page: Int,
+        val req: SearchReq
+    ) {
+        val results = Collections.synchronizedList(ArrayList<JSONObject>())
+        val perSource = Collections.synchronizedList(ArrayList<JSONObject>())
+        @Volatile var total = 0
+        @Volatile var done = 0
+        @Volatile var totalEnabled = 0
+        @Volatile var finished = false
+        val startedAt = System.currentTimeMillis()
+    }
+
+    private val searchSessions = ConcurrentHashMap<String, SearchSession>()
+    private val searchIdGen = java.util.concurrent.atomic.AtomicInteger(0)
+
+    private fun pruneSearchSessions() {
+        val now = System.currentTimeMillis()
+        searchSessions.values.filter { it.finished && now - it.startedAt > 5 * 60 * 1000 }
+            .forEach { searchSessions.remove(it.id) }
+        if (searchSessions.size > 20) {
+            searchSessions.values.filter { it.finished }.sortedBy { it.startedAt }
+                .take(searchSessions.size - 20).forEach { searchSessions.remove(it.id) }
+        }
+    }
+
+    /**
+     * 启动渐进式搜索：立即返回会话 id，搜索在后台线程逐个插件执行，
+     * 结果随完成进度积累，前端轮询 /api/search/poll 边到边展示。
+     * 单插件硬超时 10s（引擎侧也超时释放 JS 线程），失败降级为空。
+     */
+    private fun searchAndStart(socket: Socket, q: String, page: Int, req: SearchReq) {
         val keyword = try {
             java.net.URLDecoder.decode(q, Charsets.UTF_8.name())
         } catch (e: Exception) {
             respond(socket, 400, JSONObject().put("ok", false).put("error", "无效的关键词").toString())
             return
         }
-        runBlocking {
-            val app = app()
-            // JS 引擎单线程执行插件方法（内部网络为同步调用），并发无法并行；
-            // 串行搜索前 3 个可用插件，每个硬超时 10s。
-            val enabled = app.repository.listEnabled()
-                .filter { it.info != null && it.loadError == null }
-                .take(MAX_PLUGINS_PER_SEARCH)
-            val results = JSONArray()
-            var seen = HashSet<String>()
-            var total = 0
-            val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val session = SearchSession(searchIdGen.incrementAndGet().toString(), keyword, page, req)
+        searchSessions[session.id] = session
+        pruneSearchSessions()
+        Thread({
             try {
-                for (plugin in enabled) {
-                    if (total >= MAX_TOTAL) break
-                    val platform = plugin.info!!.platform
-                    val fut = executor.submit(java.util.concurrent.Callable<JSONArray> {
-                        val res = try {
-                            runBlocking {
-                                app.runtime.callAsync(platform, "search", listOf(keyword, page.toString(), "music"))
+                runBlocking {
+                    val app = app()
+                    val settings = com.tvmusic.config.SearchSettings.load(app)
+                    val sortBy = req.sortBy.ifBlank { settings.sortBy }
+                    val asc = req.asc ?: settings.asc
+                    val maxTotal = settings.maxTotal
+                    // 并行搜索：多引擎池（callParallel）按最闲引擎分发，多个音源真正同时搜。
+                    val enabled = app.repository.listEnabled()
+                        .filter { it.info != null && it.loadError == null }
+                        .map { it.info!!.platform }
+                        .filter { req.sources.isEmpty() || it in req.sources }
+                        .let { com.tvmusic.config.SearchSettings.ordered(it, settings.sourceOrder) }
+                    session.totalEnabled = enabled.size
+                    val collected = arrayOfNulls<JSONArray>(enabled.size)
+                    val completed = java.util.concurrent.atomic.AtomicInteger(0)
+                    val seen = HashSet<String>()
+                    // 按配置音源顺序（跳过未完成的前缀缺口）即时聚合：
+                    // 每个插件一返回就重建一次，让前端轮询到实时 total/全量结果。
+                    fun reaggregate() {
+                        synchronized(collected) {
+                            synchronized(session.results) {
+                                session.results.clear()
+                                session.perSource.clear()
+                                session.total = 0
+                                seen.clear()
+                                for ((idx, platform) in enabled.withIndex()) {
+                                    if (session.total >= maxTotal) break
+                                    val arr = collected[idx] ?: break
+                                    var ok = 0
+                                    for (i in 0 until arr.length()) {
+                                        if (session.total >= maxTotal) break
+                                        val item = arr.optJSONObject(i) ?: continue
+                                        val type = item.optString("type")
+                                        if (type.isNotBlank() && type != "music") continue
+                                        val title = item.optString("title").trim()
+                                        if (title.isBlank()) continue
+                                        val rawDurSec = item.optLong("duration", 0L) / 1000
+                                        if (req.minDurSec != null && rawDurSec > 0 && rawDurSec < req.minDurSec) continue
+                                        if (req.maxDurSec != null && rawDurSec > 0 && rawDurSec > req.maxDurSec) continue
+                                        val art = item.optString("artwork", "").ifEmpty { item.optString("coverImg", "") }
+                                        if (req.needArt && art.isBlank()) continue
+                                        val key = title + "\u0000" + item.optString("artist")
+                                        if (!seen.add(key)) continue
+                                        ok++
+                                        session.results.add(
+                                            JSONObject()
+                                                .put("plugin", platform)
+                                                .put("title", title)
+                                                .put("artist", item.optString("artist"))
+                                                .put("album", item.optString("album"))
+                                                .put("artwork", art)
+                                                .put("duration", item.optLong("duration", 0L))
+                                                .put("raw", item)
+                                        )
+                                        session.total++
+                                    }
+                                    session.perSource.add(JSONObject().put("plugin", platform).put("count", ok))
+                                }
                             }
-                        } catch (e: Exception) {
-                            null
                         }
-                        (res as? JSONObject)?.optJSONArray("data")
-                            ?: (res as? JSONArray)
-                            ?: JSONArray()
-                    })
-                    val arr = try {
-                        fut.get(10, java.util.concurrent.TimeUnit.SECONDS)
-                    } catch (e: Exception) {
-                        fut.cancel(true)
-                        continue
                     }
-                    for (i in 0 until arr.length()) {
-                        if (total >= MAX_TOTAL) break
-                        val item = arr.optJSONObject(i) ?: continue
-                        val type = item.optString("type")
-                        if (type.isNotBlank() && type != "music") continue
-                        val title = item.optString("title").trim()
-                        if (title.isBlank()) continue
-                        val key = title + "\u0000" + item.optString("artist")
-                        if (!seen.add(key)) continue
-                        results.put(
-                            JSONObject()
-                                .put("plugin", platform)
-                                .put("title", title)
-                                .put("artist", item.optString("artist"))
-                                .put("album", item.optString("album"))
-                                .put("artwork", item.optString("artwork", "").ifEmpty { item.optString("coverImg") })
-                                .put("duration", item.optLong("duration", 0L))
-                                .put("raw", item)
-                        )
-                        total++
+                    coroutineScope {
+                        enabled.forEachIndexed { idx, platform ->
+                            launch(Dispatchers.IO) {
+                                val arr = try {
+                                    withTimeoutOrNull(11_000) {
+                                        app.runtime.callParallel(
+                                            platform, "search", listOf(keyword, page.toString(), "music"),
+                                            timeoutMs = 10_000
+                                        )
+                                    }?.let { res ->
+                                        (res as? JSONObject)?.optJSONArray("data") ?: (res as? JSONArray)
+                                    } ?: JSONArray()
+                                } catch (e: Exception) {
+                                    JSONArray()
+                                }
+                                synchronized(collected) {
+                                    collected[idx] = arr
+                                    session.done = completed.incrementAndGet()
+                                }
+                                reaggregate()
+                            }
+                        }
+                    }
+                    reaggregate()
+                    if (sortBy != com.tvmusic.config.SearchSettings.SORT_DEFAULT) {
+                        synchronized(session.results) {
+                            session.results.sortWith(
+                                com.tvmusic.config.SearchSettings.comparator<JSONObject>(
+                                    sortBy, asc,
+                                    { it.optString("title", "") },
+                                    { it.optString("artist", "") },
+                                    { it.optLong("duration", 0L) }
+                                )
+                            )
+                        }
                     }
                 }
+            } catch (t: Throwable) {
+                Log.w(TAG, "search session ${session.id} aborted: ${t.message}")
             } finally {
-                executor.shutdownNow()
+                session.finished = true
             }
-            respond(socket, 200, JSONObject().put("ok", true).put("results", results).put("total", total).toString())
+        }, "search-session").start()
+        respond(socket, 200, JSONObject().put("ok", true).put("id", session.id).put("message", "搜索中").toString())
+    }
+
+    /** 轮询会话：返回已积累的结果快照与完成进度。 */
+    private fun respondSearchPoll(socket: Socket, session: SearchSession) {
+        val results = JSONArray()
+        synchronized(session.results) {
+            session.results.forEach { results.put(JSONObject(it.toString())) }
         }
+        val perSource = JSONArray()
+        synchronized(session.perSource) {
+            session.perSource.forEach { perSource.put(JSONObject(it.toString())) }
+        }
+        respond(
+            socket, 200,
+            JSONObject()
+                .put("ok", true)
+                .put("id", session.id)
+                .put("finished", session.finished)
+                .put("done", session.done)
+                .put("totalEnabled", session.totalEnabled)
+                .put("total", session.total)
+                .put("results", results)
+                .put("perSource", perSource).toString()
+        )
     }
 
     private fun infoJson(): JSONObject {
@@ -1108,9 +1292,32 @@ private val PAGE_HTML = """<!DOCTYPE html>
         <input type="text" id="searchQ" placeholder="搜索歌曲，回车开始" onkeydown="if(event.key==='Enter')doSearch()">
         <button onclick="doSearch()">搜索</button>
       </div>
-      <div class="row" style="border:none;padding:10px 0 0;">
+      <div class="row" style="border:none;padding:10px 0 6px;">
         <button class="ghost small" id="playAllBtn" onclick="playAllSearch()" style="display:none;">▶ 播放全部结果</button>
         <span class="muted" id="searchInfo"></span>
+      </div>
+      <div id="searchFilters">
+        <div class="row" style="border:none;padding:4px 0;">
+          <span class="muted" style="width:64px;">音源</span>
+          <div class="chips" id="srcBar" style="flex:1;"></div>
+        </div>
+        <div class="row" style="border:none;padding:4px 0;">
+          <span class="muted" style="width:64px;">时长</span>
+          <input type="number" id="minD" placeholder="≥秒" style="width:72px;">
+          <span class="muted">—</span>
+          <input type="number" id="maxD" placeholder="≤秒" style="width:72px;">
+          <label style="margin-left:16px;display:flex;align-items:center;"><input type="checkbox" id="needArt" style="margin-right:5px;"> 必须有封面</label>
+        </div>
+        <div class="row" style="border:none;padding:4px 0;">
+          <span class="muted" style="width:64px;">排序</span>
+          <select id="sortSel" style="width:120px;"></select>
+          <select id="ascSel" style="width:90px;margin-left:8px;">
+            <option value="1">升序</option>
+            <option value="0">降序</option>
+          </select>
+          <button class="ghost small" style="margin-left:14px;" onclick="saveCfgInline()">存为新默认</button>
+          <button class="ghost small" onclick="switchTab('manage');setTimeout(loadSearchCfg,200);">搜索设置…</button>
+        </div>
       </div>
     </div>
     <div class="card" id="searchCard" style="display:none;">
@@ -1171,6 +1378,27 @@ private val PAGE_HTML = """<!DOCTYPE html>
         <span class="muted" style="flex:1;">透明度</span>
         <input type="range" id="lyricOpacityBar" min="20" max="100" value="100" style="flex:2;" onchange="setLyricOpacity(this.value)" oninput="el('lyricOpacity').textContent=this.value+'%'">
         <span id="lyricOpacity" style="min-width:44px;text-align:center;">100%</span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>搜索设置</h2>
+      <div class="muted">保存后电视端与搜索页的搜索都会采用这里的默认排序与音源优先级。</div>
+      <div class="row" style="border:none;padding:6px 0;">
+        <span class="muted" style="flex:1;">默认排序</span>
+        <select id="cfgSortBy" style="width:130px;"></select>
+        <select id="cfgSortAsc" style="width:90px;margin-left:8px;">
+          <option value="1">升序</option>
+          <option value="0">降序</option>
+        </select>
+      </div>
+      <div class="row" style="border:none;padding:6px 0;">
+        <span class="muted" style="flex:1;">最多返回结果（20 ~ 200）</span>
+        <input type="number" id="cfgMaxTotal" min="20" max="200" step="10" style="width:90px;">
+      </div>
+      <div class="muted" style="padding:6px 0 4px;">音源优先级（越靠上越先搜索、结果越靠前）</div>
+      <div id="cfgOrderBox"></div>
+      <div class="row" style="border:none;padding:8px 0 0;">
+        <button class="small" onclick="saveSearchCfg()">保存搜索设置</button>
       </div>
     </div>
     <div class="card">
@@ -1254,7 +1482,8 @@ function switchTab(name) {
   for (var j = 0; j < btns.length; j++) btns[j].className = btns[j].getAttribute('data-tab') === name ? 'on' : '';
   if (name === 'player') loadPlayer();
   if (name === 'fav') loadFavLists();
-  if (name === 'manage') { loadSubs(); loadPlugins(); loadLyric(); }
+  if (name === 'search') loadSearchCfg();
+  if (name === 'manage') { loadSubs(); loadPlugins(); loadLyric(); loadSearchCfg(); }
 }
 
 /* ---------------- 播放器 ---------------- */
@@ -1422,21 +1651,152 @@ function skipTo(i) {
   post('/api/player/skip', { index: i }).then(function () { setTimeout(loadPlayer, 300); });
 }
 
+/* ---------------- 搜索配置与筛选 ---------------- */
+var cfgOrder = [], srcNames = [], srcSel = {};
+var SORT_OPTS = [['default', '默认（音源顺序）'], ['duration', '时长'], ['title', '歌名'], ['artist', '歌手']];
+function bindOpts(sel, opts, val) {
+  if (!sel) return null;
+  sel.innerHTML = '';
+  opts.forEach(function (o) {
+    var op = document.createElement('option');
+    op.value = o[0];
+    op.textContent = o[1];
+    sel.appendChild(op);
+  });
+  sel.value = val;
+  return sel.value;
+}
+function loadSearchCfg() {
+  return api('/api/search/config').then(function (d) {
+    cfgOrder = d.sourceOrder || [];
+    bindOpts(el('cfgSortBy'), SORT_OPTS, d.sortBy);
+    if (el('cfgSortAsc')) el('cfgSortAsc').value = d.asc ? '1' : '0';
+    if (el('cfgMaxTotal')) el('cfgMaxTotal').value = d.maxTotal || 60;
+    bindOpts(el('sortSel'), SORT_OPTS, d.sortBy);
+    if (el('ascSel')) el('ascSel').value = d.asc ? '1' : '0';
+    renderCfgOrder();
+    return api('/api/plugins').then(function (pd) {
+      srcNames = (pd.plugins || []).filter(function (p) { return p.enabled && !p.loadError; })
+        .map(function (p) { return p.platform || p.name; })
+        .filter(function (n, i, a) { return n && a.indexOf(n) === i; });
+      renderSrcBar();
+    });
+  }).catch(function () { });
+}
+function renderSrcBar() {
+  var bar = el('srcBar');
+  if (!bar) return;
+  bar.innerHTML = '';
+  var mk = function (label, on, cb) {
+    var chip = document.createElement('span');
+    chip.className = 'chip' + (on ? ' on' : '');
+    chip.textContent = label;
+    chip.onclick = cb;
+    bar.appendChild(chip);
+  };
+  mk('全部', Object.keys(srcSel).length === 0, function () { srcSel = {}; renderSrcBar(); });
+  srcNames.forEach(function (n) {
+    mk(n, !!srcSel[n], function () {
+      if (srcSel[n]) delete srcSel[n]; else srcSel[n] = 1;
+      renderSrcBar();
+    });
+  });
+}
+function renderCfgOrder() {
+  var box = el('cfgOrderBox');
+  if (!box) return;
+  if (!cfgOrder.length) { box.innerHTML = '<div class="muted">暂无可配置音源（请先启用可搜索的插件）</div>'; return; }
+  var html = '';
+  cfgOrder.forEach(function (p, i) {
+    html += '<div class="row" style="border:none;padding:3px 0;">' +
+      '<span class="grow ellip">' + (i + 1) + '. ' + esc(p) + '</span>' +
+      '<button class="ghost small" onclick="moveCfgOrder(' + i + ',-1)">↑</button>' +
+      '<button class="ghost small" onclick="moveCfgOrder(' + i + ',1)">↓</button></div>';
+  });
+  box.innerHTML = html;
+}
+function moveCfgOrder(i, dir) {
+  var j = i + dir;
+  if (j < 0 || j >= cfgOrder.length) return;
+  var t = cfgOrder[i]; cfgOrder[i] = cfgOrder[j]; cfgOrder[j] = t;
+  renderCfgOrder();
+}
+function orderedCfg() {
+  var order = cfgOrder.filter(function (n) { return srcNames.indexOf(n) >= 0; });
+  srcNames.forEach(function (n) { if (order.indexOf(n) < 0) order.push(n); });
+  return order;
+}
+function saveSearchCfg() {
+  var order = orderedCfg();
+  cfgOrder = order;
+  post('/api/search/config', {
+    sourceOrder: order,
+    sortBy: el('cfgSortBy').value,
+    asc: el('cfgSortAsc').value === '1',
+    maxTotal: parseInt(el('cfgMaxTotal').value || '60', 10) || 60
+  }).then(function (d) { toast(d.message || '已保存'); renderCfgOrder(); })
+    .catch(function () { toast('保存失败'); });
+}
+function saveCfgInline() {
+  post('/api/search/config', {
+    sourceOrder: orderedCfg(),
+    sortBy: el('sortSel').value,
+    asc: el('ascSel').value === '1',
+    maxTotal: parseInt((el('cfgMaxTotal') ? el('cfgMaxTotal').value : '60') || '60', 10)
+  }).then(function (d) { toast(d.message || '已保存'); })
+    .catch(function () { toast('保存失败'); });
+}
+
 /* ---------------- 搜索 ---------------- */
 var searchResults = [], sPage = 1, sSize = 20, sPlugin = null;
+var searchPerSrc = [];
+var sTimer = null;
 function doSearch() {
   var q = el('searchQ').value.trim();
   if (!q) return;
+  if (sTimer) { clearInterval(sTimer); sTimer = null; }
+  searchResults = [];
+  searchPerSrc = [];
+  sPlugin = null;
+  sPage = 1;
+  var url = '/api/search?q=' + encodeURIComponent(q);
+  var sel = Object.keys(srcSel);
+  if (sel.length) url += '&sources=' + encodeURIComponent(sel.join(','));
+  var minD = parseInt(el('minD').value, 10);
+  if (!isNaN(minD) && minD > 0) url += '&minD=' + minD;
+  var maxD = parseInt(el('maxD').value, 10);
+  if (!isNaN(maxD) && maxD > 0) url += '&maxD=' + maxD;
+  if (el('needArt').checked) url += '&art=1';
+  url += '&sort=' + encodeURIComponent(el('sortSel').value);
+  url += '&asc=' + el('ascSel').value;
   toast('搜索中…');
-  api('/api/search?q=' + encodeURIComponent(q)).then(function (d) {
-    searchResults = d.results || [];
-    sPlugin = null;
-    sPage = 1;
-    el('searchInfo').textContent = '共 ' + (d.total || 0) + ' 条';
-    el('playAllBtn').style.display = searchResults.length ? '' : 'none';
-    el('searchCard').style.display = '';
-    renderSearch();
+  el('searchBox').innerHTML = '<div class="empty">正在搜索…</div>';
+  el('searchInfo').textContent = '搜索中…';
+  el('playAllBtn').style.display = 'none';
+  el('searchCard').style.display = '';
+  api(url).then(function (d) {
+    if (!d || !d.ok) { toast(d && d.error || '搜索失败'); return; }
+    if (!d.id) { searchResults = d.results || []; searchPerSrc = d.perSource || []; renderSearch(); return; }
+    sTimer = setInterval(function () { pollSearch(d.id); }, 1200);
+    pollSearch(d.id);
   }).catch(function () { toast('搜索失败'); });
+}
+function pollSearch(id) {
+  api('/api/search/poll?id=' + encodeURIComponent(id)).then(function (d) {
+    if (!d || !d.ok) {
+      clearInterval(sTimer); sTimer = null;
+      el('searchInfo').textContent = '共 ' + (searchResults.length) + ' 条';
+      return;
+    }
+    searchResults = d.results || [];
+    searchPerSrc = d.perSource || [];
+    if (!searchResults.length) sPage = 1;
+    var prog = ' · 已搜索 ' + (d.done || 0) + '/' + (d.totalEnabled || 0) + ' 个音源…';
+    el('searchInfo').textContent = '共 ' + (d.total || 0) + ' 条' + (d.finished ? '' : prog);
+    el('playAllBtn').style.display = searchResults.length ? '' : 'none';
+    renderSearch();
+    if (d.finished) { clearInterval(sTimer); sTimer = null; el('searchInfo').textContent = '共 ' + (d.total || 0) + ' 条'; }
+  }).catch(function () { });
 }
 function playAllSearch() {
   if (!searchResults.length) return;
@@ -1479,21 +1839,25 @@ function sGo(p) { sPage = p; renderSearch(); }
 function renderPluginBar() {
   var bar = el('searchPluginBar');
   if (!bar) return;
-  var names = [];
-  var seen = {};
-  searchResults.forEach(function (it) { if (it.plugin && !seen[it.plugin]) { seen[it.plugin] = 1; names.push(it.plugin); } });
-  if (names.length <= 1) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
-  bar.style.display = '';
-  bar.innerHTML = '';
-  var mk = function (label, val) {
-    var chip = document.createElement('span');
-    chip.className = 'chip' + (sPlugin === val ? ' on' : '');
-    chip.textContent = label;
-    chip.onclick = function () { sPlugin = val; sPage = 1; renderSearch(); };
-    bar.appendChild(chip);
-  };
-  mk('全部', null);
-  names.forEach(function (n) { mk(n, n); });
+  var names = [], seen = {};
+  var srcs = searchPerSrc.length ? searchPerSrc : [];
+  srcs.forEach(function (s) { if (s.plugin && !seen[s.plugin]) { seen[s.plugin] = 1; names.push(s.plugin); } });
+  if (names.length > 1) {
+    bar.style.display = '';
+    bar.innerHTML = '';
+    var mk = function (label, val) {
+      var chip = document.createElement('span');
+      chip.className = 'chip' + (sPlugin === val ? ' on' : '');
+      chip.textContent = label;
+      chip.onclick = function () { sPlugin = val; sPage = 1; renderSearch(); };
+      bar.appendChild(chip);
+    };
+    mk('全部', null);
+    names.forEach(function (n) { mk(n, n); });
+  } else {
+    bar.style.display = 'none';
+    bar.innerHTML = '';
+  }
 }
 function playResult(i) {
   var it = searchResults[i];

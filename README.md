@@ -1,51 +1,60 @@
-# MusicFree TV（安卓tv）
+# MusicFree TV（安卓 tv）
 
-基于 [musicfree-plugins](https://github.com/maotoumao/MusicFreePlugins) 插件仓库的 **Android TV / 盒子** 播放器骨架（Kotlin + Jetpack Compose for TV + Media3 + QuickJS）。
+基于 [musicfree-plugins](https://github.com/maotoumao/MusicFreePlugins) 插件仓库理念的 **Android TV / 盒子** 播放器（Kotlin + Jetpack Compose for TV + Media3 + QuickJS），支持局域网 **Web 远程控制台**（手机浏览器搜歌/控制/管理插件），已配好 arm64-v8a / x86_64。
 
-> ⚠ 本工程为「可编译骨架」：已完整实现 JS 引擎加载、插件调用协议、首页/搜索/歌单/播放器/设置/远程配置推送全链路 UI 与基础逻辑；部分高级功能（歌词滚动高亮、通知栏封面、多码率选择、WebDAV 基础认证代理等）需根据实际使用场景进一步完善。  
-> 本机无 Android SDK，请用 Android Studio（2024.1+）打开 `安卓tv/` 文件夹，同步 Gradle 后构建。
+> ⚠ 本工程为「可编译骨架 + 全链路功能」：已完整实现 JS 引擎加载、插件调用协议、首页/搜索/歌单/播放器/设置/远程 Web 控制台；搜索支持**多引擎并行 + 渐进式出结果**，插件支持**内容识别安装**（plugins.json / .js 直链），另含通知栏封面、歌词翻译、WebDAV 认证、远程主题/歌词/收藏导出导入等。
+
+---
+
+## 免责声明
+
+本软件仅用于**技术学习与交流**，不提供任何音乐内容，所有音源均由第三方插件动态获取，内容与版权归原始来源（歌单/站点）所有。请注意：
+
+- 音乐资源来自第三方插件与公开网络，本软件不存储、不上传、不修改任何受版权保护的内容。
+- 请仅将本软件用于个人学习、研究等合法用途，遵守所在地法律法规；**请勿用于任何商业或非法用途**。
+- 使用本软件所产生的一切后果（包括但不限于版权纠纷、法律风险）由使用者自行承担，作者与贡献者不承担任何责任。
+- 若您是版权方并认为本软件被用于侵权用途，请直接向相关插件/站点联系处理。
 
 ---
 
 ## 目录结构
 
 ```
-安卓tv/
+./
 ├─ app/
-│   ├─ build.gradle.kts                         # compileSdk 35 / minSdk 26
+│   ├─ build.gradle.kts                         # compileSdk 35 / minSdk 24 / JDK 17
 │   ├─ proguard-rules.pro                       # QuickJS / OkHttp / zxing keep rules
 │   └─ src/main/
 │       ├─ AndroidManifest.xml                  # TV Leanback + 远程配置 intent-filter + 播放服务
 │       ├─ assets/runtime/
 │       │   ├─ globals.js                       # console / btoa / setTimeout / URL 垫片
 │       │   ├─ moduleLoader.js                  # 极简 CommonJS 加载器
-│       │   ├─ bootstrap.js                     # env.getUserVariables + __registerPlugin + __invoke RPC
+│       │   ├─ bootstrap.js                     # env.getUserVariables + __registerPlugin + __invoke RPC + 全局库暴露
 │       │   └─ libs/                            # crypto-js / qs / dayjs / he / big-integer / cheerio / webdav / axios
 │       ├─ java/com/tvmusic/
-│       │   ├─ MainActivity.kt                  # Compose NavHost + 迷你播放条 + 深链处理
+│       │   ├─ MainActivity.kt                  # Compose NavHost + 迷你播放条 + 悬浮歌词 + 深链处理
 │       │   ├─ core/TvMusicApp.kt               # Application：初始化 Store/Runtime/Repository/Player
 │       │   ├─ data/                            # Models.kt + PluginStore.kt（SQLite）
-│       │   ├─ runtime/                         # JsEngine 接口 + QuickJsEngine（taoweiji quickjs-android 1.4.6）
-│       │   ├─ plugin/                          # PluginRuntime + PluginRepository（订阅/安装/探测 platform）
+│       │   ├─ runtime/                         # JsEngine 接口 + QuickJsEngine（taoweiji quickjs-android 1.4.6 + native job pump）
+│       │   ├─ plugin/                          # PluginRuntime（并行引擎池）+ PluginRepository（订阅/安装/探测 platform）
+│       │   ├─ config/                          # SearchSettings（搜索配置：音源优先级/排序/封顶数）
 │       │   ├─ player/                          # PlayerManager + PlaybackService（Media3 + MediaSessionService）
-│       │   ├─ remote/                          # ConfigModels + ConfigParser + RemoteConfigService（局域网 HTTP 推送）
+│       │   ├─ remote/                          # RemoteConfigService（局域网 HTTP 服务 + Web 控制台，端口 9527）
 │       │   └─ ui/
-│       │       ├─ theme/Theme.kt               # 深色 Material3 配色
-│       │       ├─ components/Components.kt     # AppTitleBar / Artwork / MediaCard / MusicRow / tvFocus / LoadingBox
+│       │       ├─ theme/Theme.kt + LyricSettings.kt  # 深色 Material3 配色 + 歌词显示配置（默认关闭悬浮）
+│       │       ├─ components/Components.kt     # AppTitleBar / LyricOverlay / MediaCard / MusicRow / tvFocus / LoadingBox
 │       │       ├─ home/HomeScreen+ViewModel    # 首页：推荐歌单（getRecommendSheetTags）+ 排行榜（getTopLists）
-│       │       ├─ search/SearchScreen+ViewModel# 搜索（search across enabled plugins）
-│       │       ├─ sheet/SheetScreen+ViewModel+SheetTarget  # 歌单详情（musicList / getTopListDetail / importMusicSheet）
-│       │       ├─ player/PlayerScreen          # 全屏播放：封面 + 歌词 + 进度 + 控制（上/下/快进快退）
-│       │       ├─ setting/SettingsScreen+ViewModel # 插件/订阅/用户变量/远程配置（地址 + 扫码 + 口令）
+│       │       ├─ search/SearchScreen+ViewModel# 搜索：多音源并行 + 边搜边出 + 音源/时长/封面/排序过滤
+│       │       ├─ sheet/SheetScreen+ViewModel  # 歌单详情（musicList / getTopListDetail / importMusicSheet）
+│       │       ├─ player/PlayerScreen          # 全屏播放：封面 + 逐行歌词 + 进度 + 控制
+│       │       ├─ setting/SettingsScreen+ViewModel # 插件/订阅/用户变量/歌词/远程（地址 + 扫码 + 口令）
 │       │       ├─ qr/QrScreen                 # CameraX + zxing 扫码接收
 │       │       └─ common/                      # Vms 工厂 + ConfigPending 深链暂存
-│       └─ res/                                 # drawable/banner / ic_launcher / colors / themes / network_security_config
+│       └─ res/                                 # banner / 启动图标(mipmap-*) / colors / themes / network_security_config
 ├─ gradle/
 │   ├─ libs.versions.toml                       # 所有依赖版本（含 quickjs 1.4.6 / media3 1.5.1 / camerax 1.3.4）
 │   └─ wrapper/gradle-wrapper.properties        # Gradle 8.10.2
-├─ settings.gradle.kts
-├─ build.gradle.kts
-├─ gradle.properties
+├─ settings.gradle.kts / build.gradle.kts / gradle.properties
 └─ README.md
 ```
 
@@ -55,128 +64,103 @@
 
 ### 1. JS 引擎与插件协议（QuickJS + 原生桥）
 
-- **引擎选型**：[taoweiji/quickjs-android](https://github.com/taoweiji/quickjs-android) `1.4.6`（Maven Central，支持 Event Queue、CommonJS、Java→JS 回调）。
-- 所有 JS 引擎调用在**单一 HandlerThread** 上串行执行（`QuickJsEngine.jsBlock`），保证线程安全。
-- **async RPC**：JS 端 `__invoke(platform, method, argsJson, cbId)` → Promise.then → `nativeBridge.onPluginResult(cbId, json)` 回吐；Java 侧用 `CompletableFuture` + 轮询 `drainJobs()` 等待（最多 60s 超时）。
-- **定时器**：`setTimeout` 由 Java `Handler.postDelayed` 驱动；`clearTimeout` 立即移除原生回调。
-- **HTTP 原生桥**：`nativeBridge.httpRequest` → OkHttp 同步请求；**自动剥离**插件传入的 `Accept-Encoding` 头，由 OkHttp 透明处理 gzip/br。
-- **用户变量**：`env.getUserVariables()` 返回所有插件全局合并（同名键以最新存储为准）。WebDAV 等插件使用 `url/username/password`。
-- **Parcel 打包兼容**：`__registerPlugin` 自动识别 `module.exports.default`（Parcel）与普通 CommonJS；插件 platform 取源码**最后一次出现**的 `platform: "..."` 值。
-- **方法缺失处理**：任何未实现的方法（如插件没有 `getRecommendSheetTags`）统一返回 `{ __notImplemented: true }`，UI 层静默跳过。
+- **引擎选型**：[taoweiji/quickjs-android](https://github.com/taoweiji/quickjs-android) `1.4.6`（支持 Event Queue、CommonJS、Java→JS 回调），并配套 `cpp/js_job_pump.c` 手动推进 Promise/await 微任务队列（否则插件 async 方法在首个 `await` 处永久挂起）。
+- **async RPC**：JS 端 `__invoke(platform, method, argsJson, cbId)` → `Promise.then` → `nativeBridge.onPluginResult(cbId, json)` 回吐；Java 侧用 `CompletableFuture` + 轮询推进 job（超时抛 `PluginCallException`）。
+- **并行搜索引擎池**：单 QuickJS 引擎单线程、插件 HTTP 为同步阻塞桥，音源只能逐个搜。`PluginRuntime` 启动 3 台独立引擎（各自 JS 线程 + 独立 runtime，均注册全量插件），搜索按「最空闲引擎」分发实现真并行；播放/详情等仍走主引擎，避免跨引擎状态问题。
+- **HTTP 原生桥**：`nativeBridge.httpRequest` → OkHttp 同步请求；自动剥离插件传入的 `Accept-Encoding`，由 OkHttp 透明处理 gzip/br。
+- **全局库暴露**：`bootstrap.js` 将 axios/dayjs/he/qs/cheerio/crypto-js/big-integer/webdav 暴露为全局，兼容「裸 `axios.get`」等直接引用库的插件。
+- **Parcel 打包兼容**：`__registerPlugin` 自动识别 `module.exports.default` 与普通 CommonJS；平台名取源码**最后一次出现**的 `platform: "..."`（支持字面量与变量引用）。
+- **方法缺失处理**：未实现的方法统一返回 `{ __notImplemented: true }`，UI 层静默跳过。
 
 ### 2. 插件加载与订阅管理
 
-- 内置默认订阅源（首次启动自动添加）：`https://cdn.jsdelivr.net/gh/maotoumao/MusicFreePlugins@latest/plugins.json`
-- **PluginRepository**：
-  - `syncAll()` 遍历所有订阅，下载 plugins.json，按 `name/url/version` 安装。
-  - `install(name, url)` 下载 JS → 正则探测 platform → 注册到引擎 → 读取元信息 → SQLite 持久化。
-  - 支持 `.js` 直链导入（单插件）与 plugins.json 列表导入。
-- **插件元信息**：通过 JS 运行时读取导出对象的 `platform/version/author/srcUrl/userVariables/supportedSearchType`，存入 `PluginRecord.info`。
+- **无内置默认订阅源**：不向 APK 写入任何来源地址。订阅源由用户自行添加（设置页 / Web 控制台 `/api/subscriptions`），或放置设备文件 `plugin_sources` 让应用读取。
+- **内容识别安装**：`installContent` / `importFromUrl` / `syncOne` 会先判断内容——JSON `plugins` 列表则批量安装，否则按单个 `.js` 插件导入。因此**.js 直链与 plugins.json 均可直接添加并同步**。
+- **平台探测**：`PluginRepository.detectPlatform` 支持 `platform: "字面量"` 与 `const X = "..."` + `platform: X` 变量引用，并过滤 `pc / web / WebFilter / H5 / .json` 等干扰项，避免误装。
+- **插件元信息**：通过 JS 运行时读取 `platform/version/author/srcUrl/userVariables/supportedSearchType` 存入 `PluginRecord.info`。
 
 ### 3. 播放器（Media3 ExoPlayer）
 
 - **PlayerManager**：单例持有 ExoPlayer，对外暴露 `StateFlow<PlayerUiState>`（当前歌曲 / 播放状态 / 队列 / 歌词 / 进度）。
-- **按需取流**：播放时调用插件 `getMediaSource(item, "standard")` → 拿到 `{ url, headers }` → `DefaultHttpDataSource.Factory.setDefaultRequestProperties(headers)`（包括 Referer 等必要头，对 HLS 片段同样生效）。
-- **队列管理**：同一歌单的全部歌曲作为队列传入 `PlayerManager.play`，实现上/下一首（`skipTo` 重新 fetch 对应歌曲 URL）。
-- **歌词**：调用 `getLyric(musicItem)` → 解析 rawLrc `[mm:ss.xx]歌词`；播放时每 500ms 更新当前行索引，全屏播放器显示当前行。
+- **按需取流**：播放时调用插件 `getMediaSource(item, "standard")` → `{ url, headers }` → 写入 `DefaultHttpDataSource` 默认请求头（含 Referer 等，HLS 片段同样生效）。
+- **队列管理**：歌单全部歌曲作为队列传入 `PlayerManager.play`，支持上/下一首（`skipTo` 重新 fetch URL）。
+- **歌词**：`getLyric` 兼容 `{ rawLrc, translation }`、`lyricList`、`translationList`；播放页内嵌逐行歌词，非播放页可有全局悬浮歌词层（**默认关闭**，设置页可开启并调节字号/颜色/位置/透明度）。
 
-### 4. 远程配置推送
+### 4. 远程 Web 控制台（端口 9527）
 
-局域网 HTTP 服务（端口 `48621`）：
+TV 端启动后自带局域网 HTTP 服务，手机/PC 浏览器访问设置页展示的地址即可：
+
 ```
-GET  /                → { app, version, host, port, receiveUrl, status }
-POST /push            → body 为配置 JSON，立即应用
-GET  /push?url=<url>  → 拉取远端配置并应用
+GET  /                    → 控制台首页（HTML，含状态/插件/搜索/播放器/收藏/设置）
+GET  /api/status          → { app, version, host, port, status }
+GET  /api/plugins         → 插件列表（启用状态 / loadError）
+POST /api/plugins/toggle、/api/plugins/uninstall
+POST /api/subscriptions、/api/subscriptions/remove、/api/sync
+GET  /api/search?q=&sources=&minD=&maxD=&art=1&sort=&asc=
+     → 渐进式搜索：立即返回会话 id，后台按音源并行搜索
+GET  /api/search/poll?id= → 轮询增量结果 { done/totalEnabled, total, results, perSource }
+GET  /api/search/config   → 搜索共享配置（音源优先级/默认排序/最大结果数）
+POST /api/search/config   → 保存（管理页「搜索设置」卡片）
+POST /api/play、/api/play/queue、/api/player/{playpause|next|prev|seek|volume|skip|mode}
+GET  /api/player、/api/lyric、/api/themes
+POST /api/theme、/api/lyric、/api/export、/api/import
+GET  /api/fav/lists、/api/fav/items、/api/player/fav-albums
+POST /api/fav/{lists/create|lists/rename|lists/remove|toggle|play}
+GET  /api/img?url=...     → 图片代理（绕过图床防盗链，控制台封面可见）
 ```
 
-配置 JSON 格式：
-```json
-{
-  "subscriptions": ["https://.../plugins.json"],
-  "plugins": [ { "name": "插件名", "url": "...", "version": "..." } ],
-  "userVariables": { "url": "http://...", "username": "user", "password": "pass" },
-  "sync": true
-}
-```
+搜索说明：`sources`（音源多选，逗号分隔）、`minD`/`maxD`（时长秒）、`art=1`（必须有封面）、`sort/asc`（全局排序）；控制台搜索页也可「存为新默认」。App 端每次搜索实时读取后台配置优先级。
 
-也支持深链口令（URL-safe Base64 编码）：
+也支持深链口令（URL-safe Base64）与扫码接收：
+
 ```
 tvmusic://config?data=<base64url(json)>     # 单条配置
 tvmusic://config?sub=<订阅地址>               # 添加订阅
 ```
 
-电视端设置页显示接收地址，手机浏览器访问即可推送；也可点击「扫码接收」用 CameraX + zxing 扫二维码获取配置。
-
 ---
 
 ## 构建说明
 
-1. 用 **Android Studio 2024.1+** 打开 `安卓tv/` 文件夹。
-2. 等待 Gradle Sync 完成（首次需下载依赖，约 5–10 分钟）。
-3. 连接 Android TV 设备或使用 Android TV Emulator（API 30+，分辨率 1920×1080）。
-4. 点击 ▶ Run 安装运行。
+1. 用 **Android Studio 2024.1+** 打开本目录，等待 Gradle Sync（首次约 5–10 分钟）。
+2. 连接 Android TV 设备或使用 Android TV Emulator（API 30+）。
+3. 点击 ▶ Run 安装运行。
 
-> 注：本工程 `lint { abortOnError = false }` 降低因本机未配置 Android Lint 而失败的概率。  
-> 注：`buildFeatures { buildConfig = true }` 已开启（RemoteConfigService 中使用 `BuildConfig.VERSION_NAME`）。
-
----
+> 注：仅构建 `arm64-v8a` 与 `x86_64` 两种 ABI（见 `app/build.gradle.kts`），覆盖绝大多数电视盒与模拟器。  
+> 注：`lint { abortOnError = false }` 与 `buildFeatures { buildConfig = true }` 已开启，命令行可正常构建。
 
 ## JDK 17 配置
 
-本工程要求 **JDK 17** 构建（Gradle 8.10.2 运行、`compileOptions` / `kotlinOptions` 均指向 17）。Android Studio 自带 JBR 即 JDK 17，通常无需额外配置；若命令行构建报错，请按以下任一方式指定：
+本工程要求 **JDK 17** 构建（Gradle 8.10.2 运行、`compileOptions` / `kotlinOptions` 均指向 17）。
 
-**方式一（推荐）：使用 Android Studio 内置 JBR**
-- 已随 Android Studio 安装，路径一般为 `C:\Program Files\Android\Android Studio\jbr`。
-- 命令行使用：在环境变量中设置
-  ```
-  JAVA_HOME=C:\Program Files\Android\Android Studio\jbr
-  ```
-  或将上述路径写入 `gradle.properties`：
-  ```
-  org.gradle.java.home=C:/Program Files/Android/Android Studio/jbr
-  ```
+**方式一（推荐）：Android Studio 内置 JBR**
+```
+JAVA_HOME=C:\Program Files\Android\Android Studio\jbr
+```
+或将路径写入 `gradle.properties`：`org.gradle.java.home=C:/Program Files/Android/Android Studio/jbr`
 
-**方式二：独立安装 JDK 17（如 Temurin / Oracle）**
-- 下载安装后设置 `JAVA_HOME` 指向 JDK 17 根目录，例如：
-  ```
-  JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17.0.x
-  ```
-- 验证版本（必须为 `17.x`，大于或小于 17 均可能导致 Gradle/AGP 兼容性问题）：
-  ```
-  java -version
-  ```
-- 注意：本机若同时安装多个 JDK，`JAVA_HOME` 与 `org.gradle.java.home` 不可同时设置且指向不同版本，二者优先级高于 `PATH`。
-
-**方式三：在 Android Studio 内指定**
-- `File → Project Structure → SDK Location → JDK location` 选择 JDK 17 所在目录。
-- 或 `Settings → Build, Execution, Deployment → Build Tools → Gradle → Gradle JDK` 选择 17。
-
-> 注：Gradle 编译时 `org.gradle.java.home`（或 `JAVA_HOME`）决定 Gradle 守护进程使用哪个 JDK，必须为 **17**；工程源码层面的 Java/Kotlin target 已固定为 17，无需改动构建脚本。
+**方式二：独立安装 JDK 17（Temurin / Oracle）**
+```
+JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17.0.x
+```
+验证 `java -version` 必须为 `17.x`；`JAVA_HOME` 与 `org.gradle.java.home` 不可同时设置且指向不同版本。
 
 ---
 
-## 已知限制与待完善
-
-1. **歌单详情的分页加载**：部分插件 `importMusicSheet` 需分页参数；当前仅取第一页（page=1），大歌单需后续补充滚动加载。
-2. **专辑/歌手作品**：搜索结果中 `type=singer/album/sheet/leaderboard` 条目暂未处理（骨架只播放 type=music）；如需可用，需增加 `getArtistWorks` / `getAlbumInfo` 入口。
-3. **歌词翻译**：`getLyric` 返回 `translationList` 时暂未在 UI 中并排显示。
-4. **用户变量编辑**：设置页变量列表可按插件展开编辑；全局变量与插件变量共用 key，存在同名冲突风险（如不同插件都用 `url` key）；可考虑按 plugin namespace 做 UI 隔离。
-5. **WebDAV HTTP 基础认证**：shim 层通过 URL userinfo 传递 Basic Auth；若 WebDAV 插件改用其他认证方式需跟进。
-6. **通知栏封面**：Media3 默认 `PlayerNotificationManager` 使用 MediaItem artwork；若插件返回的 artwork URL 需加认证头，需定制 `NotificationCompat.Builder`。
-7. **D-pad 选中态动画**：`tvFocus` modifier 已实现 scale + alpha；若需更多 TV Leanback 风格（如 `LeanbackTheme` 高亮边框）可替换为 `androidx.tv.foundation`。
-8. **Proguard**：`proguard-rules.pro` 已配置 QuickJS/OkHttp/zxing keep 规则；正式上线前建议启用 `minifyEnabled = true` 并补充 Compose/Coil/Media3 keep。
-
----
-
-## 常用命令（在 `安卓tv/` 目录）
+## 常用命令（项目根目录）
 
 ```bash
 # 安装到已连接的 TV 设备
-./gradlew installDebug
+./gradlew :app:installDebug
 
-# 构建 Release APK
-./gradlew assembleRelease
+# 构建 Debug APK（可安装；用于发布版资产）
+./gradlew :app:assembleDebug
+
+# 构建 Release APK（当前未配置签名，需自行补 signingConfig）
+./gradlew :app:assembleRelease
 ```
+
+> 发布版（GitHub Release）当前附带 **Debug APK**（已用 debug 签名，可直接安装到电视盒）。
 
 ---
 
@@ -186,3 +170,11 @@ tvmusic://config?sub=<订阅地址>               # 添加订阅
 - [quickjs-android](https://github.com/taoweiji/quickjs-android)（陶维佳）
 - [Media3 / ExoPlayer](https://developer.android.com/media/media3)
 - [Coil](https://coil-kt.github.io/coil/) / [CameraX](https://developer.android.com/media/camera/camerax) / [zxing](https://github.com/zxing/zxing)
+
+---
+
+## 开源信息
+
+- **License**：本项目仅供学习交流使用，暂未指定具体开源协议；欢迎以学习/研究目的使用与二次开发，请保留版权与出处声明。如需商用或分发，请先联系作者获取授权。
+- **仓库**：[cnliux/MusicFreeTV](https://github.com/cnliux/MusicFreeTV)
+- **反馈**：Bug 或功能建议请到 [Issues](https://github.com/cnliux/MusicFreeTV/issues) 提交，欢迎 PR 贡献代码。

@@ -17,6 +17,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.random.Random
 
@@ -40,7 +43,7 @@ data class QueueEntry(
     }
 }
 
-data class LrcLine(val timeMs: Long, val text: String)
+data class LrcLine(val timeMs: Long, val text: String, val translation: String? = null)
 
 data class PlayerUiState(
     val current: QueueEntry? = null,
@@ -79,6 +82,14 @@ object PlayerManager {
 
     /** 供服务/UI 获取播放器实例（不存在则创建）。 */
     fun ensurePlayer(): ExoPlayer = requirePlayer()
+
+    /** 通知栏封面下载器：封面 URL 通常与音源同源，需带上 getMediaSource 返回的请求头才能加载。 */
+    private val artworkLoader = OkHttpClient.Builder()
+        .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
 
     private var runtime: PluginRuntime? = null
     private var playbackStore: com.tvmusic.data.PlaybackStore? = null
@@ -264,6 +275,8 @@ object PlayerManager {
                     for (i in 0 until names.length()) map[names.getString(i)] = h.getString(names.getString(i))
                     map
                 } ?: emptyMap()
+                // 记住本次请求头：通知栏封面（BitmapLoader）沿用同一套认证头
+                activeHeaders = headers
 
                 val mediaItem = MediaItem.Builder()
                     .setUri(url) // 真实音源 URL（当前条目经插件解析）
@@ -298,6 +311,7 @@ object PlayerManager {
                     p.prepare()
                     p.play()
                 }
+                // 通知栏封面由 PlaybackService 的 BitmapLoader 在媒体项切换时按需加载（带请求头，不阻塞播放）
                 fetchLyric(item)
             } catch (e: Exception) {
                 reportPlayError(e.message ?: "播放失败")
@@ -427,28 +441,63 @@ object PlayerManager {
             try {
                 val rt = runtime ?: return@launch
                 val result = rt.callAsync(entry.plugin, "getLyric", listOf(entry.raw.toString()))
-                val lines = when (result) {
-                    is JSONObject -> {
-                        val raw = result.optString("rawLrc")
-                        if (raw.isNotBlank()) parseLrc(raw)
-                        else {
-                            val arr = result.optJSONArray("lyricList")
-                            if (arr != null) {
-                                (0 until arr.length()).mapNotNull { i ->
-                                    val o = arr.optJSONObject(i)
-                                    if (o == null) null
-                                    else LrcLine((o.optDouble("time") * 1000).toLong().coerceAtLeast(0), o.optString("lyric"))
-                                }
-                            } else emptyList()
-                        }
-                    }
-                    is NotImplementedError -> emptyList()
-                    else -> emptyList()
-                }
-                _uiState.value = _uiState.value.copy(lrcLines = lines, lrcIndex = -1)
+                val lines = parseLyricResult(result)
+                _uiState.value = _uiState.value.copy(lrcLines = lines.sortedBy { it.timeMs }, lrcIndex = -1)
             } catch (_: Exception) {
                 _uiState.value = _uiState.value.copy(lrcLines = emptyList())
             }
+        }
+    }
+
+    /**
+     * 解析 getLyric 返回值。标准协议为 { rawLrc, translation }（均为 LRC 文本，参考 musicfree 插件协议）；
+     * 也兼容扩展形态 { lyricList: {time, lyric, translation?}[] } 与独立的 translationList: {time, translation}[]。
+     */
+    private fun parseLyricResult(result: Any): List<LrcLine> {
+        val obj = result as? JSONObject ?: return emptyList()
+        val raw = obj.optString("rawLrc")
+        val translation = obj.optString("translation")
+        val separateTrans = extractTranslations(obj.optJSONArray("translationList"))
+
+        if (raw.isNotBlank()) {
+            val base = parseLrc(raw)
+            val fromText = if (translation.isNotBlank()) parseLrc(translation) else emptyList()
+            return mergeTranslation(base, fromText, separateTrans)
+        }
+        val arr = obj.optJSONArray("lyricList") ?: return emptyList()
+        val base = (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val time = (o.optDouble("time") * 1000).toLong().coerceAtLeast(0)
+            val lyric = o.optString("lyric")
+            if (lyric.isBlank()) return@mapNotNull null
+            LrcLine(time, lyric, o.optString("translation").takeIf { it.isNotBlank() })
+        }
+        return mergeTranslation(base, emptyList(), separateTrans)
+    }
+
+    /** 结构化翻译数组 { time, translation } -> LrcLine[time, 译文]。 */
+    private fun extractTranslations(arr: JSONArray?): List<LrcLine> {
+        if (arr == null) return emptyList()
+        return (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val text = o.optString("translation").takeIf { it.isNotBlank() }
+            if (text == null) null
+            else LrcLine((o.optDouble("time") * 1000).toLong().coerceAtLeast(0), text)
+        }
+    }
+
+    /** 把文本/结构化两种翻译行按时间对齐到歌词行（每行取时间最接近的译文，已带译文的不覆盖）。 */
+    private fun mergeTranslation(
+        lines: List<LrcLine>,
+        textTrans: List<LrcLine>,
+        listTrans: List<LrcLine>
+    ): List<LrcLine> {
+        if (lines.isEmpty() || (textTrans.isEmpty() && listTrans.isEmpty())) return lines
+        val pool = (textTrans + listTrans).sortedBy { it.timeMs }
+        return lines.map { line ->
+            if (line.translation != null) line
+            else pool.minByOrNull { kotlin.math.abs(it.timeMs - line.timeMs) }
+                ?.let { line.copy(translation = it.text) } ?: line
         }
     }
 
@@ -457,7 +506,6 @@ object PlayerManager {
         for (line in raw.lineSequence()) {
             // 形如：[mm:ss.xx][mm:ss.xx]歌词
             val m = Regex("\\[(\\d{1,2}):(\\d{1,2})(?:\\.(\\d{1,3}))?]").findAll(line).toList()
-            var text = line
             var lastEnd = 0
             val times = mutableListOf<Long>()
             for (mm in m) {
@@ -468,10 +516,48 @@ object PlayerManager {
                 lastEnd = mm.range.last + 1
             }
             if (times.isEmpty()) continue
-            text = line.substring(lastEnd.coerceAtMost(line.length)).trim()
+            val text = line.substring(lastEnd.coerceAtMost(line.length)).trim()
             if (text.isEmpty()) continue
             times.forEach { lines.add(LrcLine(it, text)) }
         }
         return lines.sortedBy { it.timeMs }
+    }
+
+    // ---------------- 通知栏封面 ----------------
+
+    /** 最近一次 getMediaSource 返回的请求头：封面与音源同域时沿用同一套请求头下载。 */
+    @Volatile
+    private var activeHeaders: Map<String, String> = emptyMap()
+
+    fun activeRequestHeaders(): Map<String, String> = activeHeaders
+
+    /**
+     * 用音源请求头下载封面 Bitmap，供播放服务的通知栏 BitmapLoader 调用。
+     * 阻塞式：media3 会在自身的后台任务线程里调用，出错时返回 null（通知回退默认图标）。
+     */
+    fun loadArtworkBitmap(url: String): android.graphics.Bitmap? {
+        if (!url.startsWith("http")) return null
+        return try {
+            val builder = Request.Builder().url(url)
+            activeHeaders.forEach { (k, v) -> builder.addHeader(k, v) }
+            artworkLoader.newCall(builder.build()).execute().use { resp ->
+                if (!resp.isSuccessful) null else resp.body?.bytes()
+            }?.let { decodeArtwork(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** 解码封面并限制最大边长，避免大图吃爆内存。 */
+    private fun decodeArtwork(raw: ByteArray): android.graphics.Bitmap? {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) > 1024 || bounds.outHeight / (sample * 2) > 1024) {
+            sample *= 2
+        }
+        val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+        return android.graphics.BitmapFactory.decodeByteArray(raw, 0, raw.size, opts)
     }
 }
