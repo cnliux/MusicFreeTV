@@ -12,7 +12,6 @@ import com.tvmusic.remote.RemoteConfigService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.runBlocking
 import java.io.File
 
 class TvMusicApp : Application() {
@@ -49,48 +48,12 @@ class TvMusicApp : Application() {
         sources.filter { it !in subscribed }.forEach { store.addSubscription(it) }
         repository.refreshFromDb()
 
-        // 首启兜底：DB 为空时装入 assets/plugins 下打包的已知可用插件，
-        // 保证即使订阅源同步失败，首页/搜索仍有数据可加载。
-        if (store.loadPlugins().isEmpty()) {
-            installBundledPluginsBlocking()
-        }
+        // 不内置任何插件/订阅源：音源一律由用户添加（订阅同步 / 设备 plugin_sources 文件 / 手动安装）。
 
         repository.warmup()
         repository.syncAll()
 
         RemoteConfigService.ensureStarted(this)
-    }
-
-    private fun installBundledPluginsBlocking() {
-        val names = try {
-            assets.list("plugins")
-        } catch (e: Exception) {
-            Log.w("TvMusicApp", "list bundled plugins: ${e.message}")
-            null
-        } ?: return
-        runBlocking(Dispatchers.IO) {
-            for (name in names) {
-                if (!name.endsWith(".js", ignoreCase = true)) continue
-                val src = readAssetOrNull("plugins/$name") ?: continue
-                // 不指定 displayName，让 install 用插件内的 platform 作为名称，
-                // 这样订阅同步时同名插件会被幂等跳过，避免重复注册导致崩溃。
-                val err = repository.install("", url = "asset://plugins/$name", source = src)
-                if (err != null) {
-                    Log.w("TvMusicApp", "install bundled $name failed: $err")
-                } else {
-                    Log.i("TvMusicApp", "bundled plugin installed: $name")
-                }
-            }
-        }
-    }
-
-    private fun readAssetOrNull(path: String): String? {
-        return try {
-            assets.open(path).bufferedReader(Charsets.UTF_8).use { it.readText() }
-        } catch (e: Exception) {
-            Log.w("TvMusicApp", "read asset $path: ${e.message}")
-            null
-        }
     }
 
     /**
