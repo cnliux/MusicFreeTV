@@ -9,9 +9,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -78,6 +81,12 @@ fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false, shap
     val shape = shapeOverride ?: if (circle) androidx.compose.foundation.shape.CircleShape else RoundedCornerShape(tokens.radius)
     return this
         .onFocusChanged { focused = it.isFocused }
+        // 边框必须画在 graphicsLayer 之外：调用方的 clip 位于本 Modifier 外侧，
+        // 若 border 在 graphicsLayer 内会被放大 1.08x 后超出 clip 边界，
+        // 圆角被裁掉只剩上下直边——这就是"白条"的真正根因。
+        .let {
+            if (focused) it.border(3.dp, tokens.focusBorder, shape) else it
+        }
         .graphicsLayer {
             if (!tokens.focusBrightnessOnly) {
                 scaleX = animated
@@ -96,11 +105,75 @@ fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false, shap
         .drawBehind {
             if (focused) drawRect(glow.copy(alpha = if (tokens.focusBrightnessOnly) 0.08f else 0.14f))
         }
-        .let {
-            // 注意：不能用 border(0.dp)——旧版 Compose 在低版本设备上仍会画 1px 发丝线，
-            // 被胶囊 clip 裁掉四角后表现为上下白条。仅聚焦时才加边框。
-            if (focused) it.border(3.dp, tokens.focusBorder, shape) else it
+}
+
+/**
+ * 全局悬浮歌词层：叠加在非播放页最上层，不拦截焦点（userScrollEnabled=false）。
+ * 位置（顶部/居中/底部 + 垂直微调）、字号、颜色、透明度均由歌词设置控制。
+ * 播放页有独立的逐行歌词视图，故仅在非 player 路由下由 MainActivity 挂载本层。
+ */
+@Composable
+fun LyricOverlay(lines: List<com.tvmusic.player.LrcLine>, currentIndex: Int) {
+    val cfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
+    if (!cfg.enabled) return
+    val lrcColor = com.tvmusic.ui.theme.LyricSettings.parseColor()
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(currentIndex) {
+        if (currentIndex in lines.indices) {
+            listState.animateScrollToItem(currentIndex)
         }
+    }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val align = when (cfg.position) {
+        com.tvmusic.ui.theme.LyricPosition.TOP -> Alignment.TopCenter
+        com.tvmusic.ui.theme.LyricPosition.BOTTOM -> Alignment.BottomCenter
+        else -> Alignment.Center
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(start = 64.dp, end = 64.dp, top = 24.dp, bottom = 120.dp)
+            .offset { androidx.compose.ui.unit.IntOffset(0, with(density) { cfg.offsetY.dp.roundToPx() }) }
+            .graphicsLayer { alpha = cfg.opacity },
+        contentAlignment = align
+    ) {
+        if (lines.isEmpty()) {
+            Text(
+                "暂无歌词",
+                color = lrcColor.copy(alpha = 0.45f),
+                fontSize = 15.sp,
+                modifier = Modifier.padding(vertical = 30.dp)
+            )
+        } else {
+            androidx.compose.foundation.lazy.LazyColumn(
+                state = listState,
+                userScrollEnabled = false,
+                modifier = Modifier.fillMaxWidth().height(300.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                item { Spacer(Modifier.height(120.dp)) }
+                items(lines.size) { i ->
+                    val isCurrent = i == currentIndex
+                    Text(
+                        text = lines[i].text,
+                        color = if (isCurrent) lrcColor else lrcColor.copy(alpha = 0.35f),
+                        fontSize = if (isCurrent) (cfg.fontSizeSp + 4).sp else cfg.fontSizeSp.sp,
+                        fontWeight = if (isCurrent)
+                            androidx.compose.ui.text.font.FontWeight.Bold
+                        else androidx.compose.ui.text.font.FontWeight.Normal,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 6.dp)
+                            .graphicsLayer { alpha = if (isCurrent) 1f else 0.6f }
+                    )
+                }
+                item { Spacer(Modifier.height(120.dp)) }
+            }
+        }
+    }
 }
 
 @Composable

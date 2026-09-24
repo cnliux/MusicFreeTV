@@ -41,6 +41,7 @@ import androidx.navigation.navArgument
 import com.tvmusic.core.TvMusicApp
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.ui.components.AppTitleBar
+import com.tvmusic.ui.components.LyricOverlay
 import com.tvmusic.ui.components.tvFocus
 import com.tvmusic.ui.home.HomeScreen
 import com.tvmusic.ui.home.HomeViewModel
@@ -215,6 +216,14 @@ class MainActivity : ComponentActivity() {
                     composable("about") {
                         com.tvmusic.ui.about.AboutScreen()
                     }
+                }
+
+                // 全局悬浮歌词层：仅在非播放页叠加（播放页有独立逐行歌词视图）
+                if (route != "player" && uiState.current != null) {
+                    LyricOverlay(
+                        lines = uiState.lrcLines,
+                        currentIndex = uiState.lrcIndex
+                    )
                 }
             }
 
