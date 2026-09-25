@@ -1,44 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">MusicFree TV</string>
-
-    <string name="nav_home">首页</string>
-    <string name="nav_search">搜索</string>
-    <string name="nav_settings">设置</string>
-    <string name="nav_player">正在播放</string>
-
-    <string name="home_recommend">推荐歌单</string>
-    <string name="home_ranking">排行榜</string>
-    <string name="home_empty">暂无数据，请先在设置中添加插件订阅</string>
-    <string name="home_loading">正在加载…</string>
-
-    <string name="search_hint">输入关键词搜索（遥控器操作）</string>
-    <string name="search_type_music">歌曲</string>
-    <string name="search_type_album">专辑</string>
-    <string name="search_type_artist">歌手</string>
-    <string name="search_type_sheet">歌单</string>
-    <string name="search_empty">没有搜索结果</string>
-
-    <string name="settings_section_plugins">插件管理</string>
-    <string name="settings_section_remote">远程配置下发</string>
-    <string name="settings_section_about">关于</string>
-    <string name="settings_add_subscription">添加订阅地址</string>
-    <string name="settings_update_all">立即更新全部插件</string>
-    <string name="settings_remote_paste">粘贴 URL / 口令</string>
-    <string name="settings_remote_scan">扫描二维码</string>
-    <string name="settings_remote_hint">在电视所在局域网内，可通过手机/电脑向本机推送配置</string>
-    <string name="settings_remote_server">接收服务地址：%1$s</string>
-    <string name="settings_user_vars">账号变量</string>
-    <string name="settings_input_hint">在此输入内容</string>
-    <string name="settings_confirm">确定</string>
-    <string name="settings_cancel">取消</string>
-    <string name="settings_plugin_enabled">已启用</string>
-    <string name="settings_plugin_disabled">未启用</string>
-
-    <string name="player_prev">上一首</string>
-    <string name="player_next">下一首</string>
-    <string name="player_play">播放</string>
-    <string name="player_pause">暂停</string>
-
-    <string name="app_about">本播放器通过运行 MusicFree 插件协议（.js）接入各大音乐平台。插件与订阅请从可信来源获取。</string>
 </resources>

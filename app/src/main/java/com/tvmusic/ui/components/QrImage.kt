@@ -6,7 +6,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -17,6 +18,8 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import com.google.zxing.common.BitMatrix
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Hashtable
 
 /**
@@ -29,8 +32,11 @@ fun QrImage(
     sizePx: Int = 512,
     modifier: Modifier = Modifier
 ) {
-    val bitmap = remember(text, sizePx) {
-        runCatching { generateQr(text, sizePx) }.getOrNull()
+    // 512×512 逐像素填充耗时，放后台线程生成，避免卡 UI 线程
+    val bitmap by produceState<Bitmap?>(null, text, sizePx) {
+        value = withContext(Dispatchers.Default) {
+            runCatching { generateQr(text, sizePx) }.getOrNull()
+        }
     }
     val bmp = bitmap ?: return
     Image(

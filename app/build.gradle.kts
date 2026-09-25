@@ -36,8 +36,8 @@ android {
         vectorDrawables { useSupportLibrary = true }
 
         ndk {
-            // 只构建模拟器/常见 TV 盒所需 ABI，加快构建
-            abiFilters += listOf("arm64-v8a", "x86_64")
+            // arm64 + 32 位老 TV 盒 + 模拟器；quickjs aar 自带全部这四个 ABI
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
 
         externalNativeBuild {
@@ -57,7 +57,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
-            isShrinkResources = false
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

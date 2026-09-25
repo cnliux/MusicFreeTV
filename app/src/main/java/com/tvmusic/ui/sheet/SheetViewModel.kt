@@ -66,12 +66,11 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
     }
 
     private fun load() {
-        val target = SheetTarget.value ?: run {
+        val target = SheetTarget.consume() ?: run {
             _loading.value = false
             _error.value = "缺少详情数据"
             return
         }
-        SheetTarget.value = null
         plugin = target.plugin
         kind = target.kind
         item = target.item

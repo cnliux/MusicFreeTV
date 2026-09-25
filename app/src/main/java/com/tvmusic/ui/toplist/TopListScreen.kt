@@ -1,34 +1,27 @@
 package com.tvmusic.ui.toplist
 
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.tvmusic.ui.components.BackTopBar
+import com.tvmusic.ui.components.EmptyState
 import com.tvmusic.ui.components.ErrorBox
 import com.tvmusic.ui.components.FilterChip
 import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
-import com.tvmusic.ui.components.tvFocus
 import com.tvmusic.ui.sheet.DetailKind
 import com.tvmusic.ui.sheet.DetailTarget
 import org.json.JSONObject
@@ -46,30 +39,10 @@ fun TopListScreen(
     val error by viewModel.error.collectAsState()
 
     Column(Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 28.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier.padding(end = 16.dp).tvFocus().clickable(onClick = onBack),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("← 返回", color = MaterialTheme.colorScheme.primary, fontSize = 16.sp)
-            }
-            Text("排行榜", fontSize = 22.sp, color = MaterialTheme.colorScheme.onBackground)
-        }
+        BackTopBar(title = "排行榜", onBack = onBack)
 
         if (plugins.isEmpty() && !loading) {
-            Box(Modifier.fillMaxSize().padding(horizontal = 48.dp), contentAlignment = Alignment.Center) {
-                Text(
-                    error ?: "已启用的插件均不提供排行榜",
-                    fontSize = 15.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            EmptyState(error ?: "已启用的插件均不提供排行榜")
             return@Column
         }
 

@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,10 +40,16 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+
+/** 弹层遮罩色：全部 ModalCard 共用一份定义。 */
+private val ModalScrim = Color(0xAA000000)
 
 /**
  * 初始焦点：进入界面时主动请求焦点。
@@ -52,17 +60,15 @@ import coil.compose.AsyncImage
 @Composable
 fun Modifier.tvInitialFocus(): Modifier {
     val fr = androidx.compose.ui.focus.FocusRequester()
-    var acquired by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        repeat(8) {
-            if (acquired) return@LaunchedEffect
-            runCatching { fr.requestFocus() }
-            kotlinx.coroutines.delay(100)
+    // 首帧节点可能尚未挂载导致 requestFocus 失败：逐次短间隔重试直到拿到焦点
+    // （组合被销毁时 LaunchedEffect 自动取消，不会泄漏）
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        while (true) {
+            if (runCatching { fr.requestFocus() }.isSuccess) break
+            kotlinx.coroutines.delay(80)
         }
     }
-    return this
-        .focusRequester(fr)
-        .onFocusChanged { if (it.isFocused) acquired = true }
+    return this.focusRequester(fr)
 }
 
 /**
@@ -159,28 +165,7 @@ fun LyricOverlay(lines: List<com.tvmusic.player.LrcLine>, currentIndex: Int) {
                             .padding(vertical = 6.dp)
                             .graphicsLayer { alpha = if (isCurrent) 1f else 0.6f }
                     ) {
-                        Text(
-                            text = line.text,
-                            color = if (isCurrent) lrcColor else lrcColor.copy(alpha = 0.35f),
-                            fontSize = if (isCurrent) (cfg.fontSizeSp + 4).sp else cfg.fontSizeSp.sp,
-                            fontWeight = if (isCurrent)
-                                androidx.compose.ui.text.font.FontWeight.Bold
-                            else androidx.compose.ui.text.font.FontWeight.Normal,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        line.translation?.takeIf { it.isNotBlank() }?.let { t ->
-                            Text(
-                                text = t,
-                                color = if (isCurrent) lrcColor.copy(alpha = 0.85f) else lrcColor.copy(alpha = 0.28f),
-                                fontSize = (cfg.fontSizeSp - 2).coerceAtLeast(10).sp,
-                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
-                        }
+                        LyricLineBlock(line, isCurrent, lrcColor, cfg.fontSizeSp.toFloat())
                     }
                 }
                 item { Spacer(Modifier.height(120.dp)) }
@@ -204,8 +189,13 @@ fun Artwork(url: String, modifier: Modifier = Modifier) {
         contentAlignment = Alignment.Center
     ) {
         if (url.startsWith("http")) {
+            // crossfade：经 ImageRequest 开启（Coil 2 API），换图/复用不再硬闪
+            val context = androidx.compose.ui.platform.LocalContext.current
+            val request = remember(url) {
+                coil.request.ImageRequest.Builder(context).data(url).crossfade(220).build()
+            }
             AsyncImage(
-                model = url,
+                model = request,
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop
@@ -323,7 +313,7 @@ fun FilterChip(
     ) {
         Text(
             label,
-            fontSize = 12.sp,
+            fontSize = 13.sp,
             maxLines = 1,
             color = if (selected) MaterialTheme.colorScheme.onPrimary
             else MaterialTheme.colorScheme.onSurfaceVariant
@@ -337,12 +327,12 @@ fun MediaCard(
     subtitle: String,
     artwork: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    /** LazyRow 场景默认 168dp 固定宽；网格内传 fillMaxWidth() 跟随格宽 */
+    modifier: Modifier = Modifier.width(168.dp)
 ) {
     val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
     Column(
         modifier = modifier
-            .width(168.dp)
             .tvFocus()
             .clickable(onClick = onClick)
     ) {
@@ -419,7 +409,8 @@ fun MusicRow(
             fontSize = 14.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.width(180.dp)
+            // weight(fill=false)：宽屏最多 180dp 等比列，窄窗按比例收缩不再溢出裁切
+            modifier = Modifier.weight(1.1f, fill = false).padding(end = 16.dp)
         )
         Text(
             text = album,
@@ -427,7 +418,7 @@ fun MusicRow(
             fontSize = 14.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.width(180.dp)
+            modifier = Modifier.weight(1f, fill = false).padding(end = 16.dp)
         )
         if (trailing != null) trailing()
     }
@@ -447,46 +438,15 @@ fun withPlatform(o: org.json.JSONObject, plugin: String): org.json.JSONObject =
     if (o.optString("platform").isNotBlank() || plugin.isBlank()) o
     else org.json.JSONObject(o.toString()).put("platform", plugin)
 
-/** 收藏弹层公共骨架：半透明遮罩 + 居中卡片 + 标题/副标题 + 关闭按钮。 */
+/** 收藏弹层公共骨架：经 ModalCard 统一遮罩/宽度/底栏。 */
 @Composable
 private fun FavDialogBox(
     title: String,
     subtitle: String,
     onDismiss: () -> Unit,
-    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit
+    content: @Composable ColumnScope.() -> Unit
 ) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xAA000000)),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            modifier = Modifier
-                .width(460.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(MaterialTheme.colorScheme.surface)
-                .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(title, fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface)
-            Text(subtitle, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            content()
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = Modifier.padding(top = 4.dp)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .clickable(onClick = onDismiss)
-                        .padding(horizontal = 18.dp, vertical = 9.dp)
-                ) { Text("关闭", color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp) }
-            }
-        }
-    }
+    ModalCard(title = title, subtitle = subtitle, width = 420.dp, onDismiss = onDismiss, content = content)
 }
 
 /** 新建收藏夹行：输入名称后点「新建」回调（TV 遥控可调起 IME 输入）。 */
@@ -661,6 +621,233 @@ fun ErrorBox(message: String?, onRetry: (() -> Unit)? = null) {
             ) {
                 Text("重试", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp)
             }
+        }
+    }
+}
+
+/* ---------------- 弹层骨架：ModalCard 统一遮罩 / 圆角 / 宽度 / 底栏按钮 ---------------- */
+
+/**
+ * 居中弹层通用骨架：半透明遮罩 + 标题/副标题 + 内容插槽 + 底栏插槽（默认「关闭」按钮）。
+ * 全应用弹层统一经此渲染，宽度/遮罩色不再各自为政。
+ */
+@Composable
+fun ModalCard(
+    title: String,
+    subtitle: String? = null,
+    width: Dp = 420.dp,
+    onDismiss: (() -> Unit)? = null,
+    bottomBar: (@Composable RowScope.() -> Unit)? = null,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ModalScrim),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .width(width)
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(title, fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface)
+            subtitle?.let {
+                Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            content()
+            if (bottomBar != null) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.padding(top = 4.dp)
+                ) { bottomBar() }
+            } else if (onDismiss != null) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.padding(top = 4.dp)
+                ) {
+                    DialogTextButton("关闭", onDismiss)
+                }
+            }
+        }
+    }
+}
+
+/** 弹层内的文字按钮（统一焦点/圆角/配色）。 */
+@Composable
+fun DialogTextButton(
+    label: String,
+    onClick: () -> Unit,
+    background: Color = MaterialTheme.colorScheme.surfaceVariant,
+    textColor: Color = MaterialTheme.colorScheme.onSurface
+) {
+    Box(
+        modifier = Modifier
+            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+            .clip(RoundedCornerShape(8.dp))
+            .background(background)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 9.dp)
+    ) {
+        Text(label, color = textColor, fontSize = 14.sp)
+    }
+}
+
+/* ---------------- 逐行歌词行块：悬浮层 / 播放页共用 ---------------- */
+
+/** 单行歌词渲染（主行 + 译文），当前行加粗放大高亮。 */
+@Composable
+fun LyricLineBlock(
+    line: com.tvmusic.player.LrcLine,
+    isCurrent: Boolean,
+    lrcColor: Color,
+    fontSizeSp: Float
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = line.text,
+            color = if (isCurrent) lrcColor else lrcColor.copy(alpha = 0.35f),
+            fontSize = if (isCurrent) (fontSizeSp + 4).sp else fontSizeSp.sp,
+            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        line.translation?.takeIf { it.isNotBlank() }?.let { t ->
+            Text(
+                text = t,
+                color = if (isCurrent) lrcColor.copy(alpha = 0.85f) else lrcColor.copy(alpha = 0.28f),
+                fontSize = (fontSizeSp - 2f).coerceAtLeast(10f).sp,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+    }
+}
+
+/* ---------------- 页级统一组件：返回头栏 / 空态 / 加载更多 ---------------- */
+
+/** 返回 + 标题头栏。用 LazyRow 替代 horizontalScroll：焦点项自动滚入可视区，
+ *  标题过长也不会把可聚焦的返回键卷出屏幕（焦点陷阱）。 */
+@Composable
+fun BackTopBar(
+    title: String,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    titleSize: androidx.compose.ui.unit.TextUnit = 22.sp,
+    trailing: (@Composable RowScope.() -> Unit)? = null
+) {
+    androidx.compose.foundation.lazy.LazyRow(
+        modifier = modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item(key = "back") {
+            Box(
+                modifier = Modifier.tvFocus().clickable(onClick = onBack),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("← 返回", color = MaterialTheme.colorScheme.primary, fontSize = 16.sp)
+            }
+        }
+        item(key = "title") {
+            Text(title, fontSize = titleSize, color = MaterialTheme.colorScheme.onBackground)
+        }
+        if (trailing != null) {
+            item(key = "trailing") {
+                Row(verticalAlignment = Alignment.CenterVertically) { trailing() }
+            }
+        }
+    }
+}
+
+/** 居中空态：统一图标?/文案 + 可选操作按钮。 */
+@Composable
+fun EmptyState(
+    message: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null
+) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 48.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            message,
+            fontSize = 15.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            lineHeight = 22.sp
+        )
+        if (actionLabel != null && onAction != null) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 20.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer)
+                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                    .clickable(onClick = onAction)
+                    .padding(horizontal = 24.dp, vertical = 10.dp)
+            ) {
+                Text(actionLabel, color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 15.sp)
+            }
+        }
+    }
+}
+
+/** 列表底部加载态：加载中 / 错误重试 / 可加载更多 / 已到底，四态统一。 */
+@Composable
+fun LoadMoreFooter(
+    loading: Boolean,
+    hasMore: Boolean,
+    error: String?,
+    allLoadedText: String?,
+    onLoadMore: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier.fillMaxWidth().padding(vertical = 18.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        when {
+            loading -> Text(
+                "加载中…",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            error != null -> Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(error, fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
+                DialogTextButton(
+                    "重试",
+                    onLoadMore,
+                    MaterialTheme.colorScheme.primaryContainer,
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+            hasMore -> Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer)
+                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                    .clickable(onClick = onLoadMore)
+                    .padding(horizontal = 28.dp, vertical = 10.dp)
+            ) {
+                Text("加载更多", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 14.sp)
+            }
+            allLoadedText != null -> Text(
+                allLoadedText,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

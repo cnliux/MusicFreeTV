@@ -1,5 +1,8 @@
 package com.tvmusic.ui.sheet
 
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.getAndUpdate
 import org.json.JSONObject
 
 /**
@@ -36,6 +39,12 @@ data class DetailTarget(
 }
 
 object SheetTarget {
-    @Volatile
-    var value: DetailTarget? = null
+    private val _target = MutableStateFlow<DetailTarget?>(null)
+
+    fun set(value: DetailTarget?) {
+        _target.value = value
+    }
+
+    /** 取出并清空（原子操作，防重复消费）。 */
+    fun consume(): DetailTarget? = _target.getAndUpdate { null }
 }

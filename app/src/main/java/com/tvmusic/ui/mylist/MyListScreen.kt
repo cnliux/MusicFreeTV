@@ -1,5 +1,10 @@
 package com.tvmusic.ui.mylist
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -7,6 +12,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -37,7 +44,11 @@ import com.tvmusic.data.PlaybackStore
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.player.QueueEntry
 import com.tvmusic.ui.components.Artwork
+import com.tvmusic.ui.components.BackTopBar
+import com.tvmusic.ui.components.DialogTextButton
+import com.tvmusic.ui.components.EmptyState
 import com.tvmusic.ui.components.FilterChip
+import com.tvmusic.ui.components.ModalCard
 import com.tvmusic.ui.components.tvFocus
 import org.json.JSONObject
 
@@ -76,24 +87,7 @@ fun MyListScreen(
     }
 
     Column(Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                    .clickable(onClick = onBack)
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
-            ) { Text("‹ 返回", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp) }
-            Text(
-                "我的歌单",
-                fontSize = 20.sp,
-                color = MaterialTheme.colorScheme.onBackground,
-                modifier = Modifier.padding(start = 16.dp)
-            )
-        }
+        BackTopBar(title = "我的歌单", onBack = onBack)
 
         LazyRow(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 6.dp),
@@ -171,13 +165,7 @@ fun MyListScreen(
 
         if (isQueue) {
             if (queue.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        "当前没有播放队列，去播放一首歌或一个歌单吧",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 15.sp
-                    )
-                }
+                EmptyState("当前没有播放队列，去播放一首歌或一个歌单吧")
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -207,16 +195,12 @@ fun MyListScreen(
                 }
             }
         } else if (list.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    when {
-                        selectedListId == null -> "还没有播放记录，去首页搜一首歌吧"
-                        else -> "这个专辑还没有歌，播放时点 ♡ 收藏到它"
-                    },
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 15.sp
-                )
-            }
+            EmptyState(
+                when {
+                    selectedListId == null -> "还没有播放记录，去首页搜一首歌吧"
+                    else -> "这个专辑还没有歌，播放时点 ♡ 收藏到它"
+                }
+            )
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
@@ -251,24 +235,30 @@ fun MyListScreen(
     }
 
     // 新建 / 重命名专辑对话框
-    showNameDialog?.let { initial ->
-        AlbumNameDialog(
-            title = if (initial.isEmpty()) "新建收藏专辑" else "重命名专辑",
-            initial = initial,
-            onDismiss = { showNameDialog = null },
-            onConfirm = { name ->
-                val trimmed = name.trim()
-                if (trimmed.isNotEmpty()) {
-                    if (initial.isEmpty()) {
-                        val id = playback.addList(trimmed)
-                        if (id != null) selectedListId = id
-                    } else {
-                        currentList?.let { playback.renameList(it.id, trimmed) }
+    AnimatedVisibility(
+        visible = showNameDialog != null,
+        enter = fadeIn() + scaleIn(initialScale = 0.96f),
+        exit = fadeOut() + scaleOut(targetScale = 0.96f)
+    ) {
+        showNameDialog?.let { initial ->
+            AlbumNameDialog(
+                title = if (initial.isEmpty()) "新建收藏专辑" else "重命名专辑",
+                initial = initial,
+                onDismiss = { showNameDialog = null },
+                onConfirm = { name ->
+                    val trimmed = name.trim()
+                    if (trimmed.isNotEmpty()) {
+                        if (initial.isEmpty()) {
+                            val id = playback.addList(trimmed)
+                            if (id != null) selectedListId = id
+                        } else {
+                            currentList?.let { playback.renameList(it.id, trimmed) }
+                        }
                     }
+                    showNameDialog = null
                 }
-                showNameDialog = null
-            }
-        )
+            )
+        }
     }
 }
 
@@ -295,59 +285,39 @@ fun AlbumNameDialog(
     onConfirm: (String) -> Unit
 ) {
     var text by remember { mutableStateOf(initial) }
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(androidx.compose.ui.graphics.Color(0xAA000000)),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            modifier = Modifier
-                .width(480.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(MaterialTheme.colorScheme.surface)
-                .padding(24.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Text(title, fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurface)
-            BasicTextField(
-                value = text,
-                onValueChange = { text = it },
-                singleLine = true,
-                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                decorationBox = { inner ->
-                    if (text.isEmpty()) {
-                        Text("专辑名称", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 15.sp)
-                    }
-                    inner()
-                }
+    ModalCard(
+        title = title,
+        width = 480.dp,
+        onDismiss = onDismiss,
+        bottomBar = {
+            DialogTextButton(
+                "确定",
+                onClick = { onConfirm(text) },
+                background = MaterialTheme.colorScheme.primary,
+                textColor = MaterialTheme.colorScheme.onPrimary
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                Box(
-                    modifier = Modifier
-                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.primary)
-                        .clickable { onConfirm(text) }
-                        .padding(horizontal = 20.dp, vertical = 10.dp)
-                ) { Text("确定", color = MaterialTheme.colorScheme.onPrimary, fontSize = 15.sp) }
-                Box(
-                    modifier = Modifier
-                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .clickable(onClick = onDismiss)
-                        .padding(horizontal = 20.dp, vertical = 10.dp)
-                ) { Text("取消", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp) }
-            }
+            DialogTextButton("取消", onClick = onDismiss)
         }
+    ) {
+        BasicTextField(
+            value = text,
+            onValueChange = { text = it },
+            singleLine = true,
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+            modifier = Modifier
+                .fillMaxWidth()
+                .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            decorationBox = { inner ->
+                if (text.isEmpty()) {
+                    Text("专辑名称", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 15.sp)
+                }
+                inner()
+            }
+        )
     }
 }
 

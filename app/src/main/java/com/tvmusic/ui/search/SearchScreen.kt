@@ -1,18 +1,23 @@
 package com.tvmusic.ui.search
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -37,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tvmusic.config.SearchSettings
 import com.tvmusic.data.SearchEntry
+import com.tvmusic.ui.components.EmptyState
 import com.tvmusic.ui.components.FilterChip
 import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
@@ -127,7 +133,7 @@ fun SearchScreen(
         ) {
             when (phase) {
                 is SearchPhase.Idle -> HistoryPanel(viewModel, history, query)
-                is SearchPhase.NoResult -> EmptyResult(message = (phase as SearchPhase.NoResult).message)
+                is SearchPhase.NoResult -> EmptyState(message = (phase as SearchPhase.NoResult).message)
                 else -> {
                     // Searching（已有渐进结果）与 Ready 共用同一 ResultsPanel 插槽，
                     // 避免搜索进行中→完成切换阶段时丢失列表滚动与分页状态
@@ -268,19 +274,29 @@ private fun ColumnScope.ResultsPanel(
         )
     }
 
-    if (showCollectAll) {
+    AnimatedVisibility(
+        visible = showCollectAll,
+        enter = fadeIn() + scaleIn(initialScale = 0.96f),
+        exit = fadeOut() + scaleOut(targetScale = 0.96f)
+    ) {
         com.tvmusic.ui.components.CollectSongsDialog(
             entries = visibleSongs,
             playback = playback,
             onDismiss = { showCollectAll = false }
         )
     }
-    pickFavItem?.let { item ->
-        com.tvmusic.ui.components.PickFavDialog(
-            item = item,
-            playback = playback,
-            onDismiss = { pickFavItem = null }
-        )
+    AnimatedVisibility(
+        visible = pickFavItem != null,
+        enter = fadeIn() + scaleIn(initialScale = 0.96f),
+        exit = fadeOut() + scaleOut(targetScale = 0.96f)
+    ) {
+        pickFavItem?.let { item ->
+            com.tvmusic.ui.components.PickFavDialog(
+                item = item,
+                playback = playback,
+                onDismiss = { pickFavItem = null }
+            )
+        }
     }
 }
 
@@ -685,17 +701,6 @@ private fun Chip(label: String, onSelect: () -> Unit, onClose: (() -> Unit)? = n
                 Text("×", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
             }
         }
-    }
-}
-
-@Composable
-private fun EmptyResult(message: String) {
-    Box(Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 24.dp)) {
-        Text(
-            message,
-            fontSize = 15.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 }
 

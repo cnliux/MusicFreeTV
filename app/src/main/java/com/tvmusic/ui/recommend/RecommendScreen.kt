@@ -4,20 +4,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -25,18 +19,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.tvmusic.ui.components.BackTopBar
+import com.tvmusic.ui.components.EmptyState
 import com.tvmusic.ui.components.FilterChip
+import com.tvmusic.ui.components.LoadMoreFooter
 import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
-import com.tvmusic.ui.components.tvFocus
 import com.tvmusic.ui.sheet.DetailKind
 import com.tvmusic.ui.sheet.DetailTarget
 import org.json.JSONObject
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.background
-import androidx.compose.ui.draw.clip
 
 @Composable
 fun RecommendScreen(
@@ -66,25 +57,10 @@ fun RecommendScreen(
     }
 
     Column(Modifier.fillMaxSize()) {
-        // 顶栏：返回 + 标题
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 28.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier.padding(end = 16.dp).tvFocus().clickable(onClick = onBack),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("← 返回", color = MaterialTheme.colorScheme.primary, fontSize = 16.sp)
-            }
-            Text("推荐歌单", fontSize = 22.sp, color = MaterialTheme.colorScheme.onBackground)
-        }
+        BackTopBar(title = "推荐歌单", onBack = onBack)
 
         if (plugins.isEmpty() && !loading) {
-            EmptyHint(error ?: "已启用的插件均不支持推荐歌单")
+            EmptyState(error ?: "已启用的插件均不支持推荐歌单")
             return@Column
         }
 
@@ -126,7 +102,14 @@ fun RecommendScreen(
         Box(Modifier.fillMaxSize()) {
             when {
                 loading && sheets.isEmpty() -> LoadingBox()
-                sheets.isEmpty() -> EmptyHint(error ?: "该标签下暂无歌单")
+                sheets.isEmpty() -> {
+                    val retry = { viewModel.selectTag(selectedTag) }
+                    EmptyState(
+                        message = error ?: "该标签下暂无歌单",
+                        actionLabel = error?.let { "重试" },
+                        onAction = error?.let { retry }
+                    )
+                }
                 else -> LazyVerticalGrid(
                     state = gridState,
                     columns = GridCells.Adaptive(164.dp),
@@ -140,6 +123,7 @@ fun RecommendScreen(
                             title = sheet.title,
                             subtitle = sheet.description.ifBlank { selectedPlatform },
                             artwork = sheet.artwork,
+                            modifier = Modifier.fillMaxWidth(),
                             onClick = {
                                 onOpenDetail(
                                     DetailTarget.stamped(
@@ -154,25 +138,17 @@ fun RecommendScreen(
                 }
             }
 
-            if (loadingMore) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 10.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(MaterialTheme.colorScheme.surface)
-                        .padding(horizontal = 18.dp, vertical = 8.dp)
-                ) {
-                    Text("加载更多…", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+            // 底部浮层：加载中提示；分页失败时提供重试（自动翻页已触发过才会出现此层）
+            if (loadingMore || (error != null && sheets.isNotEmpty())) {
+                LoadMoreFooter(
+                    loading = loadingMore,
+                    hasMore = false,
+                    error = if (!loadingMore) error else null,
+                    allLoadedText = null,
+                    onLoadMore = { viewModel.loadMore() },
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                )
             }
         }
-    }
-}
-
-@Composable
-private fun EmptyHint(text: String) {
-    Box(Modifier.fillMaxSize().padding(horizontal = 48.dp), contentAlignment = Alignment.Center) {
-        Text(text, fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }

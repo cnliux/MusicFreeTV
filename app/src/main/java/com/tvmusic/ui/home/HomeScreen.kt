@@ -41,6 +41,7 @@ import com.tvmusic.data.HomeSection
 import com.tvmusic.data.PluginRecord
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.ui.components.Artwork
+import com.tvmusic.ui.components.EmptyState
 import com.tvmusic.ui.components.ErrorBox
 import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
@@ -68,25 +69,8 @@ fun HomeScreen(
     // 本次会话内用户取消后不再打扰（rememberSaveable 随导航返回栈保留）。
     val resumeAvailable by PlayerManager.resumeAvailable.collectAsState()
     var resumeDismissed by rememberSaveable { mutableStateOf(false) }
-    if (resumeAvailable && !resumeDismissed) {
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { resumeDismissed = true },
-            title = { Text("继续播放") },
-            text = { Text("检测到上次未播完的内容，是否从上次进度继续播放？") },
-            confirmButton = {
-                androidx.compose.material3.TextButton(onClick = {
-                    resumeDismissed = true
-                    PlayerManager.resumePlayback()
-                }) { Text("继续播放") }
-            },
-            dismissButton = {
-                androidx.compose.material3.TextButton(onClick = { resumeDismissed = true }) {
-                    Text("取消")
-                }
-            }
-        )
-    }
 
+    Box(Modifier.fillMaxSize()) {
     Row(Modifier.fillMaxSize()) {
         // 左侧常驻「正在播放」面板
         NowPlayingPanel(onOpenPlayer = onOpenPlayer)
@@ -107,7 +91,14 @@ fun HomeScreen(
             if (loading && sections.isEmpty()) {
                 LoadingBox()
             } else if (sections.isEmpty()) {
-                EmptyGuide(onRefresh = viewModel::load)
+                EmptyState(
+                    message = "还没有可用的插件\n\n启动时已自动同步默认订阅源，请稍候或手动导入：\n" +
+                        "· 设置 → 扫码同步（TVBox 式导入配置）\n" +
+                        "· 设置 → 粘贴订阅 URL / 插件 JS\n" +
+                        "· 手机浏览器访问本机接收地址推送配置",
+                    actionLabel = "重新加载",
+                    onAction = viewModel::load
+                )
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -142,7 +133,7 @@ fun HomeScreen(
                                     contentPadding = PaddingValues(horizontal = 28.dp),
                                     horizontalArrangement = Arrangement.spacedBy(14.dp)
                                 ) {
-                                    items(section.items) { sheet ->
+                                    items(section.items, key = { "${it.plugin}|${it.raw.optString("id").ifBlank { it.title }}" }) { sheet ->
                                         MediaCard(
                                             title = sheet.title,
                                             subtitle = section.plugin,
@@ -167,7 +158,7 @@ fun HomeScreen(
                                     contentPadding = PaddingValues(horizontal = 28.dp),
                                     horizontalArrangement = Arrangement.spacedBy(14.dp)
                                 ) {
-                                    items(section.items) { item ->
+                                    items(section.items, key = { "${it.plugin}|${it.raw.optString("id").ifBlank { it.title }}" }) { item ->
                                         MediaCard(
                                             title = item.title,
                                             subtitle = section.plugin,
@@ -183,21 +174,47 @@ fun HomeScreen(
                                     }
                                 }
                             }
-                            is HomeSection.Error -> {
-                                ErrorBox("${section.plugin}：${section.message}", onRetry = viewModel::load)
-                            }
-                        }
-                    }
-                }
+                             is HomeSection.Error -> {
+                                 ErrorBox("${section.plugin}：${section.message}", onRetry = viewModel::load)
+                             }
+                         }
+                     }
+                 }
+             }
+         }
+     }
+
+    // 继续播放确认：全站统一 ModalCard 风格（覆盖在首页之上）
+    if (resumeAvailable && !resumeDismissed) {
+        androidx.activity.compose.BackHandler { resumeDismissed = true }
+        com.tvmusic.ui.components.ModalCard(
+            title = "继续播放",
+            subtitle = "检测到上次未播完的内容，是否从上次进度继续播放？",
+            onDismiss = { resumeDismissed = true },
+            bottomBar = {
+                Spacer(Modifier.weight(1f))
+                com.tvmusic.ui.components.DialogTextButton("取消", { resumeDismissed = true })
+                com.tvmusic.ui.components.DialogTextButton(
+                    "继续播放",
+                    onClick = {
+                        resumeDismissed = true
+                        PlayerManager.resumePlayback()
+                    },
+                    background = MaterialTheme.colorScheme.primary,
+                    textColor = MaterialTheme.colorScheme.onPrimary
+                )
             }
-        }
+        ) {}
+    }
     }
 }
 
-/** 左侧常驻「正在播放」面板：大封面 / 歌名·歌手·专辑分行 / 歌词 / 细进度+时间。 */
+/** 左侧常驻「正在播放」面板：大封面 / 歌名·歌手·专辑分行 / 歌词 / 细进度+时间。
+ *  外壳只订阅结构性状态（screenState 已剥离每秒字段），秒级的进度/歌词行
+ *  拆到 NowPlayingLive 局部订阅，ticker 不再驱动整块面板重组。 */
 @Composable
 private fun NowPlayingPanel(onOpenPlayer: () -> Unit) {
-    val state by PlayerManager.uiState.collectAsState()
+    val state by PlayerManager.screenState.collectAsState(initial = PlayerManager.uiState.value)
     val entry = state.current
     Column(
         modifier = Modifier
@@ -264,38 +281,45 @@ private fun NowPlayingPanel(onOpenPlayer: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().padding(top = 2.dp)
                 )
             }
-            // 当前歌词行：开关/颜色跟随歌词设置
-            val lyricCfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
-            val lrcText = if (lyricCfg.enabled && state.lrcIndex in state.lrcLines.indices)
-                state.lrcLines[state.lrcIndex].text else ""
-            if (lrcText.isNotBlank()) {
-                Text(
-                    lrcText,
-                    fontSize = lyricCfg.fontSizeSp.coerceAtMost(16).sp,
-                    color = com.tvmusic.ui.theme.LyricSettings.parseColor(),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
-                )
-            }
-            Spacer(Modifier.height(14.dp))
-            // 细进度条（主色，4dp）+ 时间
-            LinearProgressIndicator(
-                progress = {
-                    if (state.durationMs > 0) state.positionMs.toFloat() / state.durationMs else 0f
-                },
-                modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
-                color = MaterialTheme.colorScheme.primary,
-                trackColor = MaterialTheme.colorScheme.surfaceVariant
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(fmtTime(state.positionMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(fmtTime(state.durationMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+            NowPlayingLive()
         }
+    }
+}
+
+/** 秒级动态区（当前歌词行 + 细进度 + 时间）：局部订阅 uiState，重组范围限定在本子树。 */
+@Composable
+private fun NowPlayingLive() {
+    val ps by PlayerManager.uiState.collectAsState()
+    // 当前歌词行：开关/颜色跟随歌词设置
+    val lyricCfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
+    val lrcText = if (lyricCfg.enabled && ps.lrcIndex in ps.lrcLines.indices)
+        ps.lrcLines[ps.lrcIndex].text else ""
+    if (lrcText.isNotBlank()) {
+        Text(
+            lrcText,
+            fontSize = lyricCfg.fontSizeSp.coerceAtMost(16).sp,
+            color = com.tvmusic.ui.theme.LyricSettings.parseColor(),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
+        )
+    }
+    Spacer(Modifier.height(14.dp))
+    // 细进度条（主色，4dp）+ 时间
+    LinearProgressIndicator(
+        progress = {
+            if (ps.durationMs > 0) ps.positionMs.toFloat() / ps.durationMs else 0f
+        },
+        modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
+        color = MaterialTheme.colorScheme.primary,
+        trackColor = MaterialTheme.colorScheme.surfaceVariant
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(fmtTime(ps.positionMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(fmtTime(ps.durationMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -471,46 +495,6 @@ private fun PluginSwitcher(
                 label = p.name,
                 selected = platform == currentPlatform,
                 onClick = { onSelect(platform) }
-            )
-        }
-    }
-}
-
-@Composable
-private fun EmptyGuide(onRefresh: () -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 48.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(
-            "还没有可用的插件",
-            fontSize = 20.sp,
-            color = MaterialTheme.colorScheme.onBackground
-        )
-        Text(
-            "启动时已自动同步默认订阅源，请稍候或手动导入：\n" +
-                "· 设置 → 扫码同步（TVBox 式导入配置）\n" +
-                "· 设置 → 粘贴订阅 URL / 插件 JS\n" +
-                "· 手机浏览器访问本机接收地址推送配置",
-            fontSize = 14.sp,
-            lineHeight = 22.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 12.dp)
-        )
-        Box(
-            modifier = Modifier
-                .padding(top = 20.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.primaryContainer)
-                .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                .clickable(onClick = onRefresh)
-                .padding(horizontal = 24.dp, vertical = 10.dp)
-        ) {
-            Text(
-                "重新加载",
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                fontSize = 15.sp
             )
         }
     }
