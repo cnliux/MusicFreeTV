@@ -16,10 +16,26 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v6.3.0
-      - name: Assemble debug APK
-        run: ./gradlew assembleDebug --console=plain
+      - name: Configure release signing (if secrets provided)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            mkdir -p keystore
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > keystore/release.jks
+            printf 'storeFile=keystore/release.jks\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+              "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > keystore.properties
+            echo "release signing enabled"
+          else
+            echo "no signing secrets -> release will use debug signing (installable, not store-grade)"
+          fi
+      - name: Assemble release APK
+        run: ./gradlew assembleRelease --console=plain
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: app-release
+          path: app/build/outputs/apk/release/*.apk

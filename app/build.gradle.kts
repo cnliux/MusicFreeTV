@@ -62,7 +62,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = signingConfigs.getByName("release")
+            // 优先生产签名（keystore.properties 存在且 keystore 文件有效）；
+            // CI 未注入签名密钥时退化为 debug 签名，保证 release 产物可安装。
+            signingConfig = if (
+                signingConfigs.getByName("release").storeFile?.exists() == true
+            ) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
     }
 
