@@ -9,7 +9,54 @@ on:
   workflow_dispatch:
 
 jobs:
+  # main 分支推送：自动算下一个版本号（patch+1）、改 versionName/versionCode、
+  # 提交并打 v* tag 回推。tag 推送会再触发下面的 build+release。
+  # 守卫：HEAD 已等于最新 tag 时（即本 job 自己刚打过 tag 的后续触发）直接跳过，避免死循环。
+  bump:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Bump version, commit and tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          latest=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          if [ -z "$latest" ]; then
+            major=0; minor=0; patch=0
+          else
+            IFS='.' read -r major minor patch <<< "${latest#v}"
+          fi
+          if [ -n "$latest" ] && [ "$(git rev-parse HEAD)" = "$(git rev-parse "$latest^{commit}")" ]; then
+            echo "HEAD already equals latest tag $latest, nothing to release"
+            exit 0
+          fi
+          next="v$major.$minor.$((patch + 1))"
+          ver="$major.$minor.$((patch + 1))"
+          vc=$(grep -oE 'versionCode = [0-9]+' app/build.gradle.kts | grep -oE '[0-9]+')
+          vc=$((vc + 1))
+          sed -i "s/versionCode = [0-9]*/versionCode = $vc/" app/build.gradle.kts
+          sed -i "s/versionName = \"[0-9.]*\"/versionName = \"$ver\"/" app/build.gradle.kts
+          if [ -z "$(git diff --stat)" ]; then
+            echo "version already up to date, nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app/build.gradle.kts
+          git commit -m "release: version $ver"
+          git tag "$next"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$next" || echo "tag $next may already exist (concurrent bump)"
+
   build:
+    # 只在 tag 推送 / PR / 手动触发时构建：main 推送由 bump job 接管。
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -38,8 +85,8 @@ jobs:
           fi
       - name: Assemble release APK
         run: ./gradlew assembleRelease --console=plain
-      - name: Upload APK artifact (main / PR / manual)
-        if: startsWith(github.ref, 'refs/tags/v') != true
+      - name: Upload APK artifact (PR / manual)
+        if: github.event_name != 'push'
         uses: actions/upload-artifact@v4
         with:
           name: app-release
