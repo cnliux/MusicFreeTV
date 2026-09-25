@@ -149,19 +149,26 @@ class PluginRuntime private constructor(
 
     /**
      * 取平台执行引擎并做在途计数（锁内完成）：
-     * 已有 home 引擎则粘性返回；首次分配按“最空闲引擎”选取，
-     * 若所有现有引擎都忙且未达上限，则懒创建新引擎接管该平台。
+     * 已有 home 引擎则粘性返回；首次分配优先空闲引擎；全忙且未达上限则新建引擎接管，
+     * 尽量减少"后来的音源排队等先前慢源"导致的整源饿死。
      */
     private fun acquireLane(platform: String): Int = synchronized(laneLock) {
         var lane = platformLane[platform]
         if (lane == null) {
+            var idle = -1
             var best = 0
-            for (i in 1 until lanes.size) if (laneBusy.get(i) < laneBusy.get(best)) best = i
-            lane = best
-            // 懒扩容：所有现有引擎都有在途调用且未达上限，才创建新引擎
-            if (laneBusy.get(best) > 0 && lanes.size < MAX_LANES) {
+            for (i in lanes.indices) {
+                val busy = laneBusy.get(i)
+                if (busy == 0) { idle = i; break }
+                if (busy < laneBusy.get(best)) best = i
+            }
+            lane = if (idle >= 0) {
+                idle
+            } else if (lanes.size < MAX_LANES) {
                 val created = createLaneLocked()
-                if (created >= 0) lane = created
+                if (created >= 0) created else best
+            } else {
+                best
             }
             platformLane[platform] = lane
         }
@@ -209,8 +216,8 @@ class PluginRuntime private constructor(
         /** 并行搜索的初始引擎总数。Amlogic p230 上 3 台足够，过大会推高 CPU/内存。 */
         private const val SEARCH_ENGINES = 3
 
-        /** 引擎池上限：所有现有引擎都忙时按需懒扩容，最多 5 台。 */
-        private const val MAX_LANES = 5
+        /** 引擎池上限：所有现有引擎都忙时按需懒扩容，最多 6 台。 */
+        private const val MAX_LANES = 6
 
         @Volatile private var INSTANCE: PluginRuntime? = null
 

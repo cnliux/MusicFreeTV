@@ -34,6 +34,7 @@ class TvMusicApp : Application() {
 
         com.tvmusic.ui.theme.ThemeManager.init(this)
         com.tvmusic.ui.theme.LyricSettings.init(this)
+        com.tvmusic.config.MetaSettings.init(this)
         store = PluginStore(this)
         playback = PlaybackStore(this)
         runtime = PluginRuntime.create(this, store)

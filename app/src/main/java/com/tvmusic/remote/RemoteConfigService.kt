@@ -593,6 +593,22 @@ class RemoteConfigService : Service() {
                 com.tvmusic.ui.theme.LyricSettings.update(next)
                 respond(socket, 200, JSONObject().put("ok", true).toString())
             }
+            method == "GET" && path == "/api/meta" -> {
+                respond(socket, 200, JSONObject()
+                    .put("ok", true)
+                    .put("enabled", com.tvmusic.config.MetaSettings.isEnabled)
+                    .toString())
+            }
+            method == "POST" && path == "/api/meta" -> {
+                val body = readBody(input, headers)
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                val on = json?.optBoolean("enabled", com.tvmusic.config.MetaSettings.isEnabled)
+                com.tvmusic.config.MetaSettings.setEnabled(on == true)
+                respond(socket, 200, JSONObject()
+                    .put("ok", true)
+                    .put("enabled", com.tvmusic.config.MetaSettings.isEnabled)
+                    .toString())
+            }
             method == "GET" && path == "/api/export" -> {
                 // 配置导出：主题 + 歌词设置 + 全部收藏专辑（含原始条目）
                 val c = com.tvmusic.ui.theme.LyricSettings.config.value
@@ -884,17 +900,13 @@ class RemoteConfigService : Service() {
     }
 
     /**
-     * 启动渐进式搜索：立即返回会话 id，搜索在后台线程逐个插件执行，
+     * 启动渐进式搜索：立即返回会话 id，搜索在后台线程并行跑多个插件，
      * 结果随完成进度积累，前端轮询 /api/search/poll 边到边展示。
-     * 单插件硬超时 10s（引擎侧也超时释放 JS 线程），失败降级为空。
+     * 单源外层预算 60s / invoke 45s（放宽以吸收同引擎排队），失败降级为空。
      */
     private fun searchAndStart(socket: Socket, q: String, page: Int, req: SearchReq) {
-        val keyword = try {
-            java.net.URLDecoder.decode(q, Charsets.UTF_8.name())
-        } catch (e: Exception) {
-            respond(socket, 400, JSONObject().put("ok", false).put("error", "无效的关键词").toString())
-            return
-        }
+        // q 已在 HTTP 层 URLDecoder.decode 过一次，直接使用，避免二次解码破坏含 % / + 的关键词
+        val keyword = q
         val session = SearchSession(searchIdGen.incrementAndGet().toString(), keyword, page, req)
         searchSessions[session.id] = session
         pruneSearchSessions()
@@ -910,27 +922,26 @@ class RemoteConfigService : Service() {
                     val enabled = app.repository.listEnabled()
                         .filter { it.info != null && it.loadError == null }
                         .map { it.info!!.platform }
+                        .filter { it.isNotBlank() }
+                        .distinct()
                         .filter { req.sources.isEmpty() || it in req.sources }
                         .let { com.tvmusic.config.SearchSettings.ordered(it, settings.sourceOrder) }
                     session.totalEnabled = enabled.size
                     val collected = arrayOfNulls<JSONArray>(enabled.size)
                     val completed = java.util.concurrent.atomic.AtomicInteger(0)
-                    val seen = HashSet<String>()
-                    // 按配置音源顺序（跳过未完成的前缀缺口）即时聚合：
-                    // 每个插件一返回就重建一次，让前端轮询到实时 total/全量结果。
                     fun reaggregate() {
                         synchronized(collected) {
                             synchronized(session.results) {
                                 session.results.clear()
                                 session.perSource.clear()
                                 session.total = 0
-                                seen.clear()
                                 for ((idx, platform) in enabled.withIndex()) {
-                                    if (session.total >= maxTotal) break
-                                    val arr = collected[idx] ?: break
+                                    // 前缀缺口用 continue：已完成的靠后音源先展示，前面的慢源完成后自动并入
+                                    val arr = collected[idx] ?: continue
                                     var ok = 0
                                     for (i in 0 until arr.length()) {
-                                        if (session.total >= maxTotal) break
+                                        // 每音源独立配额：不再用跨源全局截断吞掉靠后的音源
+                                        if (ok >= maxTotal) break
                                         val item = arr.optJSONObject(i) ?: continue
                                         val type = item.optString("type")
                                         if (type.isNotBlank() && type != "music") continue
@@ -941,8 +952,6 @@ class RemoteConfigService : Service() {
                                         if (req.maxDurSec != null && rawDurSec > 0 && rawDurSec > req.maxDurSec) continue
                                         val art = item.optString("artwork", "").ifEmpty { item.optString("coverImg", "") }
                                         if (req.needArt && art.isBlank()) continue
-                                        val key = title + "\u0000" + item.optString("artist")
-                                        if (!seen.add(key)) continue
                                         ok++
                                         session.results.add(
                                             JSONObject()
@@ -965,12 +974,12 @@ class RemoteConfigService : Service() {
                         enabled.forEachIndexed { idx, platform ->
                             launch(Dispatchers.IO) {
                                 val arr = try {
-                                    // 粘性引擎路由下，同引擎多平台会排队；引擎级超时 60s，
-                                    // 这里给足排队余量，宁慢勿丢源（超时即整源无结果）
-                                    withTimeoutOrNull(25_000) {
+                                    // 粘性引擎路由下，同引擎多平台会排队；外层预算放宽到 60s 给足排队余量，
+                                    // 单个 invoke 45s（略低于 TV 端默认 60s），宁慢勿丢源（超时即整源无结果）
+                                    withTimeoutOrNull(60_000) {
                                         app.runtime.callParallel(
                                             platform, "search", listOf(keyword, page.toString(), "music"),
-                                            timeoutMs = 20_000
+                                            timeoutMs = 45_000
                                         )
                                     }?.let { res ->
                                         (res as? JSONObject)?.optJSONArray("data") ?: (res as? JSONArray)
@@ -1455,24 +1464,24 @@ private val PAGE_HTML = """<!DOCTYPE html>
     pointer-events: none; z-index: 30; max-width: 86vw;
   }
   #toast.show { opacity: 1; }
-  #favModal {
+  #favModal, #collectModal {
     position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 40;
     display: none; align-items: flex-end; justify-content: center;
   }
-  #favModal.show { display: flex; }
-  #favModal .sheet {
+  #favModal.show, #collectModal.show { display: flex; }
+  #favModal .sheet, #collectModal .sheet {
     width: 100%; max-width: 520px; background: var(--card); border-radius: 18px 18px 0 0;
     padding: 18px 18px calc(18px + env(safe-area-inset-bottom)); max-height: 70vh; overflow-y: auto;
   }
-  #favModal h3 { margin: 0 0 4px; font-size: 16px; }
-  #favModal .fitem {
+  #favModal h3, #collectModal h3 { margin: 0 0 4px; font-size: 16px; }
+  #favModal .fitem, #collectModal .fitem {
     display: flex; align-items: center; gap: 10px; padding: 13px 6px; border-bottom: 1px solid var(--line);
     font-size: 15px; cursor: pointer;
   }
-  #favModal .fitem .ck { width: 24px; color: var(--accent2); font-size: 16px; flex: none; }
-  #favModal .fitem .cnt { margin-left: auto; color: var(--muted); font-size: 12px; }
-  #favModal .newrow { display: flex; gap: 8px; margin-top: 12px; }
-  #favModal .newrow input { flex: 1; }
+  #favModal .fitem .ck, #collectModal .fitem .ck { width: 24px; color: var(--accent2); font-size: 16px; flex: none; }
+  #favModal .fitem .cnt, #collectModal .fitem .cnt { margin-left: auto; color: var(--muted); font-size: 12px; }
+  #favModal .newrow, #collectModal .newrow { display: flex; gap: 8px; margin-top: 12px; }
+  #favModal .newrow input, #collectModal .newrow input { flex: 1; }
   .pager { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 12px; color: var(--muted); }
   .pager button { padding: 6px 12px; font-size: 12px; }
   .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 18px 0; }
@@ -1628,6 +1637,13 @@ private val PAGE_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="card">
+      <h2>歌词/封面补全</h2>
+      <div class="row" style="border:none;padding:0 0 6px;">
+        <span class="muted" style="flex:1;">歌曲缺少歌词或封面时，按 曲名/歌手 从 lrc.cx 在线补齐</span>
+        <button class="small" id="metaToggle" onclick="toggleMeta()">开</button>
+      </div>
+    </div>
+    <div class="card">
       <h2>搜索设置</h2>
       <div class="muted">保存后电视端与搜索页的搜索都会采用这里的默认排序与音源优先级。</div>
       <div class="row" style="border:none;padding:6px 0;">
@@ -1748,7 +1764,7 @@ function switchTab(name) {
   if (name === 'fav') loadFavLists();
   if (name === 'history') loadHistory();
   if (name === 'search') loadSearchCfg();
-  if (name === 'manage') { loadSubs(); loadPlugins(); loadLyric(); loadSearchCfg(); }
+  if (name === 'manage') { loadSubs(); loadPlugins(); loadLyric(); loadMeta(); loadSearchCfg(); }
 }
 
 /* ---------------- 播放器 ---------------- */
@@ -2552,6 +2568,27 @@ function loadLyric() {
     if (d.ok) {
       lyricCfg = { enabled: d.enabled, fontSizeSp: d.fontSizeSp, colorHex: d.colorHex, position: d.position, offsetY: d.offsetY || 0, opacity: d.opacity != null ? d.opacity : 1.0 };
       renderLyric();
+    }
+  }).catch(function () {});
+}
+
+/* ---------------- 歌词/封面补全（lrc.cx） ---------------- */
+var metaCfg = { enabled: true };
+function renderMeta() {
+  el('metaToggle').textContent = metaCfg.enabled ? '开' : '关';
+  el('metaToggle').className = 'small' + (metaCfg.enabled ? '' : ' ghost');
+}
+function toggleMeta() {
+  var body = { enabled: !metaCfg.enabled };
+  post('/api/meta', body).then(function (d) {
+    if (d.ok) { metaCfg = { enabled: d.enabled }; renderMeta(); }
+  }).catch(function () { toast('保存失败'); });
+}
+function loadMeta() {
+  api('/api/meta').then(function (d) {
+    if (d.ok) {
+      metaCfg = { enabled: d.enabled != null ? d.enabled : true };
+      renderMeta();
     }
   }).catch(function () {});
 }

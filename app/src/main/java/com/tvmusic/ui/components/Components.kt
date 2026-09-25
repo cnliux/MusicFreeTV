@@ -192,14 +192,15 @@ fun LyricOverlay(lines: List<com.tvmusic.player.LrcLine>, currentIndex: Int) {
 @Composable
 fun Artwork(url: String, modifier: Modifier = Modifier) {
     val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
+    val bgBrush = remember {
+        Brush.linearGradient(
+            listOf(Color(0xFF232C38), Color(0xFF12161D))
+        )
+    }
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(tokens.radius))
-            .background(
-                Brush.linearGradient(
-                    listOf(Color(0xFF232C38), Color(0xFF12161D))
-                )
-            ),
+            .background(bgBrush),
         contentAlignment = Alignment.Center
     ) {
         if (url.startsWith("http")) {

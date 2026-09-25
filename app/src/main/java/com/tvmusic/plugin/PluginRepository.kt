@@ -46,6 +46,9 @@ class PluginRepository(
     private companion object {
         const val KEY_LAST_AUTO_SYNC = "last_auto_sync_at"
         const val AUTO_SYNC_INTERVAL_MS = 4 * 60 * 60 * 1000L
+
+        /** 崩溃封禁阈值：连续这么多次"加载时 native crash"才永久禁止该插件。 */
+        const val BLOCK_THRESHOLD = 3
     }
 
     private val _plugins = MutableStateFlow<List<PluginRecord>>(emptyList())
@@ -105,20 +108,22 @@ class PluginRepository(
     fun warmup() {
         scope.launch(Dispatchers.IO) {
             // 崩溃看门狗：若上次启动在加载某个插件时 native crash，
-            // 标记文件会残留；将该插件加入永久黑名单，避免无限崩溃循环。
+            // 标记文件会残留；连续 3 次才永久封禁，期间每次启动重试，允许偶发崩溃恢复。
             val marker = File(appContext.filesDir, "plugin_load_marker")
-            val blocklist = File(appContext.filesDir, "plugin_blocklist")
             if (marker.exists()) {
                 val crashedName = runCatching { marker.readText().trim() }.getOrNull()
                 marker.delete()
                 if (!crashedName.isNullOrBlank()) {
-                    // 加入永久黑名单（去重追加）
-                    val existing = runCatching { blocklist.readText().lines().toSet() }.getOrDefault(emptySet())
-                    if (crashedName !in existing) {
-                        blocklist.appendText("$crashedName\n")
+                    val counts = readBlocklistCounts()
+                    val bumped = (counts[crashedName] ?: 0) + 1
+                    counts[crashedName] = bumped
+                    writeBlocklistCounts(counts)
+                    if (bumped >= BLOCK_THRESHOLD) {
+                        store.markLoadErrorByName(crashedName, "native crash during load (blocked)")
+                        Log.w("PluginRepository", "plugin '$crashedName' crashed $bumped times, blocked")
+                    } else {
+                        Log.w("PluginRepository", "plugin '$crashedName' crashed x$bumped/$BLOCK_THRESHOLD, will retry next launch")
                     }
-                    store.markLoadErrorByName(crashedName, "native crash during load (blocked)")
-                    Log.w("PluginRepository", "plugin '$crashedName' crashed, added to blocklist")
                 }
             }
             val blocked = blockedPlugins()
@@ -131,6 +136,7 @@ class PluginRepository(
                 val loaded = runCatching { runtime.loadPlugin(platform, p.source!!) }.getOrDefault(false)
                 marker.delete()
                 if (loaded) {
+                    removeBlocklistEntry(p.name)
                     okCount++
                     // 每注册成功一个就刷新列表：首页/搜索侧插件渐进可见，不必等全部完成
                     refreshFromDb()
@@ -149,12 +155,35 @@ class PluginRepository(
         }
     }
 
-    /** 读取永久黑名单（native crash 过的插件名）。 */
-    private fun blockedPlugins(): Set<String> {
+    /** 读取崩溃计数表 {name: count}；旧格式裸 name 行按已封禁(BLOCK_THRESHOLD)处理。 */
+    private fun readBlocklistCounts(): MutableMap<String, Int> {
         val f = File(appContext.filesDir, "plugin_blocklist")
-        if (!f.exists()) return emptySet()
-        return runCatching { f.readText().lines().filter { it.isNotBlank() }.toSet() }.getOrDefault(emptySet())
+        if (!f.exists()) return HashMap()
+        val counts = HashMap<String, Int>()
+        f.readLines().forEach { line ->
+            val s = line.trim()
+            if (s.isEmpty()) return@forEach
+            val idx = s.lastIndexOf(':')
+            val n = if (idx > 0) s.substring(idx + 1).toIntOrNull() else null
+            if (n != null) counts[s.substring(0, idx)] = n else counts[s] = BLOCK_THRESHOLD
+        }
+        return counts
     }
+
+    private fun writeBlocklistCounts(counts: Map<String, Int>) {
+        val f = File(appContext.filesDir, "plugin_blocklist")
+        f.writeText(counts.entries.joinToString("\n") { "${it.key}:${it.value}" })
+    }
+
+    /** 插件成功加载后解除其崩溃封禁计数（一次成功即洗掉历史崩溃记录）。 */
+    private fun removeBlocklistEntry(name: String) {
+        val counts = readBlocklistCounts()
+        if (counts.remove(name) != null) writeBlocklistCounts(counts)
+    }
+
+    /** 读取已封禁插件（崩溃计数达到阈值的）。 */
+    private fun blockedPlugins(): Set<String> =
+        readBlocklistCounts().entries.filter { it.value >= BLOCK_THRESHOLD }.map { it.key }.toSet()
 
     /** 从 DB 未解析源码时临时探测 platform 的兜底。 */
     private fun detectPlatformSafe(source: String): String? = detectPlatform(source)
@@ -296,9 +325,10 @@ class PluginRepository(
         source: String? = null,
         keepEnabled: Boolean = true
     ): String? = withContext(Dispatchers.IO) {
-        // 黑名单：上次 native crash 过的插件不再尝试安装。
+        // 崩溃黑名单：连续 3 次加载时 native crash 后禁止自动/订阅同步再尝试，
+        // 防止每次同步都崩一次进程。解除途径：卸载该插件后重新添加订阅即可全新重装。
         if (name in blockedPlugins()) {
-            return@withContext "插件在黑名单中（曾导致崩溃）"
+            return@withContext "插件在黑名单中（曾连续 3 次载入时崩溃，请卸载后重新订阅）"
         }
         try {
             val js = source ?: run {

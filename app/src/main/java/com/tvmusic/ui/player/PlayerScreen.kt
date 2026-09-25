@@ -1,6 +1,5 @@
 package com.tvmusic.ui.player
 
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
@@ -13,11 +12,6 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -38,7 +32,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -53,7 +46,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -63,16 +55,19 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.ui.PlayerView
-import com.tvmusic.player.LrcLine
 import com.tvmusic.player.PlayMode
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.player.PlayerUiState
 import com.tvmusic.ui.components.Artwork
 import com.tvmusic.ui.components.tvFocus
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 
 @Composable
 fun PlayerScreen(onBack: () -> Unit) {
-    val state by PlayerManager.uiState.collectAsState()
+    // 订阅结构性状态（不含每秒刷新的进度/歌词），ticker 不再触发整屏重组；
+    // 进度条与歌词各自内部再订阅 uiState，重组范围被限定在各自子树。
+    val state by PlayerManager.screenState.collectAsState(initial = PlayerManager.uiState.value)
     val context = androidx.compose.ui.platform.LocalContext.current
     val playback = com.tvmusic.core.TvMusicApp.from(context).playback
     val lists by playback.lists.collectAsState()
@@ -116,6 +111,20 @@ fun PlayerScreen(onBack: () -> Unit) {
                 modifier = Modifier.align(Alignment.Center)
             )
             return@Box
+        }
+
+        // 瞬时提示（lrc.cx 兜底歌词/封面进行中或结果），5 秒后播放器自动清除
+        state.metaNotice?.let { msg ->
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 20.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color(0xCC000000))
+                    .padding(horizontal = 22.dp, vertical = 10.dp)
+            ) {
+                Text(msg, color = Color.White, fontSize = 13.sp)
+            }
         }
 
         Row(
@@ -175,31 +184,15 @@ fun PlayerScreen(onBack: () -> Unit) {
                         // 视频模式不渲染歌词：画面与歌词叠加不可读
                         if (!state.isVideo) {
                             Spacer(Modifier.height(20.dp))
-                            PlayerLyricLines(
-                                lines = state.lrcLines,
-                                currentIndex = state.lrcIndex,
-                                modifier = Modifier.fillMaxWidth().weight(1f)
-                            )
+                            PlayerLyricLines(modifier = Modifier.fillMaxWidth().weight(1f))
                         } else {
                             Spacer(Modifier.fillMaxWidth().weight(1f))
                         }
                     }
                 }
 
-                // 下：控制条（进度 + 时间 + 全部控制按钮）
-                SeekBar(
-                    positionMs = state.positionMs,
-                    durationMs = state.durationMs,
-                    modifier = Modifier.fillMaxWidth().padding(top = 18.dp),
-                    onSeek = { PlayerManager.seek(it) }
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(format(state.positionMs), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(format(state.durationMs), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
+                // 下：控制条（进度 + 时间 + 全部控制按钮）；进度每秒刷新只在卡片内部重组
+                ProgressSection(onSeek = { PlayerManager.seek(it) })
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 6.dp),
                     horizontalArrangement = Arrangement.Center,
@@ -305,11 +298,11 @@ fun PlayerScreen(onBack: () -> Unit) {
 
 /** 播放页内嵌逐行歌词：跟随当前行滚动，当前行高亮。 */
 @Composable
-private fun PlayerLyricLines(
-    lines: List<LrcLine>,
-    currentIndex: Int,
-    modifier: Modifier = Modifier
-) {
+private fun PlayerLyricLines(modifier: Modifier = Modifier) {
+    // 秒级订阅限制在本子树：ticker 刷新歌词行/当前行时不波及播放页外壳
+    val st by PlayerManager.uiState.collectAsState()
+    val lines = st.lrcLines
+    val currentIndex = st.lrcIndex
     val cfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
     val lrcColor = com.tvmusic.ui.theme.LyricSettings.parseColor()
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
@@ -638,14 +631,36 @@ private fun RoundCtrlButton(
     }
 }
 
+/** 进度区（进度条 + 时间）：秒级订阅限定在本子树，外壳不被每秒 ticker 重组。 */
+@Composable
+private fun ProgressSection(onSeek: (Long) -> Unit) {
+    val st by PlayerManager.uiState.collectAsState()
+    SeekBar(
+        positionMs = st.positionMs,
+        durationMs = st.durationMs,
+        bufferedPositionMs = st.bufferedPositionMs,
+        modifier = Modifier.fillMaxWidth().padding(top = 18.dp),
+        onSeek = onSeek
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(format(st.positionMs), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(format(st.durationMs), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
 /**
  * 可拖动进度条：触摸/鼠标按住拖动或点按快进快退；
- * 遥控器聚焦后 左右=±10s、上下=±60s。
+ * 遥控器聚焦后 左右=±10s、上下=±60s（上下放行给焦点系统避免焦点陷阱）。
+ * 缓冲段以半透明主题色绘制在已播放段之下。
  */
 @Composable
 private fun SeekBar(
     positionMs: Long,
     durationMs: Long,
+    bufferedPositionMs: Long,
     modifier: Modifier = Modifier,
     onSeek: (Long) -> Unit
 ) {
@@ -658,6 +673,8 @@ private fun SeekBar(
     val effectivePos = manualPos ?: positionMs
     val fraction = dragFraction
         ?: if (durationMs > 0) (effectivePos.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
+    val bufferedFraction =
+        if (durationMs > 0) (bufferedPositionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
     val primary = MaterialTheme.colorScheme.primary
     BoxWithConstraints(
         modifier = modifier
@@ -665,6 +682,9 @@ private fun SeekBar(
             .clip(RoundedCornerShape(15.dp))
             .background(Color(0x14FFFFFF))
             .drawBehind { if (focused) drawRect(primary.copy(alpha = 0.25f)) }
+            // 左右各让出一个半拇指位：手柄在两端不会溢出被外层 clip 裁掉，
+            // 且 tap/拖拽映射到同一内宽，点按位置与手柄中心一致
+            .padding(horizontal = 8.dp)
             .onFocusChanged { focused = it.isFocused }
             .focusable()
             .onKeyEvent { event ->
@@ -683,35 +703,50 @@ private fun SeekBar(
                 }
                 true
             }
+            // 单输入节点内并行跑 tap 与横向拖拽两个手势，避免重复输入通道
             .pointerInput(durationMs) {
-                detectTapGestures { off ->
-                    if (durationMs > 0) {
-                        val target = ((off.x / size.width).coerceIn(0f, 1f) * durationMs).toLong()
-                        manualPos = target
-                        onSeek(target)
-                    }
-                }
-            }
-            .pointerInput(durationMs) {
-                detectHorizontalDragGestures(
-                    onDragStart = { off -> dragFraction = (off.x / size.width).coerceIn(0f, 1f) },
-                    onDragEnd = {
-                        val f = dragFraction
-                        dragFraction = null
-                        if (f != null && durationMs > 0) {
-                            val target = (f * durationMs).toLong()
-                            manualPos = target
-                            onSeek(target)
+                coroutineScope {
+                    launch {
+                        detectTapGestures { off ->
+                            if (durationMs > 0) {
+                                val target = ((off.x / size.width).coerceIn(0f, 1f) * durationMs).toLong()
+                                manualPos = target
+                                onSeek(target)
+                            }
                         }
-                    },
-                    onDragCancel = { dragFraction = null }
-                ) { change, _ ->
-                    change.consume()
-                    dragFraction = (change.position.x / size.width).coerceIn(0f, 1f)
+                    }
+                    launch {
+                        detectHorizontalDragGestures(
+                            onDragStart = { off -> dragFraction = (off.x / size.width).coerceIn(0f, 1f) },
+                            onDragEnd = {
+                                val f = dragFraction
+                                dragFraction = null
+                                if (f != null && durationMs > 0) {
+                                    val target = (f * durationMs).toLong()
+                                    manualPos = target
+                                    onSeek(target)
+                                }
+                            },
+                            onDragCancel = { dragFraction = null }
+                        ) { change, _ ->
+                            change.consume()
+                            dragFraction = (change.position.x / size.width).coerceIn(0f, 1f)
+                        }
+                    }
                 }
             }
     ) {
         val barWidth = maxWidth
+        // 缓冲段：半透明主题色
+        Box(
+            Modifier
+                .align(Alignment.CenterStart)
+                .fillMaxWidth(bufferedFraction)
+                .height(6.dp)
+                .clip(RoundedCornerShape(topEnd = 3.dp, bottomEnd = 3.dp))
+                .background(primary.copy(alpha = 0.35f))
+        )
+        // 已播放段：主题色实心
         Box(
             Modifier
                 .align(Alignment.CenterStart)
@@ -720,6 +755,7 @@ private fun SeekBar(
                 .clip(RoundedCornerShape(topEnd = 3.dp, bottomEnd = 3.dp))
                 .background(primary)
         )
+        // 手柄：中心对准进度点，两端因外框 padding 不会出界
         Box(
             Modifier
                 .size(16.dp)

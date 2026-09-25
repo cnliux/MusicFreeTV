@@ -17,6 +17,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -52,6 +55,8 @@ data class PlayerUiState(
     val isPlaying: Boolean = false,
     val durationMs: Long = 0,
     val positionMs: Long = 0,
+    /** 已缓冲进度（ExoPlayer bufferedPosition），用于进度条缓冲段。 */
+    val bufferedPositionMs: Long = 0,
     val buffering: Boolean = false,
     val error: String? = null,
     val queue: List<QueueEntry> = emptyList(),
@@ -72,7 +77,9 @@ data class PlayerUiState(
     /** 低音增强强度 0~1000（系统 BassBoost 取值范围）。 */
     val bassStrength: Int = 0,
     /** 均衡器预设序号：0 = 原声（平直），1..N = 系统预设。 */
-    val eqPreset: Int = 0
+    val eqPreset: Int = 0,
+    /** 瞬时提示（如 lrc.cx 兜底进度/结果），播放页短暂展示后自动清除。 */
+    val metaNotice: String? = null
 )
 
 /**
@@ -95,6 +102,14 @@ object PlayerManager {
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
 
+    /**
+     * 结构性 UI 状态：拷贝自 uiState 但屏蔽每秒刷新的进度/缓冲/歌词字段，
+     * 供播放页外壳订阅——ticker 刷新时该流不发射，避免整屏随之秒级重组。
+     */
+    val screenState: Flow<PlayerUiState> = _uiState
+        .map { it.copy(positionMs = 0, durationMs = 0, bufferedPositionMs = 0, lrcIndex = -1, lrcLines = emptyList()) }
+        .distinctUntilChanged()
+
     var player: ExoPlayer? = null
         private set
 
@@ -105,6 +120,15 @@ object PlayerManager {
     private val artworkLoader = OkHttpClient.Builder()
         .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .build()
+
+    /** lrc.cx 兜底下载器：独立超时（放宽 + 总时限），便于网络抖动时重试。 */
+    private val metaHttp = OkHttpClient.Builder()
+        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .callTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
         .followRedirects(true)
         .followSslRedirects(true)
         .build()
@@ -145,6 +169,10 @@ object PlayerManager {
     private fun entryKeyOf(e: QueueEntry): String =
         e.plugin + ":" + e.raw.optString("id", e.raw.optString("songmid", e.raw.optString("lid", "")))
 
+    /** 当前曲 key 缓存：同一条目在 ticker 里反复检查时不再重复拼字符串。 */
+    private var preloadKeyOfCurrent: String? = null
+    private var preloadKeyItem: QueueEntry? = null
+
     /**
      * 播放到后半段时，提前在后台解析下一首音源并缓存：
      * 切歌时 play() 命中缓存可跳过 QuickJS 解析，出声更快。
@@ -156,7 +184,12 @@ object PlayerManager {
         if (dur <= 0L || st.positionMs < dur / 2) return
         if (st.playMode != PlayMode.ORDER || st.queue.size <= 1) return
         val cur = st.current ?: return
-        val curKey = entryKeyOf(cur)
+        // 引用判同避免每 tick 重建 key；切歌后 current 是新的对象才重算
+        if (preloadKeyItem !== cur) {
+            preloadKeyItem = cur
+            preloadKeyOfCurrent = entryKeyOf(cur)
+        }
+        val curKey = preloadKeyOfCurrent ?: return
         if (preloadTriggeredFor == curKey) return
         preloadTriggeredFor = curKey
         val nextIdx = if (st.queueIndex + 1 in st.queue.indices) st.queueIndex + 1 else 0
@@ -510,6 +543,7 @@ object PlayerManager {
         _uiState.value = st.copy(
             durationMs = p.duration,
             positionMs = p.currentPosition,
+            bufferedPositionMs = p.bufferedPosition,
             lrcIndex = findLrcIndex(st.lrcLines, p.currentPosition),
             volume = (p.volume * 100).toInt()
         )
@@ -517,10 +551,19 @@ object PlayerManager {
         maybePreloadNext()
     }
 
+    /** 找最后一个 timeMs <= posMs 的行索引；歌词已按 timeMs 升序，二分查找省掉每秒线性扫描。 */
     private fun findLrcIndex(lines: List<LrcLine>, posMs: Long): Int {
+        var lo = 0
+        var hi = lines.size - 1
         var idx = -1
-        for ((i, line) in lines.withIndex()) {
-            if (line.timeMs <= posMs) idx = i else break
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            if (lines[mid].timeMs <= posMs) {
+                idx = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
         }
         return idx
     }
@@ -548,9 +591,17 @@ object PlayerManager {
                 // 旧实现在守卫前写 current/queue，旧协程若晚调度会用旧歌覆盖新歌的 UI 状态。
                 if (my != playSession) return@launch
                 preloadTriggeredFor = null // 新曲开始：允许对本曲触发一次"下一首预加载"
+                // 无封面且开启了兜底补全时，按 曲名/歌手 换成带 lrc.cx 回退封面的条目：
+                // QueueEntry.artwork 是不可变构造值，只能通过 copy 产生新条目，原地改 raw 无效。
+                // 必须把回退封面写进 queue：onMediaItemTransition 会用 queue[idx] 覆盖 current，
+                // 只改 current 会在起播后被空封面条目重新打回占位符（播放页依旧 ♪）
+                val provided = queue ?: listOf(item)
+                val effectiveQueue = provided.map { withFallbackArtwork(it) }
+                val shown = effectiveQueue[startIndex.coerceIn(0, effectiveQueue.lastIndex)]
+                if (shown !== item) showMetaNotice("已用 lrc.cx 补充封面")
                 _uiState.value = _uiState.value.copy(
-                    current = item,
-                    queue = queue ?: listOf(item),
+                    current = shown,
+                    queue = effectiveQueue,
                     queueIndex = startIndex,
                     error = null
                 )
@@ -616,7 +667,7 @@ object PlayerManager {
                             .setArtist(item.artist)
                             .setAlbumTitle(item.album)
                             .setArtworkUri(
-                                item.artwork.takeIf { it.startsWith("http") }
+                                shown.artwork.takeIf { it.startsWith("http") }
                                     ?.let { android.net.Uri.parse(it) }
                             )
                             .build()
@@ -896,6 +947,19 @@ object PlayerManager {
     /** 当前歌词解析协程：切歌时取消，避免旧解析堵在引擎串行队列里拖慢新歌。 */
     private var lyricJob: kotlinx.coroutines.Job? = null
 
+    /** metaNotice 自动清除协程：同一条提示只保留一次，5 秒后清空。 */
+    private var metaNoticeJob: kotlinx.coroutines.Job? = null
+
+    /** 播放页瞬时提示：lrc.cx 兜底进行中/成功/失败时的可见反馈。 */
+    private fun showMetaNotice(text: String) {
+        metaNoticeJob?.cancel()
+        _uiState.value = _uiState.value.copy(metaNotice = text)
+        metaNoticeJob = scope.launch {
+            kotlinx.coroutines.delay(5_000)
+            _uiState.value = _uiState.value.copy(metaNotice = null)
+        }
+    }
+
     /** 最近一次已发起歌词请求的条目：onMediaItemTransition 与 play() 末尾都会触发，按条目去重。 */
     @Volatile
     private var lastLyricKey: String? = null
@@ -911,12 +975,31 @@ object PlayerManager {
                 val rt = runtime ?: return@launch
                 // 与 getMediaSource 同理：走粘性 home 引擎，避免挤占 primary。
                 // 歌词不是关键路径：15s 超时足够，避免无响应的 getLyric 长期占住引擎串行队列
-                val result = rt.callParallel(
-                    entry.plugin, "getLyric", listOf(entry.raw.toString()),
-                    timeoutMs = 15_000
-                )
+                val result = try {
+                    rt.callParallel(
+                        entry.plugin, "getLyric", listOf(entry.raw.toString()),
+                        timeoutMs = 15_000
+                    )
+                } catch (_: Exception) {
+                    null
+                }
                 if (gen != lrcGeneration) return@launch // 已切歌，丢弃过期歌词
-                val lines = parseLyricResult(result)
+                var lines = result?.let { parseLyricResult(it) } ?: emptyList()
+                // 插件没返回歌词且开启兜底时，按 曲名/歌手/专辑 从 lrc.cx 补齐
+                if (lines.isEmpty() && com.tvmusic.config.MetaSettings.isEnabled) {
+                    showMetaNotice("正在从 lrc.cx 搜索「${entry.title}」歌词…")
+                    val fallback = try {
+                        fetchFallbackLyric(entry) // null = 网络失败（已重试），空列表 = 确实没有
+                    } catch (_: Exception) {
+                        null
+                    }
+                    lines = fallback ?: emptyList()
+                    when {
+                        fallback == null -> showMetaNotice("lrc.cx 请求失败（网络不稳定，已重试）")
+                        lines.isNotEmpty() -> showMetaNotice("已从 lrc.cx 补充歌词")
+                        else -> showMetaNotice("lrc.cx 未找到该歌曲歌词")
+                    }
+                }
                 _uiState.value = _uiState.value.copy(lrcLines = lines.sortedBy { it.timeMs }, lrcIndex = -1)
             } catch (_: Exception) {
                 if (gen == lrcGeneration) {
@@ -924,6 +1007,55 @@ object PlayerManager {
                 }
             }
         }
+    }
+
+    /** 回退封面：条目无 artwork/coverImg 且开启补全时，返回带入 lrc.cx 合成封面地址的新条目。 */
+    private fun withFallbackArtwork(item: QueueEntry): QueueEntry {
+        if (!com.tvmusic.config.MetaSettings.isEnabled) return item
+        if (item.artwork.isNotBlank()) return item
+        val fb = com.tvmusic.config.MetaSettings.coverUrl(item.title, item.artist, item.album)
+        if (fb.isBlank()) return item
+        return item.copy(artwork = fb)
+    }
+
+    /**
+     * lrc.cx /lyrics 兜底：通常直接返回 LRC 文本，也兼容批量 JSON 形态（取第一条）。
+     * 返回 null 表示网络/TLS/超时失败（内部已对全部候选重试一轮）；返回空列表表示确实没有歌词。
+     * 候选按优先级：完整歌手 → 净化歌手（去掉“·专辑”等后缀）→ 仅曲名。
+     */
+    private suspend fun fetchFallbackLyric(entry: QueueEntry): List<LrcLine>? {
+        val urls = com.tvmusic.config.MetaSettings.lyricsCandidates(entry.title, entry.artist, entry.album)
+        if (urls.isEmpty()) return emptyList()
+        var networkFailed = false
+        repeat(2) {
+            for (url in urls) {
+                try {
+                    val req = okhttp3.Request.Builder().url(url)
+                        .header("User-Agent", "MusicFreeTV/1.0")
+                        .build()
+                    val lines = metaHttp.newCall(req).execute().use { resp ->
+                        val body = resp.body?.string() ?: return@use emptyList()
+                        if (!resp.isSuccessful) return@use emptyList()
+                        // 仅当"数组首元素是对象且带非空 lyrics"时才按 JSON 响应处理。
+                        // 直接裸试 JSONArray 会把 [Verse] 这类 LRC 行宽松解析成 ["Verse"]，
+                        // optJSONObject(0) 为 null 会提前 return 把真实歌词整个丢弃（实际发生过）。
+                        val json = runCatching { org.json.JSONArray(body) }.getOrNull()
+                        val parsed = json
+                            ?.takeIf { it.length() > 0 && it.optJSONObject(0) != null }
+                            ?.let { it.optJSONObject(0)!!.optString("lyrics") }
+                            ?.takeIf { it.isNotBlank() }
+                            ?.let { parseLrc(it) }
+                            ?: parseLrc(body)
+                        parsed
+                    }
+                    if (lines.isNotEmpty()) return lines
+                } catch (_: Exception) {
+                    networkFailed = true // 网络/TLS/超时：本候选失败，继续下一候选/下一轮
+                }
+            }
+            if (networkFailed) kotlinx.coroutines.delay(800)
+        }
+        return if (networkFailed) null else emptyList()
     }
 
     /**
