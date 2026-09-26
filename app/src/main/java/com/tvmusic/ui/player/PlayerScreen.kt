@@ -85,7 +85,6 @@ fun PlayerScreen(onBack: () -> Unit) {
     var showNameDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     var showSleepDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     var showEqDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-    val cfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
 
     Box(Modifier.fillMaxSize()) {
         // 背景：模糊封面 + 暗色蒙层
@@ -365,7 +364,7 @@ private fun PlayerLyricLines(modifier: Modifier = Modifier) {
                     .padding(vertical = 6.dp)
                     .graphicsLayer { alpha = if (isCurrent) 1f else 0.6f }
             ) {
-                // 主文案 + 译文与悬浮歌词共用同一渲染（LyricLineBlock）
+                // 主文案 + 译文统一走 LyricLineBlock 渲染
                 LyricLineBlock(line, isCurrent, lrcColor, cfg.fontSizeSp.toFloat())
             }
         }

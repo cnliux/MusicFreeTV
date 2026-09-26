@@ -719,7 +719,8 @@ class RemoteConfigService : Service() {
                             .put("lists", listCount)
                     )
                     .toString())
-            }            method == "POST" && path == "/api/fav/play" -> {
+            }
+            method == "POST" && path == "/api/fav/play" -> {
                 // 播放整个收藏专辑：{ id }
                 val body = readBody(input, headers)
                 val id = runCatching { JSONObject(body).optString("id", "") }.getOrDefault("")
