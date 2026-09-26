@@ -490,7 +490,8 @@ private fun PluginSwitcher(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        items(plugins, key = { it.info?.platform ?: it.name }) { p ->
+        // key 加插件名兜底：两个插件声明同一 platform 时裸 platform key 会冲突闪退
+        items(plugins, key = { "${it.name}_${it.info?.platform ?: it.name}" }) { p ->
             val platform = p.info?.platform ?: return@items
             FilterChip(
                 label = p.name,

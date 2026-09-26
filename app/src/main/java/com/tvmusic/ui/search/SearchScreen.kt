@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -528,7 +529,12 @@ private fun ResultList(
                         contentPadding = PaddingValues(horizontal = 28.dp, vertical = 4.dp),
                         horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        items(row.entries, key = { "${it.plugin}-${it.id}-${it.name}" }) { e ->
+                        // key 含索引兜底：插件可能返回重复 id+name 的卡片（同名专辑/缺失 id），
+                        // 裸业务 key 冲突会直接 IllegalArgumentException 闪退
+                        itemsIndexed(
+                            row.entries,
+                            key = { i, e -> "c_${i}_${e.plugin}-${e.id}-${e.name}" }
+                        ) { _, e ->
                             MediaCard(
                                 title = e.name.ifBlank { e.title },
                                 subtitle = cardSubtitle(e),
