@@ -132,6 +132,7 @@ class PluginRepository(
             for (p in records) {
                 val platform = p.info?.platform ?: detectPlatformSafe(p.source ?: "")
                 if (platform.isNullOrBlank()) continue
+                val marker = File(appContext.filesDir, "plugin_load_marker")
                 marker.writeText(p.name)
                 val loaded = runCatching { runtime.loadPlugin(platform, p.source!!) }.getOrDefault(false)
                 marker.delete()
@@ -145,7 +146,6 @@ class PluginRepository(
                     Log.w("PluginRepository", "register failed: ${p.id}")
                 }
             }
-            marker.delete()
             Log.i("PluginRepository", "warmup done: $okCount/${records.size} plugins loaded")
             _ready.value = true
             refreshFromDb()
@@ -190,6 +190,8 @@ class PluginRepository(
 
     fun addSubscription(url: String) {
         if (url.isBlank()) return
+        // 主动添加订阅 = 明确想让订阅内容生效：清空卸载名单，否则名单会拦截新订阅里的插件
+        store.clearUninstalled(store.listUninstalled())
         store.addSubscription(url.trim())
         refreshFromDb()
     }
@@ -201,14 +203,30 @@ class PluginRepository(
 
     fun listEnabled(): List<PluginRecord> = _plugins.value.filter { it.enabled }
 
-    fun toggleEnabled(name: String, enabled: Boolean) {
-        store.setPluginEnabled(name, enabled)
-        refreshFromDb()
+    /** @return 是否命中插件（未命中由 HTTP 层回 404，不再静默成功）。 */
+    fun toggleEnabled(nameOrPlatform: String, enabled: Boolean): Boolean {
+        val ok = store.setPluginEnabled(nameOrPlatform, enabled)
+        if (ok) refreshFromDb()
+        return ok
     }
 
-    fun uninstall(name: String) {
-        store.deletePlugin(name)
+    /**
+     * 卸载单个插件：删除插件行与变量，并把 name/platform 记入卸载名单。
+     * 名单会阻止订阅同步把同一插件再次装回（"卸载了又自动出现"的根因）。
+     */
+    fun uninstall(nameOrPlatform: String): Boolean {
+        val hit = store.deletePlugin(nameOrPlatform) ?: return false
+        store.markUninstalled(hit.first)
+        hit.second?.let { store.markUninstalled(it) }
         refreshFromDb()
+        return true
+    }
+
+    /** 一键全部卸载：清空全部插件与变量并记入卸载名单（订阅保留，但不再自动复装）。 */
+    fun uninstallAll(): Int {
+        val n = store.deleteAllPlugins()
+        if (n > 0) refreshFromDb()
+        return n
     }
 
     /**
@@ -288,47 +306,56 @@ class PluginRepository(
     }
 
     /** 内容识别安装：plugins.json 列表 → 逐个安装；否则按单个 .js 插件安装。 */
-    private suspend fun installContent(url: String, body: String): String? {
+    private suspend fun installContent(url: String, body: String, fromSync: Boolean): String? {
         val arr = runCatching { JSONObject(body).optJSONArray("plugins") }.getOrNull()
         if (arr != null && arr.length() > 0) {
-            importListJson(body)
+            importListJson(body, fromSync)
             return null
         }
         syncSeenCount.incrementAndGet()
-        return installFromBody(url, body)
+        return installFromBody(url, body, fromSync)
     }
 
     /** 单个插件源码安装入口（探测 platform 后交给 install）。 */
-    private suspend fun installFromBody(url: String, body: String): String? {
+    private suspend fun installFromBody(url: String, body: String, fromSync: Boolean): String? {
         val platform = detectPlatform(body) ?: return "无法解析插件 platform"
-        return install(platform, url, source = body)
+        return install(platform, url, source = body, fromSync = fromSync)
     }
 
     /**
      * 从 url 导入：内容为 plugins.json 列表则批量安装，否则视为单个插件 .js。
      * 返回错误信息，成功返回 null。
+     * 手动导入（非订阅同步）：清除对应卸载名单，视为用户想要恢复该插件。
      */
     suspend fun importFromUrl(url: String): String? = withContext(Dispatchers.IO) {
         try {
             val body = fetchOk(url) ?: return@withContext "下载失败: HTTP 无法访问"
-            installContent(url, body)
+            installContent(url, body, fromSync = false)
         } catch (e: Exception) {
             "拉取失败: ${e.message}"
         }
     }
 
-    /** 安装/更新：注册到引擎 -> 读元信息 -> 入库。 */
+    /** 安装/更新：注册到引擎 -> 读元信息 -> 入库。
+     *  @param fromSync true=订阅自动同步（命中卸载名单则静默跳过）；false=手动导入（清除名单允许恢复） */
     suspend fun install(
         name: String,
         url: String,
         version: String? = null,
         source: String? = null,
-        keepEnabled: Boolean = true
+        keepEnabled: Boolean = true,
+        fromSync: Boolean = false
     ): String? = withContext(Dispatchers.IO) {
         // 崩溃黑名单：连续 3 次加载时 native crash 后禁止自动/订阅同步再尝试，
         // 防止每次同步都崩一次进程。解除途径：卸载该插件后重新添加订阅即可全新重装。
         if (name in blockedPlugins()) {
             return@withContext "插件在黑名单中（曾连续 3 次载入时崩溃，请卸载后重新订阅）"
+        }
+        // 卸载名单：订阅同步不把用户手动卸载过的插件装回（手动导入视为恢复，清除名单）
+        val blockedNames = if (fromSync) store.listUninstalled() else emptySet()
+        if (fromSync && name in blockedNames) {
+            Log.i("PluginRepository", "skip uninstalled plugin: $name")
+            return@withContext null
         }
         try {
             val js = source ?: run {
@@ -350,10 +377,17 @@ class PluginRepository(
             // 保留原启用状态与安装时间）。旧实现此处静默 return，订阅插件更新永远无法下发
             val oldRecord = existing.firstOrNull { it.name == name }
             val platform = detectPlatform(js) ?: return@withContext "无法解析插件 platform"
+            if (fromSync && platform in blockedNames) {
+                Log.i("PluginRepository", "skip uninstalled plugin: $platform")
+                return@withContext null
+            }
+            if (!fromSync) {
+                store.clearUninstalled(listOf(name, platform))
+            }
             // 崩溃看门狗：写标记，若注册时 native crash，下次启动跳过该插件
             val marker = File(appContext.filesDir, "plugin_load_marker")
             marker.writeText(name.ifBlank { platform })
-            val loaded = runtime.loadPlugin(platform, js)
+            val loaded = runCatching { runtime.loadPlugin(platform, js) }.getOrDefault(false)
             marker.delete()
             if (!loaded) return@withContext "插件注册失败: $platform"
             val infoRaw = runtime.readInfo(platform) ?: return@withContext "读取插件信息失败: $platform"
@@ -400,7 +434,7 @@ class PluginRepository(
     private suspend fun syncOne(subUrl: String) = withContext(Dispatchers.IO) {
         try {
             val body = fetchOk(subUrl) ?: return@withContext
-            installContent(subUrl, body)?.let { Log.w("PluginRepository", "syncOne $subUrl: $it") }
+            installContent(subUrl, body, fromSync = true)?.let { Log.w("PluginRepository", "syncOne $subUrl: $it") }
         } catch (e: Exception) {
             Log.w("PluginRepository", "syncOne $subUrl: ${e.message}")
         }
@@ -411,7 +445,7 @@ class PluginRepository(
      * 必须串行：并发安装会让"源码指纹去重"读到过期快照产生竞态，
      * 也会让崩溃看门狗 marker 文件互相覆盖，无法定位真正崩溃的插件。
      */
-    private suspend fun importListJson(body: String) {
+    private suspend fun importListJson(body: String, fromSync: Boolean) {
         val arr = runCatching { JSONObject(body).optJSONArray("plugins") }.getOrNull() ?: return
         syncSeenCount.addAndGet(arr.length())
         for (i in 0 until arr.length()) {
@@ -422,7 +456,7 @@ class PluginRepository(
             if (pluginUrl.isEmpty()) continue
             // 不再使用白名单限制，否则订阅里绝大多数音源都会被静默丢弃，
             // 表现为"首页只装上一个插件"。崩溃防护由看门狗 + 永久黑名单负责。
-            val err = install(name, pluginUrl, version)
+            val err = install(name, pluginUrl, version = version, fromSync = fromSync)
             if (err != null) Log.w("PluginRepository", "install $name: $err")
         }
     }

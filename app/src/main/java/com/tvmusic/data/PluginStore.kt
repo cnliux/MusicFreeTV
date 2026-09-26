@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -42,18 +43,32 @@ class PluginStore(context: Context) {
                     "var_value TEXT," +
                     "PRIMARY KEY(plugin_key, var_key))"
             )
+            db.execSQL(
+                "CREATE TABLE uninstalled_plugins(" +
+                    "name TEXT PRIMARY KEY," +
+                    "uninstalled_at INTEGER NOT NULL)"
+            )
         }
 
         override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
             if (oldVersion < 2) {
                 runCatching { db.execSQL("ALTER TABLE plugins ADD COLUMN hash TEXT") }
             }
+            if (oldVersion < 3) {
+                runCatching {
+                    db.execSQL(
+                        "CREATE TABLE IF NOT EXISTS uninstalled_plugins(" +
+                            "name TEXT PRIMARY KEY," +
+                            "uninstalled_at INTEGER NOT NULL)"
+                    )
+                }
+            }
         }
     }
 
     companion object {
         private const val DB_NAME = "musicfreetv.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
     }
 
     private val helper = DbHelper(context.applicationContext)
@@ -72,7 +87,7 @@ class PluginStore(context: Context) {
             put("enabled", if (record.enabled) 1 else 0)
             put("installed_at", record.installedAt)
             put("source", record.source)
-            put("plugin_info", record.info?.let { JSONObject().put("platform", it.platform).put("version", it.version).put("author", it.author).put("srcUrl", it.srcUrl).put("appVersion", it.appVersion).put("description", it.description).put("cacheControl", it.cacheControl).put("primaryKey", it.primaryKey).put("supportedSearchType", it.supportedSearchType).put("userVariables", it.userVariables).toString() })
+            put("plugin_info", record.info?.let { infoToJson(it) })
             put("load_error", record.loadError)
             put("hash", record.hash)
         }
@@ -117,14 +132,46 @@ class PluginStore(context: Context) {
     /** 读取可选字符串字段：缺失/NULL/空串统一返回 null（避免 optString(key, null) 的类型不匹配警告）。 */
     private fun optStr(o: JSONObject, key: String): String? = o.optString(key).takeIf { it.isNotEmpty() }
 
+    /** 把 PluginInfo 写成可 round-trip 的 JSON：userVariables 必须是对象数组，不能塞 data class toString。 */
+    private fun infoToJson(info: PluginInfo): String {
+        fun strings(list: List<String>): JSONArray {
+            val arr = JSONArray()
+            list.forEach { arr.put(it) }
+            return arr
+        }
+        val vars = JSONArray()
+        info.userVariables.forEach { d ->
+            vars.put(
+                JSONObject()
+                    .put("key", d.key)
+                    .put("name", d.name)
+                    .put("type", d.type ?: JSONObject.NULL)
+            )
+        }
+        return JSONObject()
+            .put("platform", info.platform)
+            .put("version", info.version)
+            .put("author", info.author)
+            .put("srcUrl", info.srcUrl)
+            .put("appVersion", info.appVersion)
+            .put("description", info.description)
+            .put("cacheControl", info.cacheControl)
+            .put("primaryKey", strings(info.primaryKey))
+            .put("supportedSearchType", strings(info.supportedSearchType))
+            .put("userVariables", vars)
+            .toString()
+    }
+
     private fun parseInfo(json: String?): PluginInfo? {
         if (json.isNullOrBlank()) return null
         return try {
             val o = JSONObject(json)
             val userVars = o.optJSONArray("userVariables")?.let { arr ->
-                (0 until arr.length()).map { i ->
-                    val x = arr.optJSONObject(i) ?: JSONObject()
-                    UserVarDef(x.optString("key"), x.optString("name"), optStr(x, "type"))
+                (0 until arr.length()).mapNotNull { i ->
+                    val x = arr.optJSONObject(i) ?: return@mapNotNull null
+                    val key = x.optString("key")
+                    if (key.isBlank()) return@mapNotNull null
+                    UserVarDef(key, x.optString("name").ifBlank { key }, optStr(x, "type"))
                 }
             } ?: emptyList()
             PluginInfo(
@@ -149,14 +196,146 @@ class PluginStore(context: Context) {
     }
 
     @Synchronized
-    fun setPluginEnabled(name: String, enabled: Boolean) {
+    /**
+     * 按「插件名」或「platform」定位实际存储名。
+     * 远程管理页只拿得到 /api/plugins 里的 platform（如 kugou / 酷狗），
+     * 而 plugins 表的主键是插件名（如 酷狗音乐），两者经常不同（实测 24/31 条不同），
+     * 直接用 platform 去 update/delete 会 0 行命中且不报错。
+     *
+     * 解析优先级（保证唯一命中，避免 name 恰好等于别的插件 platform 时串行）：
+     *  1) 插件名精确匹配；若名字唯一命中，直接返回。
+     *  2) platform 精确匹配（按 installed_at 取第一个，重复 platform 只操作第一个）。
+     *  3) 回退：name 命中多行时（插件名重复），取 installed_at 最早的那个。
+     * 全部未命中返回 null，由调用方回 404，不再静默成功。
+     */
+    private fun resolvePluginName(nameOrPlatform: String): String? {
+        val want = nameOrPlatform.trim()
+        if (want.isEmpty()) return null
+        val c = helper.readableDatabase.query(
+            "plugins", arrayOf("name", "plugin_info"), null, null, null, null, "installed_at ASC"
+        )
+        val byName = ArrayList<String>()
+        var byPlatform: String? = null
+        c.use {
+            while (it.moveToNext()) {
+                val storedName = it.getString(0)
+                if (storedName == want) byName.add(storedName)
+                if (byPlatform == null && parseInfo(it.getString(1))?.platform == want) byPlatform = storedName
+            }
+        }
+        if (byName.size == 1) return byName[0]
+        if (byPlatform != null) return byPlatform
+        // name 重复的罕见情况：取最早安装的那个
+        return byName.firstOrNull()
+    }
+
+    /** @return 是否命中并更新了行（未命中返回 false，由调用方回 404，不再静默成功）。 */
+    fun setPluginEnabled(nameOrPlatform: String, enabled: Boolean): Boolean {
+        val name = resolvePluginName(nameOrPlatform) ?: return false
         val cv = ContentValues().apply { put("enabled", if (enabled) 1 else 0) }
-        helper.writableDatabase.update("plugins", cv, "name=?", arrayOf(name))
+        return helper.writableDatabase.update("plugins", cv, "name=?", arrayOf(name)) > 0
+    }
+
+    /**
+     * 删除单个插件及其用户变量。
+     * @return 命中时返回 (DB主键name, platform)，未命中返回 null（由调用方回 404）。
+     */
+    @Synchronized
+    fun deletePlugin(nameOrPlatform: String): Pair<String, String?>? {
+        val name = resolvePluginName(nameOrPlatform) ?: return null
+        val db = helper.writableDatabase
+        var pk: String? = name
+        db.beginTransaction()
+        try {
+            val c = db.query("plugins", arrayOf("plugin_info"), "name=?", arrayOf(name), null, null, null)
+            c.use {
+                if (it.moveToFirst()) {
+                    parseInfo(it.getString(0))?.platform?.takeIf { p -> p.isNotBlank() }?.let { p -> pk = p }
+                }
+            }
+            db.delete("plugins", "name=?", arrayOf(name))
+            db.delete("user_variables", "plugin_key=?", arrayOf(pk))
+            if (pk != name) db.delete("user_variables", "plugin_key=?", arrayOf(name))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        invalidateVarCache()
+        return name to pk
+    }
+
+    /**
+     * 一键全部卸载：清空插件与用户变量，并把所有插件（含 platform 别名）记入卸载名单，
+     * 防止订阅同步立即复装。
+     * @return 删除的插件数量。
+     */
+    @Synchronized
+    fun deleteAllPlugins(): Int {
+        val db = helper.writableDatabase
+        val names = ArrayList<Pair<String, String?>>()
+        db.beginTransaction()
+        try {
+            db.query("plugins", arrayOf("name", "plugin_info"), null, null, null, null, null).use { c ->
+                while (c.moveToNext()) {
+                    names.add(c.getString(0) to parseInfo(c.getString(1))?.platform?.takeIf { it.isNotBlank() })
+                }
+            }
+            if (names.isEmpty()) return 0
+            val now = System.currentTimeMillis()
+            for ((name, platform) in names) {
+                for (key in linkedSetOf(name, platform)) {
+                    if (key.isNullOrBlank()) continue
+                    val cv = ContentValues().apply {
+                        put("name", key)
+                        put("uninstalled_at", now)
+                    }
+                    db.insertWithOnConflict("uninstalled_plugins", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+                }
+            }
+            db.delete("plugins", null, null)
+            db.delete("user_variables", null, null)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        invalidateVarCache()
+        return names.size
+    }
+
+    /** 卸载名单：记录被用户手动卸载的插件名/platform，订阅同步时跳过以免复装。 */
+    @Synchronized
+    fun markUninstalled(name: String) {
+        if (name.isBlank()) return
+        val cv = ContentValues().apply {
+            put("name", name)
+            put("uninstalled_at", System.currentTimeMillis())
+        }
+        helper.writableDatabase.insertWithOnConflict("uninstalled_plugins", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
     @Synchronized
-    fun deletePlugin(name: String) {
-        helper.writableDatabase.delete("plugins", "name=?", arrayOf(name))
+    fun listUninstalled(): Set<String> {
+        val out = HashSet<String>()
+        helper.readableDatabase.query("uninstalled_plugins", arrayOf("name"), null, null, null, null, null).use { c ->
+            while (c.moveToNext()) out.add(c.getString(0))
+        }
+        return out
+    }
+
+    /** 从卸载名单移除（手动导入或重新添加订阅时调用，允许再次安装）。 */
+    @Synchronized
+    fun clearUninstalled(names: Collection<String>) {
+        if (names.isEmpty()) return
+        val db = helper.writableDatabase
+        db.beginTransaction()
+        try {
+            for (n in names) {
+                if (n.isNotBlank()) db.delete("uninstalled_plugins", "name=?", arrayOf(n))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     @Synchronized
@@ -212,6 +391,7 @@ class PluginStore(context: Context) {
         try {
             db.delete("user_variables", "plugin_key=?", arrayOf(pluginKey))
             vars.forEach { (k, v) ->
+                if (k.isBlank()) return@forEach
                 val cv = ContentValues().apply {
                     put("plugin_key", pluginKey)
                     put("var_key", k)

@@ -238,14 +238,52 @@ class RemoteConfigService : Service() {
                     respond(socket, 400, JSONObject().put("ok", false).put("error", "missing name").toString())
                     return
                 }
-                app().repository.toggleEnabled(name, json?.optBoolean("enabled", true) ?: true)
-                respond(socket, 200, JSONObject().put("ok", true).toString())
+                val ok = app().repository.toggleEnabled(name, json?.optBoolean("enabled", true) ?: true)
+                if (ok) respond(socket, 200, JSONObject().put("ok", true).toString())
+                else respond(socket, 404, JSONObject().put("ok", false).put("error", "plugin not found: $name").toString())
             }
             method == "POST" && path == "/api/plugins/uninstall" -> {
                 val body = readBody(input, headers)
                 val name = runCatching { JSONObject(body).optString("name", "") }.getOrDefault("")
-                app().repository.uninstall(name)
-                respond(socket, 200, JSONObject().put("ok", true).toString())
+                if (name.isBlank()) {
+                    respond(socket, 400, JSONObject().put("ok", false).put("error", "missing name").toString())
+                    return
+                }
+                val ok = app().repository.uninstall(name)
+                if (ok) respond(socket, 200, JSONObject().put("ok", true).toString())
+                else respond(socket, 404, JSONObject().put("ok", false).put("error", "plugin not found: $name").toString())
+            }
+            // 一键全部卸载：清空全部插件与变量；卸载名单阻止订阅同步复装（重新添加订阅可恢复）
+            method == "POST" && path == "/api/plugins/uninstallAll" -> {
+                val n = app().repository.uninstallAll()
+                respond(
+                    socket, 200,
+                    JSONObject().put("ok", true).put("count", n)
+                        .put("message", if (n > 0) "已卸载 $n 个插件" else "当前没有插件").toString()
+                )
+            }
+            // 用户变量（Cookie/SESSDATA 等）：一套通用接口服务所有插件，
+            // 读写均由插件头部的 userVariables 声明驱动，新增插件无需改这里。
+            method == "GET" && path == "/api/plugins/vars" -> {
+                respond(socket, 200, pluginVarsJson().toString())
+            }
+            method == "POST" && path == "/api/plugins/vars" -> {
+                val body = readBody(input, headers)
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                val platform = json?.optString("platform", "") ?: ""
+                if (platform.isBlank()) {
+                    respond(socket, 400, JSONObject().put("ok", false).put("error", "missing platform").toString())
+                    return
+                }
+                val varsObj = json?.optJSONObject("vars") ?: JSONObject()
+                val map = HashMap<String, String>()
+                val keys = varsObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    map[k] = varsObj.optString(k)
+                }
+                app().store.replaceVariables(platform, map)
+                respond(socket, 200, JSONObject().put("ok", true).put("message", "已保存 $platform 的变量").toString())
             }
             method == "POST" && path == "/api/sync" -> {
                 app().repository.syncAll(force = true)
@@ -858,8 +896,41 @@ class RemoteConfigService : Service() {
     }
 
     /**
+     * 通用用户变量视图：返回所有声明了 userVariables 的插件的「声明 + 当前值」。
+     * 前端按声明动态渲染表单——插件加多少变量、以后新插件带什么变量都自动支持，
+     * 不需要为咪咕 Cookie / Bilibili SESSDATA 之类各写一套代码。
+     */
+    private fun pluginVarsJson(): JSONObject {
+        val arr = JSONArray()
+        app().store.loadPlugins().forEach { p ->
+            val defs = p.info?.userVariables.orEmpty()
+            if (defs.isEmpty()) return@forEach
+            val pk = p.info?.platform?.takeIf { it.isNotBlank() } ?: p.name
+            val defArr = JSONArray()
+            defs.forEach { d ->
+                defArr.put(
+                    JSONObject()
+                        .put("key", d.key)
+                        .put("name", d.name)
+                        .put("type", d.type ?: JSONObject.NULL)
+                )
+            }
+            val values = JSONObject()
+            app().store.loadVariables(pk).forEach { (k, v) -> values.put(k, v) }
+            arr.put(
+                JSONObject()
+                    .put("platform", pk)
+                    .put("name", p.name)
+                    .put("userVariables", defArr)
+                    .put("values", values)
+            )
+        }
+        return JSONObject().put("ok", true).put("plugins", arr)
+    }
+
+    /**
      * 单次搜索的请求参数。sources 为空表示搜全部启用插件；
-     * sortBy/asc 为空/为空 时回落到后台配置。
+     * sortBy/asc 为空时回落到后台配置。
      */
     private data class SearchReq(
         val sources: Set<String> = emptySet(),
@@ -1457,6 +1528,18 @@ private val PAGE_HTML = """<!DOCTYPE html>
   .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
   .chip .x { color: inherit; opacity: .65; padding: 0 2px; }
   .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  /* 音源卡：一行里同时管「启用/顺序/变量」，模块名做成 chip 而不是大标题，省页面高度 */
+  .srcitem { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .srcitem:last-child { border-bottom: none; }
+  .srcno { width: 22px; flex: none; text-align: center; color: var(--muted); font-size: 12px; }
+  .srcitem .name { flex: 1; min-width: 0; font-size: 15px; }
+  .srcitem .act { display: flex; align-items: center; gap: 8px; flex: none; }
+  .actb { background: none; border: none; color: var(--accent); font-size: 12px; padding: 4px 2px; cursor: pointer; }
+  .actb.dim { color: var(--muted); }
+  .actb.warn { color: var(--danger); }
+  .varpanel { padding: 2px 0 10px 30px; border-bottom: 1px solid var(--line); }
+  .varpanel .vrow { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+  .varpanel .vrow span { width: 148px; flex: none; color: var(--muted); font-size: 12px; }
   #toast {
     position: fixed; left: 50%; bottom: calc(80px + env(safe-area-inset-bottom)); transform: translateX(-50%);
     background: #262b36; color: var(--text); border: 1px solid var(--line);
@@ -1560,7 +1643,6 @@ private val PAGE_HTML = """<!DOCTYPE html>
             <option value="0">降序</option>
           </select>
           <button class="ghost small" style="margin-left:14px;" onclick="saveCfgInline()">存为新默认</button>
-          <button class="ghost small" onclick="switchTab('manage');setTimeout(loadSearchCfg,200);">搜索设置…</button>
         </div>
       </div>
     </div>
@@ -1644,27 +1726,24 @@ private val PAGE_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="card">
-      <h2>搜索设置</h2>
-      <div class="muted">保存后电视端与搜索页的搜索都会采用这里的默认排序与音源优先级。</div>
-      <div class="row" style="border:none;padding:6px 0;">
-        <span class="muted" style="flex:1;">默认排序</span>
-        <select id="cfgSortBy" style="width:130px;"></select>
-        <select id="cfgSortAsc" style="width:90px;margin-left:8px;">
+      <h2>音源与插件 <span id="pluginCount" class="muted"></span></h2>
+      <div class="muted" style="padding:0 0 8px;">每行一个音源插件：启用/停用、配置登录变量、调整搜索优先级（越靠上越先搜索、结果越靠前），都在这一行里完成。</div>
+      <div class="row" style="border:none;padding:0 0 8px;flex-wrap:wrap;gap:8px;">
+        <span class="muted" style="flex:none;">默认排序</span>
+        <select id="cfgSortBy" style="width:120px;"></select>
+        <select id="cfgSortAsc" style="width:80px;">
           <option value="1">升序</option>
           <option value="0">降序</option>
         </select>
+        <span class="muted" style="flex:none;margin-left:6px;">最多结果</span>
+        <input type="number" id="cfgMaxTotal" min="20" max="200" step="10" style="width:78px;flex:none;">
       </div>
-      <div class="row" style="border:none;padding:6px 0;">
-        <span class="muted" style="flex:1;">最多返回结果（20 ~ 200）</span>
-        <input type="number" id="cfgMaxTotal" min="20" max="200" step="10" style="width:90px;">
-      </div>
-      <div class="muted" style="padding:6px 0 4px;">音源优先级（越靠上越先搜索、结果越靠前）</div>
-      <div id="cfgOrderBox"></div>
-      <div class="row" style="border:none;padding:4px 0 0;">
-        <button class="ghost small" onclick="resetCfgOrder()">重置为插件顺序</button>
-      </div>
-      <div class="row" style="border:none;padding:8px 0 0;">
-        <button class="small" onclick="saveSearchCfg()">保存搜索设置</button>
+      <div id="srcList"></div>
+      <div class="row" style="border:none;padding:8px 0 0;flex-wrap:wrap;gap:8px;">
+        <button class="small" onclick="saveSearchCfg()">保存设置</button>
+        <button class="ghost small" onclick="resetCfgOrder()">重置顺序</button>
+        <button class="ghost small" onclick="syncAll()">⟳ 同步订阅</button>
+        <button class="ghost small" id="uninstallAllBtn" onclick="uninstallAll(this)" style="margin-left:auto;">✕ 全部卸载</button>
       </div>
     </div>
     <div class="card">
@@ -1674,13 +1753,6 @@ private val PAGE_HTML = """<!DOCTYPE html>
         <input type="text" id="subUrl" placeholder="plugins.json 或 .js 直链">
         <button class="small" onclick="addSub()">添加</button>
       </div>
-      <div class="row" style="border:none;padding:8px 0 0;">
-        <button class="ghost small" onclick="syncAll()">⟳ 立即同步全部订阅</button>
-      </div>
-    </div>
-    <div class="card">
-      <h2>插件 <span id="pluginCount" class="muted"></span></h2>
-      <div id="pluginList"></div>
     </div>
     <div class="card">
       <h2>配置</h2>
@@ -1764,7 +1836,7 @@ function switchTab(name) {
   if (name === 'fav') loadFavLists();
   if (name === 'history') loadHistory();
   if (name === 'search') loadSearchCfg();
-  if (name === 'manage') { loadSubs(); loadPlugins(); loadLyric(); loadMeta(); loadSearchCfg(); }
+  if (name === 'manage') { loadSubs(); loadSearchCfg(); loadLyric(); loadMeta(); }
 }
 
 /* ---------------- 播放器 ---------------- */
@@ -1958,6 +2030,7 @@ function skipTo(i) {
 
 /* ---------------- 搜索配置与筛选 ---------------- */
 var cfgOrder = [], srcNames = [], knownNames = [], srcSel = {}, orderUI = [];
+var plugins = [], pluginMap = {};
 var SORT_OPTS = [['default', '默认（音源顺序）'], ['duration', '时长'], ['title', '歌名'], ['artist', '歌手']];
 function bindOpts(sel, opts, val) {
   if (!sel) return null;
@@ -1978,8 +2051,12 @@ function srcOrderFull() {
 }
 function loadSearchCfg() {
   var cfgP = api('/api/search/config');
-  return api('/api/plugins').then(function (pd) {
-    var list = pd.plugins || [];
+  return Promise.all([api('/api/plugins'), api('/api/plugins/vars')]).then(function (arr) {
+    var list = arr[0].plugins || [];
+    var vlist = (arr[1] && arr[1].plugins) || [];
+    pluginMap = {};
+    vlist.forEach(function (vp) { pluginMap[vp.platform] = vp; });
+    plugins = list;
     srcNames = list.filter(function (p) { return p.enabled && !p.loadError; })
       .map(function (p) { return p.platform || p.name; })
       .filter(function (n, i, a) { return n && a.indexOf(n) === i; });
@@ -1995,7 +2072,7 @@ function loadSearchCfg() {
     if (el('ascSel')) el('ascSel').value = d.asc ? '1' : '0';
     orderUI = srcOrderFull();
     renderSrcBar();
-    renderCfgOrder();
+    renderSrcList();
   }).catch(function () { });
 }
 function renderSrcBar() {
@@ -2021,20 +2098,51 @@ function renderSrcBar() {
     });
   });
 }
-function renderCfgOrder() {
-  var box = el('cfgOrderBox');
+/* 音源与插件合并列表：每行按「优先级顺序」排，同时带停用/启用、变量配置、卸载。 */
+function renderSrcList() {
+  var box = el('srcList');
   if (!box) return;
-  if (!orderUI.length) { box.innerHTML = '<div class="muted">未启用任何可搜索插件（请先在下方“插件”中启用）</div>'; return; }
+  var cnt = el('pluginCount');
+  if (cnt) cnt.textContent = plugins.length ? '· ' + plugins.length + ' 个' : '';
+  if (!orderUI.length) { box.innerHTML = '<div class="empty">还没有音源插件，先在下方添加订阅源</div>'; return; }
   var html = '';
-  orderUI.forEach(function (p, i) {
+  orderUI.forEach(function (pk, i) {
+    var p = null;
+    for (var k = 0; k < plugins.length; k++) {
+      if ((plugins[k].platform || plugins[k].name) === pk) { p = plugins[k]; break; }
+    }
+    var vp = pluginMap[pk];
+    var defs = (vp && vp.userVariables) || [];
+    var ghost = !p;
+    var enabled = !!p && !!p.enabled && !p.loadError;
     var tag = '';
-    if (knownNames.indexOf(p) < 0) tag = '<span class="badge off">已卸载</span>';
-    else if (srcNames.indexOf(p) < 0) tag = '<span class="badge off">已停用</span>';
-    html += '<div class="row" style="border:none;padding:3px 0;">' +
-      '<span class="grow ellip">' + (i + 1) + '. ' + esc(p) + ' ' + tag + '</span>' +
-      '<button class="ghost small" onclick="moveCfgOrder(' + i + ',-1)">↑</button>' +
-      '<button class="ghost small" onclick="moveCfgOrder(' + i + ',1)">↓</button>' +
-      (knownNames.indexOf(p) < 0 ? '<button class="danger small" onclick="removeOrderEntry(' + i + ')" title="从优先级中移除">✕</button>' : '') + '</div>';
+    if (ghost) tag = '<span class="badge off">已卸载</span>';
+    else if (p.loadError) tag = '<span class="badge off">载入失败</span>';
+    else if (!p.enabled) tag = '<span class="badge off">已停用</span>';
+    else tag = '<span class="badge on">已启用</span>';
+    var open = !!window._openVarPlatform && window._openVarPlatform === pk;
+    html += '<div class="srcitem">' +
+      '<span class="srcno">' + (i + 1) + '</span>' +
+      '<div class="grow"><div class="ellip name">' + esc(pk) + ' ' + tag + '</div>' +
+      '<div class="muted ellip">' + (ghost ? '订阅已移除' : ('v' + esc(p.version || '-'))) + (defs.length ? ' · ' + defs.length + ' 项登录变量' : '') + '</div></div>' +
+      '<div class="act">' +
+      (defs.length && !ghost ? '<button class="actb" onclick="toggleVars(' + i + ')">' + (open ? '收起变量' : '变量') + '</button>' : '') +
+      (ghost ? '<button class="actb warn" onclick="removeOrderEntry(' + i + ')" title="从优先级中移除">✕</button>'
+             : '<button class="actb' + (enabled ? ' dim' : '') + '" onclick="togglePlugin(' + i + ')">' + (enabled ? '停用' : '启用') + '</button>' +
+               '<button class="actb warn" onclick="uninstallPlugin(' + i + ',this)">卸载</button>') +
+      '<button class="actb dim" onclick="moveCfgOrder(' + i + ',-1)">↑</button>' +
+      '<button class="actb dim" onclick="moveCfgOrder(' + i + ',1)">↓</button>' +
+      '</div></div>';
+    if (defs.length && !ghost) {
+      html += '<div class="varpanel" id="varPanel' + i + '" style="display:' + (open ? 'block' : 'none') + ';">';
+      defs.forEach(function (d) {
+        var val = (vp.values && vp.values[d.key]) || '';
+        var isPw = (d.type || '').toLowerCase() === 'password';
+        html += '<div class="vrow"><span class="ellip">' + esc(d.name || d.key) + '</span>' +
+          '<input ' + (isPw ? 'type="password"' : 'type="text"') + ' data-platform="' + esc(pk) + '" data-varkey="' + esc(d.key) + '" placeholder="' + esc(d.key) + '" value="' + esc(val) + '" style="flex:1;min-width:0;"></div>';
+      });
+      html += '<div class="vrow"><span></span><button class="small" onclick="savePluginVars(' + i + ')">保存变量</button></div></div>';
+    }
   });
   box.innerHTML = html;
 }
@@ -2042,16 +2150,98 @@ function moveCfgOrder(i, dir) {
   var j = i + dir;
   if (j < 0 || j >= orderUI.length) return;
   var t = orderUI[i]; orderUI[i] = orderUI[j]; orderUI[j] = t;
-  renderCfgOrder();
+  renderSrcList();
 }
 function removeOrderEntry(i) {
   orderUI.splice(i, 1);
-  renderCfgOrder();
+  renderSrcList();
 }
 function resetCfgOrder() {
   orderUI = knownNames.slice();
-  renderCfgOrder();
-  toast('已重置为插件顺序（尚未保存，请点「保存搜索设置」）');
+  renderSrcList();
+  toast('已重置为插件顺序（尚未保存，请点「保存设置」）');
+}
+function toggleVars(i) {
+  var pk = orderUI[i];
+  if (!pk) return;
+  var panel = el('varPanel' + i);
+  if (!panel) return;
+  var willOpen = panel.style.display === 'none';
+  panel.style.display = willOpen ? 'block' : 'none';
+  window._openVarPlatform = willOpen ? pk : '';
+  renderSrcList();
+}
+function savePluginVars(i) {
+  var pk = orderUI[i];
+  if (!pk) return;
+  var panel = el('varPanel' + i);
+  if (!panel) return;
+  var vars = {};
+  var inputs = panel.querySelectorAll('[data-varkey]');
+  for (var n = 0; n < inputs.length; n++) vars[inputs[n].getAttribute('data-varkey')] = inputs[n].value;
+  post('/api/plugins/vars', { platform: pk, vars: vars }).then(function (d) {
+    toast(d.message || '已保存');
+    loadSearchCfg();
+  }).catch(function () { toast('保存失败'); });
+}
+function togglePlugin(i) {
+  var pk = orderUI[i];
+  if (!pk) return;
+  post('/api/plugins/toggle', { name: pk, enabled: !isPluginEnabled(pk) }).then(function (d) {
+    if (d && d.ok === false) { toast(d.error || '操作失败'); return; }
+    toast(isPluginEnabled(pk) ? '已停用' : '已启用');
+    loadSearchCfg();
+  }).catch(function () { toast('操作失败'); });
+}
+/* 两步确认：不用原生 confirm()——部分手机 WebView 会吞掉弹窗直接返回 false，
+   表现为"点卸载没反应"。第一次点变红显示确认文案，再点执行，超时自动复原。 */
+function armConfirm(btn, msg, fn) {
+  if (btn._armed) {
+    btn._armed = false;
+    clearTimeout(btn._armT);
+    btn.textContent = btn._t0;
+    btn.style.color = '';
+    fn();
+    return;
+  }
+  btn._armed = true;
+  btn._t0 = btn.textContent;
+  btn.textContent = msg;
+  btn.style.color = 'var(--danger)';
+  btn._armT = setTimeout(function () {
+    btn._armed = false;
+    btn.textContent = btn._t0;
+    btn.style.color = '';
+  }, 2600);
+}
+function uninstallPlugin(i, btn) {
+  var pk = orderUI[i];
+  if (!pk) return;
+  armConfirm(btn, '确认卸载?', function () {
+    post('/api/plugins/uninstall', { name: pk }).then(function (d) {
+      if (d && d.ok === false) { toast(d.error || '卸载失败'); return; }
+      toast('已卸载 ' + pk);
+      loadSearchCfg();
+    }).catch(function () { toast('卸载失败'); });
+  });
+}
+function uninstallAll(btn) {
+  if (!plugins.length && !orderUI.length) { toast('当前没有插件'); return; }
+  armConfirm(btn, '确认全部卸载?', function () {
+    btn.disabled = true;
+    post('/api/plugins/uninstallAll', {}).then(function (d) {
+      if (d && d.ok === false) { toast(d.error || '卸载失败'); return; }
+      toast(d.message || '已全部卸载');
+      loadSearchCfg();
+    }).catch(function () { toast('卸载失败'); });
+    setTimeout(function () { btn.disabled = false; }, 800);
+  });
+}
+function isPluginEnabled(pk) {
+  for (var k = 0; k < plugins.length; k++) {
+    if ((plugins[k].platform || plugins[k].name) === pk) return !!plugins[k].enabled;
+  }
+  return false;
 }
 function orderedCfg() {
   return orderUI.slice();
@@ -2064,7 +2254,7 @@ function saveSearchCfg() {
     sortBy: el('cfgSortBy').value,
     asc: el('cfgSortAsc').value === '1',
     maxTotal: parseInt(el('cfgMaxTotal').value || '60', 10) || 60
-  }).then(function (d) { toast(d.message || '已保存'); renderCfgOrder(); })
+  }).then(function (d) { toast(d.message || '已保存'); renderSrcList(); })
     .catch(function () { toast('保存失败'); });
 }
 function saveCfgInline() {
@@ -2409,7 +2599,7 @@ function addSub() {
   if (!url) return;
   post('/api/subscriptions', { url: url }).then(function (d) {
     toast(d.message || '已添加'); el('subUrl').value = '';
-    loadSubs(); loadPlugins();
+    loadSubs(); loadSearchCfg();
   }).catch(function () { toast('添加失败'); });
 }
 function removeSub(btn) {
@@ -2420,37 +2610,8 @@ function removeSub(btn) {
 function syncAll() {
   api('/api/sync', { method: 'POST' }).then(function (d) {
     toast(d.message || '开始同步');
-    setTimeout(function () { loadPlugins(); }, 4000);
+    setTimeout(loadSearchCfg, 4000);
   }).catch(function () { toast('同步失败'); });
-}
-function loadPlugins() {
-  api('/api/plugins').then(function (d) {
-    var list = d.plugins || [];
-    el('pluginCount').textContent = '· ' + list.length + ' 个';
-    var box = el('pluginList');
-    if (!list.length) { box.innerHTML = '<div class="empty">还没有插件，先添加订阅源</div>'; return; }
-    var html = '';
-    list.forEach(function (p, i) {
-      html += '<div class="row">' +
-        '<div class="grow"><div class="ellip" style="font-size:15px;">' + esc(p.platform) + '</div>' +
-        '<div class="muted">' + (p.loadError ? '<span class="badge off">载入失败</span>' : 'v' + esc(p.version) + ' <span class="badge ' + (p.enabled ? 'on' : 'off') + '">' + (p.enabled ? '已启用' : '已停用') + '</span>') + '</div></div>' +
-        '<button class="ghost small" onclick="togglePlugin(' + i + ')">' + (p.enabled ? '停用' : '启用') + '</button> ' +
-        '<button class="danger small" onclick="uninstallPlugin(' + i + ')">卸载</button></div>';
-    });
-    box.innerHTML = html;
-    window._plugins = list;
-  }).catch(function () {});
-}
-function togglePlugin(i) {
-  var p = (window._plugins || [])[i];
-  if (!p) return;
-  post('/api/plugins/toggle', { name: p.name, enabled: !p.enabled }).then(function () { loadPlugins(); loadSearchCfg(); });
-}
-function uninstallPlugin(i) {
-  var p = (window._plugins || [])[i];
-  if (!p) return;
-  if (!confirm('卸载插件「' + p.platform + '」？')) return;
-  post('/api/plugins/uninstall', { name: p.name }).then(function () { loadPlugins(); loadSearchCfg(); });
 }
 
 /* ---------------- 主题 ---------------- */
@@ -2648,7 +2809,7 @@ loadLyric();
 loadPlayer();
 loadFavLists();
 loadSubs();
-loadPlugins();
+loadSearchCfg();
 
 /* 页面切到后台时暂停连接：手机浏览器后台节流定时器不可靠，
    继续收发会在网络差时堆积请求把页面拖死；回到前台立即刷新一次并恢复。 */
