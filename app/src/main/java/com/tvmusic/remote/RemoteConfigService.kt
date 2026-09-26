@@ -272,6 +272,36 @@ class RemoteConfigService : Service() {
                         .put("message", if (n > 0) "已卸载 $n 个插件" else "当前没有插件").toString()
                 )
             }
+            // 备份/恢复：导出 js 地址+订阅+音源顺序（不含源码），导入按地址重新拉取安装
+            method == "GET" && path == "/api/plugins/export" -> {
+                val date = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                    .format(java.util.Date())
+                respondDownload(socket, app().repository.exportBackupJson(), "musicfreetv-backup-$date.json")
+            }
+            method == "POST" && path == "/api/plugins/import" -> {
+                val body = readBody(input, headers)
+                val report = runCatching {
+                    kotlinx.coroutines.runBlocking { app().repository.importBackupJson(body) }
+                }.fold(
+                    onSuccess = { it },
+                    onFailure = {
+                        respond(socket, 400, JSONObject().put("ok", false)
+                            .put("error", "备份文件解析失败: ${it.message}").toString())
+                        return
+                    }
+                )
+                respond(socket, 200, JSONObject()
+                    .put("ok", true)
+                    .put("installed", org.json.JSONArray(report.installed))
+                    .put("skipped", report.skipped)
+                    .put("failed", org.json.JSONArray(report.failed))
+                    .put("message", buildString {
+                        append("恢复完成：成功 ${report.installed.size}")
+                        if (report.skipped > 0) append("，跳过 ${report.skipped}")
+                        if (report.failed.isNotEmpty()) append("，失败 ${report.failed.size}")
+                    }.toString())
+                    .toString())
+            }
             // 用户变量（Cookie/SESSDATA 等）：一套通用接口服务所有插件，
             // 读写均由插件头部的 userVariables 声明驱动，新增插件无需改这里。
             method == "GET" && path == "/api/plugins/vars" -> {
@@ -1776,6 +1806,12 @@ private val PAGE_HTML = """<!DOCTYPE html>
         <button class="ghost small" onclick="el('importFile').click()">⬆ 导入配置</button>
         <input type="file" id="importFile" accept="application/json,.json" style="display:none;" onchange="importConfig(this)">
       </div>
+      <div class="row" style="border:none;padding:10px 0 0;">
+        <button class="small" onclick="exportPluginsBackup()">⬇ 导出插件备份</button>
+        <button class="ghost small" onclick="el('pluginImportFile').click()">⬆ 导入插件备份</button>
+        <input type="file" id="pluginImportFile" accept="application/json,.json" style="display:none;" onchange="importPluginsBackup(this)">
+      </div>
+      <div class="muted" style="padding-top:4px;">插件备份含每个插件各自的 js 地址与音源顺序（不含源码、不含订阅合集），恢复时按地址逐个重新拉取安装。</div>
     </div>
   </section>
 </main>
@@ -2796,6 +2832,38 @@ function exportConfig() {
     setTimeout(function () { document.body.removeChild(a); URL.revokeObjectURL(a.href); }, 200);
     toast('已导出配置');
   }).catch(function () { toast('导出失败'); });
+}
+
+/* ---------------- 插件备份（js 地址+订阅+音源顺序，不含源码） ---------------- */
+function exportPluginsBackup() {
+  // 服务端 respondDownload 带 attachment 头，直接跳转即触发浏览器下载
+  var a = document.createElement('a');
+  a.href = '/api/plugins/export';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () { document.body.removeChild(a); }, 200);
+  toast('已开始下载插件备份');
+}
+function importPluginsBackup(input) {
+  var f = input.files && input.files[0];
+  if (!f) return;
+  var reader = new FileReader();
+  reader.onload = function () {
+    var data;
+    try { data = JSON.parse(reader.result); } catch (e) { toast('文件不是合法 JSON'); input.value = ''; return; }
+    toast('正在恢复插件（按地址拉取安装），请稍候…');
+    post('/api/plugins/import', data).then(function (d) {
+      if (d.ok) {
+        toast(d.message || '恢复完成');
+        loadSubs();
+        loadSearchCfg();
+      } else {
+        toast(d.error || '导入失败');
+      }
+    }).catch(function () { toast('导入失败'); });
+    input.value = '';
+  };
+  reader.readAsText(f);
 }
 function importConfig(input) {
   var f = input.files && input.files[0];

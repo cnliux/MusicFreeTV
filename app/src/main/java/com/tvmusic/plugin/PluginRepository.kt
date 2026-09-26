@@ -375,6 +375,71 @@ class PluginRepository(
         }
     }
 
+    /** 批量导入结果：installed=装好/恢复的项，skipped=已存在跳过数，failed=失败明细。 */
+    data class ImportReport(
+        val installed: List<String>,
+        val skipped: Int,
+        val failed: List<String>
+    )
+
+    /**
+     * 导出插件恢复数据（轻量备份）：每个插件的 js 直链地址 + 音源顺序，不含源码、不含订阅合集。
+     * 订阅安装的插件其 record.url 同为条目级 js 地址（importListJson 传 install 的是条目 url，
+     * 不是订阅地址），所以直接取全部插件地址即可逐个恢复。
+     */
+    fun exportBackupJson(): String {
+        val plugins = org.json.JSONArray()
+        store.loadPlugins()
+            .filter { !it.url.isNullOrBlank() }
+            .forEach { p ->
+                plugins.put(
+                    org.json.JSONObject()
+                        .put("name", p.name)
+                        .put("url", p.url)
+                        .put("enabled", p.enabled)
+                )
+            }
+        val order = org.json.JSONArray()
+        com.tvmusic.config.SearchSettings.load(appContext).sourceOrder.forEach { order.put(it) }
+        return org.json.JSONObject()
+            .put("type", "musicfreetv-plugins")
+            .put("version", 1)
+            .put("exportedAt", System.currentTimeMillis())
+            .put("plugins", plugins)
+            .put("sourceOrder", order)
+            .toString(2)
+    }
+
+    /**
+     * 从备份 JSON 恢复（exportBackupJson 的格式）：
+     * 逐个插件 js 地址拉取安装（清除卸载名单，等同手动导入），最后恢复 sourceOrder。
+     * 不处理订阅源——备份里没有合集地址，恢复的插件独立于订阅存在。
+     */
+    suspend fun importBackupJson(json: String): ImportReport = withContext(Dispatchers.IO) {
+        val root = org.json.JSONObject(json)
+        val installed = mutableListOf<String>()
+        val failed = mutableListOf<String>()
+
+        val arr = root.optJSONArray("plugins") ?: org.json.JSONArray()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val u = o.optString("url", "").trim()
+            if (u.isBlank()) continue
+            val label = o.optString("name", "").ifBlank { u.takeLast(40) }
+            val err = importFromUrl(u)
+            if (err == null) installed.add(label) else failed.add("$label: $err")
+        }
+
+        val order = root.optJSONArray("sourceOrder") ?: org.json.JSONArray()
+        val orderList = (0 until order.length()).map { order.optString(it) }.filter { it.isNotBlank() }
+        if (orderList.isNotEmpty()) {
+            val cur = com.tvmusic.config.SearchSettings.load(appContext)
+            com.tvmusic.config.SearchSettings.save(appContext, cur.copy(sourceOrder = orderList))
+        }
+
+        ImportReport(installed, 0, failed)
+    }
+
     /** 安装/更新：注册到引擎 -> 读元信息 -> 入库。
      *  @param fromSync true=订阅自动同步（命中卸载名单则静默跳过）；false=手动导入（清除名单允许恢复） */
     suspend fun install(
