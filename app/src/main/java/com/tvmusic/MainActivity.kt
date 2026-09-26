@@ -299,6 +299,7 @@ Box(Modifier.focusable().fillMaxSize()) {
                         positionMs = ps.positionMs,
                         durationMs = ps.durationMs,
                         lyricLine = ps.lrcLines.getOrNull(ps.lrcIndex)?.text ?: "",
+                        sourceLabel = ps.sourceLabel,
                         onPrev = { PlayerManager.prev() },
                         onToggle = { PlayerManager.playPause() },
                         onNext = { PlayerManager.next() },
@@ -353,6 +354,7 @@ private fun MiniPlayerBar(
     positionMs: Long,
     durationMs: Long,
     lyricLine: String,
+    sourceLabel: String? = null,
     onPrev: () -> Unit,
     onToggle: () -> Unit,
     onNext: () -> Unit,
@@ -384,6 +386,33 @@ private fun MiniPlayerBar(
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // 最左：来源标签（插件名 · 歌单名，两行小字靠右贴近封面；无来源时占位保持布局平衡）
+            val srcParts = sourceLabel?.split(" · ", limit = 2)
+            Column(
+                modifier = Modifier.width(150.dp),
+                horizontalAlignment = Alignment.End
+            ) {
+                Text(
+                    text = srcParts?.getOrNull(0) ?: "　",
+                    color = primary,
+                    fontSize = 12.sp,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = srcParts?.getOrNull(1) ?: "　",
+                    color = androidx.compose.ui.graphics.Color(0x99FFFFFF),
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+
             // 左：封面（点击进入播放器）
             com.tvmusic.ui.components.Artwork(
                 entry.artwork,

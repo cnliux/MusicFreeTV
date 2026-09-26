@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -210,6 +211,33 @@ fun PlayerScreen(onBack: () -> Unit) {
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // 来源标签（收藏按钮左侧）：插件名 · 歌单名
+                    state.sourceLabel?.takeIf { it.isNotBlank() }?.let { src ->
+                        val parts = src.split(" · ", limit = 2)
+                        Column(
+                            horizontalAlignment = androidx.compose.ui.Alignment.End,
+                            modifier = Modifier.widthIn(max = 200.dp)
+                        ) {
+                            Text(
+                                text = parts.getOrNull(0) ?: "",
+                                fontSize = 14.sp,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.End
+                            )
+                            Text(
+                                text = parts.getOrNull(1) ?: "",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.End
+                            )
+                        }
+                        Spacer(Modifier.width(16.dp))
+                    }
                     // 状态组
                     RoundCtrlButton(
                         if (state.isFavorite) "♥" else "♡",

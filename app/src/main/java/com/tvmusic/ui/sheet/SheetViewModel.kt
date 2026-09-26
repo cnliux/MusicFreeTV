@@ -147,7 +147,10 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
         val list = _entries.value
         if (index !in list.indices) return
         val queue = list.map { QueueEntry(it.optString("platform", plugin), it) }
-        PlayerManager.play(plugin, queue[index], queue, index)
+        PlayerManager.play(
+            plugin, queue[index], queue, index,
+            source = "$plugin · ${_title.value.ifBlank { "歌单" }}"
+        )
     }
 
     /** 播放全部：从头开始按顺序播放整个歌单。 */

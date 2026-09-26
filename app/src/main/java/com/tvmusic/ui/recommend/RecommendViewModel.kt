@@ -28,6 +28,7 @@ class RecommendViewModel(
     private val initialPlatform: String? = null
 ) : ViewModel() {
 
+    private val app = app.applicationContext
     private val runtime = app.runtime
     private val repository = app.repository
 
@@ -74,11 +75,16 @@ class RecommendViewModel(
     }
 
     private suspend fun probePlugins(keepSelection: Boolean = false) {
-        val able = repository.listEnabled().filter { rec ->
-            rec.info != null && rec.loadError == null &&
-                runCatching { runtime.hasMethod(rec.info.platform, "getRecommendSheetsByTag") }
-                    .getOrDefault(false)
-        }
+        // 页签按远程管理「音源与插件」的优先级排列（与首页音源切换器同一套顺序）
+        val cfg = com.tvmusic.config.SearchSettings.load(app)
+        val able = com.tvmusic.config.SearchSettings.ordered(
+            repository.listEnabled().filter { rec ->
+                rec.info != null && rec.loadError == null &&
+                    runCatching { runtime.hasMethod(rec.info.platform, "getRecommendSheetsByTag") }
+                        .getOrDefault(false)
+            },
+            cfg.sourceOrder
+        ) { it.info!!.platform }
         _plugins.value = able
         if (able.isEmpty()) {
             _loading.value = false

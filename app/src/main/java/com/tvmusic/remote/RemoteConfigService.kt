@@ -411,7 +411,7 @@ class RemoteConfigService : Service() {
                 }
                 if (item.optString("platform").isBlank()) item.put("platform", plugin)
                 val entry = com.tvmusic.player.QueueEntry(plugin, item)
-                com.tvmusic.player.PlayerManager.play(plugin, entry, listOf(entry), 0)
+                com.tvmusic.player.PlayerManager.play(plugin, entry, listOf(entry), 0, source = "$plugin · 远程点播")
                 respond(socket, 200, JSONObject().put("ok", true).put("message", "已在电视端开始播放").toString())
             }
             method == "POST" && path == "/api/play/queue" -> {
@@ -437,7 +437,7 @@ class RemoteConfigService : Service() {
                     return
                 }
                 // 首条用其自身来源插件播放，队列内条目解析时各自走粘性引擎
-                com.tvmusic.player.PlayerManager.play(entries.first().plugin, entries.first(), entries, 0)
+                com.tvmusic.player.PlayerManager.play(entries.first().plugin, entries.first(), entries, 0, source = "${entries.first().plugin} · 远程点播")
                 respond(socket, 200, JSONObject().put("ok", true).put("count", entries.size).put("message", "已加入播放列表并开始播放").toString())
             }
             method == "GET" && path == "/api/player" -> {
@@ -663,6 +663,7 @@ class RemoteConfigService : Service() {
                 respond(socket, 200, JSONObject()
                     .put("ok", true)
                     .put("enabled", com.tvmusic.config.MetaSettings.isEnabled)
+                    .put("fallbackOtherSource", com.tvmusic.config.MetaSettings.fallbackOtherSource)
                     .toString())
             }
             method == "POST" && path == "/api/meta" -> {
@@ -670,9 +671,15 @@ class RemoteConfigService : Service() {
                 val json = runCatching { JSONObject(body) }.getOrNull()
                 val on = json?.optBoolean("enabled", com.tvmusic.config.MetaSettings.isEnabled)
                 com.tvmusic.config.MetaSettings.setEnabled(on == true)
+                // 缺省字段保持原值（optBoolean 默认值传当前值）
+                val fb = json?.optBoolean(
+                    "fallbackOtherSource", com.tvmusic.config.MetaSettings.fallbackOtherSource
+                ) ?: com.tvmusic.config.MetaSettings.fallbackOtherSource
+                com.tvmusic.config.MetaSettings.setFallbackOtherSource(fb)
                 respond(socket, 200, JSONObject()
                     .put("ok", true)
                     .put("enabled", com.tvmusic.config.MetaSettings.isEnabled)
+                    .put("fallbackOtherSource", com.tvmusic.config.MetaSettings.fallbackOtherSource)
                     .toString())
             }
             // 无操作自动进入播放器页（电视待机显示）：开关 + 时长（分钟）
@@ -797,7 +804,7 @@ class RemoteConfigService : Service() {
                     com.tvmusic.player.QueueEntry(p, raw)
                 }
                 val first = entries.first()
-                com.tvmusic.player.PlayerManager.play(first.plugin, first, entries, 0)
+                com.tvmusic.player.PlayerManager.play(first.plugin, first, entries, 0, source = "${first.plugin} · ${fl.name}")
                 respond(socket, 200, JSONObject().put("ok", true).put("count", entries.size).put("message", "已开始播放专辑「${fl.name}」").toString())
             }
             else -> respond(socket, 404, JSONObject().put("ok", false).put("error", "not found").toString())
@@ -1755,6 +1762,10 @@ private val PAGE_HTML = """<!DOCTYPE html>
       <div class="row" style="border:none;padding:0 0 6px;">
         <span class="muted" style="flex:1;">歌曲缺少歌词或封面时，按 曲名/歌手 从 lrc.cx 在线补齐</span>
         <button class="small" id="metaToggle" onclick="toggleMeta()">开</button>
+      </div>
+      <div class="row" style="border:none;padding:6px 0 0;">
+        <span class="muted" style="flex:1;">当前音源无法播放时，自动尝试其他插件播放同一首歌（不改变歌单）</span>
+        <button class="small" id="metaFallbackToggle" onclick="toggleMetaFallback()">开</button>
       </div>
     </div>
     <div class="card">
@@ -2774,21 +2785,31 @@ function loadLyric() {
 }
 
 /* ---------------- 歌词/封面补全（lrc.cx） ---------------- */
-var metaCfg = { enabled: true };
+var metaCfg = { enabled: true, fallbackOtherSource: true };
 function renderMeta() {
   el('metaToggle').textContent = metaCfg.enabled ? '开' : '关';
   el('metaToggle').className = 'small' + (metaCfg.enabled ? '' : ' ghost');
+  el('metaFallbackToggle').textContent = metaCfg.fallbackOtherSource ? '开' : '关';
+  el('metaFallbackToggle').className = 'small' + (metaCfg.fallbackOtherSource ? '' : ' ghost');
 }
 function toggleMeta() {
-  var body = { enabled: !metaCfg.enabled };
-  post('/api/meta', body).then(function (d) {
-    if (d.ok) { metaCfg = { enabled: d.enabled }; renderMeta(); }
+  // 只改 enabled；fallbackOtherSource 由服务端保持原值（缺省字段不覆盖）
+  post('/api/meta', { enabled: !metaCfg.enabled }).then(function (d) {
+    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource }; renderMeta(); }
+  }).catch(function () { toast('保存失败'); });
+}
+function toggleMetaFallback() {
+  post('/api/meta', { enabled: metaCfg.enabled, fallbackOtherSource: !metaCfg.fallbackOtherSource }).then(function (d) {
+    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource }; renderMeta(); toast(d.fallbackOtherSource ? '已开启换插件救场' : '已关闭换插件救场'); }
   }).catch(function () { toast('保存失败'); });
 }
 function loadMeta() {
   api('/api/meta').then(function (d) {
     if (d.ok) {
-      metaCfg = { enabled: d.enabled != null ? d.enabled : true };
+      metaCfg = {
+        enabled: d.enabled != null ? d.enabled : true,
+        fallbackOtherSource: d.fallbackOtherSource != null ? d.fallbackOtherSource : true
+      };
       renderMeta();
     }
   }).catch(function () {});

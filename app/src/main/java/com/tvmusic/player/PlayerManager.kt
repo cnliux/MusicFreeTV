@@ -80,7 +80,9 @@ data class PlayerUiState(
     /** 均衡器预设序号：0 = 原声（平直），1..N = 系统预设。 */
     val eqPreset: Int = 0,
     /** 瞬时提示（如 lrc.cx 兜底进度/结果），播放页短暂展示后自动清除。 */
-    val metaNotice: String? = null
+    val metaNotice: String? = null,
+    /** 来源标签（「插件名 · 歌单名」，如「wx · 华语热歌」），迷你播放器与播放页展示。 */
+    val sourceLabel: String? = null
 )
 
 /**
@@ -145,6 +147,10 @@ object PlayerManager {
 
     /** 连续播放失败计数：达到阈值则停止自动跳下一曲，避免整队列快速空转。 */
     private var errorStreak = 0
+
+    /** 已尝试过「换插件救场」重试的条目 key（取流失败每条目只自动换源一次，防死循环）。 */
+    @Volatile
+    private var fallbackTriedFor: String? = null
 
     /**
      * 播放会话代数：每次 play() 自增。getMediaSource 是异步解析，快速连点两首歌时
@@ -305,6 +311,13 @@ object PlayerManager {
     fun attach(runtime: PluginRuntime) {
         this.runtime = runtime
     }
+
+    /** 插件仓库引用：供「换插件救场」枚举其他可用音源（见 [tryFallbackSource]）。 */
+    fun attachRepository(repo: com.tvmusic.plugin.PluginRepository) {
+        this.repository = repo
+    }
+
+    private var repository: com.tvmusic.plugin.PluginRepository? = null
 
     fun attachPlaybackStore(store: com.tvmusic.data.PlaybackStore) {
         this.playbackStore = store
@@ -490,6 +503,20 @@ object PlayerManager {
         }
 
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+            // 解析成功但取流失败（链接过期/404 等）：给「换插件救场」一次机会。
+            // 每条目只试一次（fallbackTriedFor 按条目 key 去重），换源后仍失败则照常报错跳曲。
+            val st = _uiState.value
+            val entry = st.current
+            val key = entry?.let { entryKeyOf(it) }
+            if (com.tvmusic.config.MetaSettings.fallbackOtherSource &&
+                entry != null && key != null && key != fallbackTriedFor &&
+                st.queue.isNotEmpty()
+            ) {
+                fallbackTriedFor = key
+                android.util.Log.i("PlayerManager", "player error [$key], retry via other source")
+                play(entry.plugin, entry, st.queue, st.queueIndex, forceFallback = true)
+                return
+            }
             reportPlayError(friendlyPlaybackError(error))
         }
 
@@ -602,12 +629,17 @@ object PlayerManager {
         item: QueueEntry,
         queue: List<QueueEntry>? = null,
         startIndex: Int = 0,
-        startOffsetMs: Long = 0
+        startOffsetMs: Long = 0,
+        /** 来源标签「插件名 · 歌单名」；null 保留原值（切歌/恢复场景），空串清除。 */
+        source: String? = null,
+        /** true = 跳过本插件解析，直接走「其他插件」换源（取流失败重试路径）。 */
+        forceFallback: Boolean = false
     ) {
         // 插件解析（含阻塞式 JS 调用）放 Default 线程；
         // ExoPlayer 只能在主线程访问，拿到地址后必须切回主线程。
         val my = playSession.incrementAndGet()
         lastLyricKey = null // 新会话重置：重播/切歌后重试同一首歌时不再因旧 key 被跳过
+        if (!forceFallback) fallbackTriedFor = null // 用户主动播放：重新给一次换源机会
         scope.launch(Dispatchers.Default) {
             try {
                 // 快速连点时本协程可能已过期（更新的切歌请求接管）：必须先校验再写状态。
@@ -627,7 +659,9 @@ object PlayerManager {
                         current = shown,
                         queue = effectiveQueue,
                         queueIndex = startIndex,
-                        error = null
+                        error = null,
+                        // 来源标签随新会话更新：null=保留（切歌/续播），空串=清除
+                        sourceLabel = if (source == null) it.sourceLabel else source.ifBlank { null }
                     )
                 }
                 // 队列内容/索引已变化：调度防抖写入恢复快照
@@ -640,43 +674,49 @@ object PlayerManager {
                         it.quality == quality &&
                             android.os.SystemClock.elapsedRealtime() - it.atMs < PRELOAD_TTL_MS
                     }
-                val media = if (cached != null) cached.media else {
-                    // 走粘性引擎路由（平台 home 引擎）：1) 不与 primary 上的首页/详情/
-                    // 搜索分页等流量互相排队（引擎 invokeLock 全局串行，主引擎被慢源
-                    // 占住时点击播放会延迟几十秒才出声）；2) 复用该平台搜索时在 home
-                    // 引擎上建立的模块级状态（cookie/token），解析更快更稳。
-                    val result = rt.callParallel(
-                        plugin, "getMediaSource",
-                        listOf(item.raw.toString(), quality)
-                    )
-                    when (result) {
-                        is JSONObject -> result
-                        is NotImplementedError -> JSONObject()
-                        else -> {
-                            // 部分插件按列表返回
-                            val arr = result as? org.json.JSONArray
-                            arr?.optJSONObject(0) ?: JSONObject()
+                // 走粘性引擎路由（平台 home 引擎）：1) 不与 primary 上的首页/详情/
+                // 搜索分页等流量互相排队（引擎 invokeLock 全局串行，主引擎被慢源
+                // 占住时点击播放会延迟几十秒才出声）；2) 复用该平台搜索时在 home
+                // 引擎上建立的模块级状态（cookie/token），解析更快更稳。
+                // 预加载命中时直接复用缓存的 media，跳过 QuickJS 解析。
+                // forceFallback（取流失败重试）：跳过本插件解析，直接换其他音源。
+                val cachedMedia = if (forceFallback) null else cached?.media
+                val media = cachedMedia ?: if (forceFallback) null else resolveMediaSource(rt, plugin, item.raw)
+                // media == null 表示 getMediaSource 抛错（版权/会员/插件过期）。
+                val primaryFailed = media == null && !forceFallback
+                var url = media?.optString("url").orEmpty()
+                var headers = media?.let { parseMediaHeaders(it) } ?: emptyMap()
+                var viaPlugin = plugin
+                // FLV 直链 ExoPlayer 无对应解封装器，必然失败（换下一曲也一样）。
+                val flv = url.isNotBlank() &&
+                    url.substringBefore('?').substringBefore('#').endsWith(".flv", ignoreCase = true)
+                // 主音源不可播放（解析异常 / 空地址 / FLV / 取流失败重试）时，尝试用「其他插件」播放同一首歌：
+                // 只替换实际取流来源，队列条目 / mediaId / 历史 / 歌词 / 来源标签全部保持原样，
+                // 因此不改变歌单，也不与 playSession 切歌守卫、onMediaItemTransition 定位冲突。
+                if (url.isBlank() || flv || forceFallback) {
+                    if (com.tvmusic.config.MetaSettings.fallbackOtherSource) {
+                        tryFallbackSource(rt, item, my)?.let { fb ->
+                            url = fb.url
+                            headers = fb.headers
+                            viaPlugin = fb.plugin
                         }
                     }
+                    if (url.isBlank()) {
+                        // 兜底也没找到可播来源：按原始失败原因提示。FLV 属硬限制不自动跳曲。
+                        reportPlayError(
+                            when {
+                                flv -> "该音源为 FLV 直链，当前设备暂不支持播放"
+                                forceFallback -> "播放失败：其他音源也没有该歌曲的可播放地址"
+                                primaryFailed -> "音源解析失败：可能是该歌曲有版权/会员限制，或插件需要更新"
+                                else -> "该音源未返回可播放地址（可能需配置用户变量或 VIP）"
+                            },
+                            autoSkip = !flv
+                        )
+                        return@launch
+                    }
                 }
-                val url = media.optString("url")
-                if (url.isBlank()) {
-                    reportPlayError("该音源未返回可播放地址（可能需配置用户变量或 VIP）")
-                    return@launch
-                }
-                // FLV 直链 ExoPlayer 无对应解封装器，必然失败；换下一曲也一样，
-                // 所以只明确提示、不自动跳曲，也不 setMediaItem。
-                val pathOnly = url.substringBefore('?').substringBefore('#')
-                if (pathOnly.endsWith(".flv", ignoreCase = true)) {
-                    reportPlayError("该音源为 FLV 直链，当前设备暂不支持播放", autoSkip = false)
-                    return@launch
-                }
-                val headers = media.optJSONObject("headers")?.let { h ->
-                    val map = LinkedHashMap<String, String>()
-                    val names = h.names() ?: return@let map
-                    for (i in 0 until names.length()) map[names.getString(i)] = h.getString(names.getString(i))
-                    map
-                } ?: emptyMap()
+                if (my != playSession.get()) return@launch
+                if (viaPlugin != plugin) showMetaNotice("已切换「$viaPlugin」音源播放本曲")
                 // 记住本次请求头：通知栏封面（BitmapLoader）沿用同一套认证头
                 activeHeaders = headers
 
@@ -730,6 +770,104 @@ object PlayerManager {
             }
         }
     }
+
+    /** 解析插件 getMediaSource 返回的 headers 为有序 Map。 */
+    private fun parseMediaHeaders(media: JSONObject): Map<String, String> {
+        val h = media.optJSONObject("headers") ?: return emptyMap()
+        val map = LinkedHashMap<String, String>()
+        val names = h.names() ?: return map
+        for (i in 0 until names.length()) runCatching {
+            map[names.getString(i)] = h.getString(names.getString(i))
+        }
+        return map
+    }
+
+    /**
+     * 调用 [plugin] 的 getMediaSource 解析真实音源。
+     * 返回解析后的 media JSON（可能 url 为空，表示插件无该曲地址）；
+     * 返回 null 表示调用抛错（版权/会员限制或插件过期）。
+     */
+    private suspend fun resolveMediaSource(
+        rt: PluginRuntime, plugin: String, raw: JSONObject
+    ): JSONObject? = try {
+        when (val result = rt.callParallel(plugin, "getMediaSource", listOf(raw.toString(), quality))) {
+            is JSONObject -> result
+            is NotImplementedError -> JSONObject()
+            else -> (result as? JSONArray)?.optJSONObject(0) ?: JSONObject()
+        }
+    } catch (e: com.tvmusic.runtime.PluginCallException) {
+        android.util.Log.w("PlayerManager", "getMediaSource failed on $plugin: ${e.message}")
+        null
+    } catch (e: Exception) {
+        android.util.Log.w("PlayerManager", "getMediaSource error on $plugin: ${e.message}")
+        null
+    }
+
+    /** 换插件救场命中的可播放来源。 */
+    private data class FallbackSource(val plugin: String, val url: String, val headers: Map<String, String>)
+
+    /**
+     * 主音源不可播放时，在其他已启用插件中按「曲名+歌手」搜索同一首歌，
+     * 逐个尝试解析出可播放地址（跳过 FLV），命中第一个即返回。
+     * 全程受 [playSession] 守卫：用户已切歌则立即放弃，绝不覆盖新歌。
+     * 不改动队列条目本身——只借用其他插件的取流地址播放同一首歌。
+     */
+    private suspend fun tryFallbackSource(
+        rt: PluginRuntime, item: QueueEntry, my: Int
+    ): FallbackSource? {
+        val repo = repository ?: return null
+        if (item.title.isBlank()) return null
+        val order = com.tvmusic.config.SearchSettings.load(context ?: return null).sourceOrder
+        val candidates = com.tvmusic.config.SearchSettings.ordered(
+            repo.listEnabled()
+                .filter { it.info != null && it.loadError == null }
+                .map { it.info!!.platform }
+                .filter { it != item.plugin },
+            order
+        )
+        if (candidates.isEmpty()) return null
+        showMetaNotice("正在尝试其他音源播放「${item.title}」…")
+        val artist = item.artist
+        for (platform in candidates) {
+            if (my != playSession.get()) return null
+            val matched = searchMusicOn(rt, platform, item.title, artist) ?: continue
+            if (my != playSession.get()) return null
+            val media = resolveMediaSource(rt, platform, matched) ?: continue
+            val url = media.optString("url")
+            if (url.isBlank()) continue
+            if (url.substringBefore('?').substringBefore('#').endsWith(".flv", ignoreCase = true)) continue
+            return FallbackSource(platform, url, parseMediaHeaders(media))
+        }
+        return null
+    }
+
+    /** 在 [platform] 上搜「title artist」，返回标题（近似）匹配的第一条 music 条目 raw；无则 null。 */
+    private suspend fun searchMusicOn(
+        rt: PluginRuntime, platform: String, title: String, artist: String
+    ): JSONObject? {
+        val res = try {
+            val query = if (artist.isBlank()) title else "$title $artist"
+            rt.callParallel(platform, "search", listOf(query, "1", "music"), timeoutMs = 12_000)
+        } catch (e: Exception) {
+            return null
+        }
+        if (res is NotImplementedError) return null
+        val arr = (res as? JSONObject)?.optJSONArray("data") ?: (res as? JSONArray) ?: return null
+        val want = normalizeName(title)
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val t = normalizeName(o.optString("title", ""))
+            if (t.isNotEmpty() && (t == want || t.contains(want) || want.contains(t))) {
+                if (o.optString("platform").isBlank()) o.put("platform", platform)
+                return o
+            }
+        }
+        return null
+    }
+
+    /** 歌名归一化：转小写、去掉空格与常见标点，便于跨插件标题比对。 */
+    private fun normalizeName(s: String): String =
+        s.lowercase().filter { it.isLetterOrDigit() }
 
     fun skipTo(index: Int) {
         val st = _uiState.value

@@ -134,7 +134,7 @@ fun MyListScreen(
                             .clip(RoundedCornerShape(8.dp))
                             .background(MaterialTheme.colorScheme.primary)
                             .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                            .clickable { playAll(list) }
+                            .clickable { playAll(list, currentList?.name ?: "播放记录") }
                             .padding(horizontal = 16.dp, vertical = 8.dp)
                     ) {
                         Text(
@@ -223,7 +223,7 @@ key = { i, e ->
                     val key = itemKey(item)
                     HistoryRow(
                         item = item,
-                        onPlay = { if (!batchMode) playItem(item) },
+                        onPlay = { if (!batchMode) playItem(item, currentList?.name ?: "播放记录") },
                         onRemove = {
                             val lid = selectedListId
                             if (lid != null) {
@@ -444,19 +444,19 @@ private fun HistoryRow(
 }
 
 /** 播放单首：把该条目作为单元素队列送入 PlayerManager。 */
-private fun playItem(item: JSONObject) {
+private fun playItem(item: JSONObject, sourceName: String) {
     val plugin = item.optString("platform", "")
     if (plugin.isBlank()) return
     val entry = QueueEntry(plugin, item)
-    PlayerManager.play(plugin, entry, listOf(entry), 0)
+    PlayerManager.play(plugin, entry, listOf(entry), 0, source = "$plugin · $sourceName")
 }
 
 /** 播放整个列表：所有有效条目组成队列，从第一首开始播。 */
-private fun playAll(items: List<JSONObject>) {
+private fun playAll(items: List<JSONObject>, sourceName: String) {
     val entries = items.mapNotNull { item ->
         val plugin = item.optString("platform", "")
         if (plugin.isBlank()) null else QueueEntry(plugin, item)
     }
     if (entries.isEmpty()) return
-    PlayerManager.play(entries[0].plugin, entries[0], entries, 0)
+    PlayerManager.play(entries[0].plugin, entries[0], entries, 0, source = "${entries[0].plugin} · $sourceName")
 }

@@ -43,6 +43,7 @@ class TvMusicApp : Application() {
 
         PlayerManager.init(this)
         PlayerManager.attach(runtime)
+        PlayerManager.attachRepository(repository)
         PlayerManager.attachPlaybackStore(playback)
         // 启动时异步读取上次的播放快照（供首页「继续播放」对话框）
         PlayerManager.loadResumeAsync()

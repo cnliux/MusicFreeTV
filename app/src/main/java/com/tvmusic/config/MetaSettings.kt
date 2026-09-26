@@ -13,25 +13,40 @@ object MetaSettings {
 
     private const val PREFS = "meta_prefs"
     private const val KEY_ENABLED = "enabled"
+    private const val KEY_FALLBACK_SRC = "fallbackOtherSource"
 
     /** LrcApi 服务根地址（只读常量，响应内容由 api.lrc.cx 决定）。 */
     const val BASE = "https://api.lrc.cx"
 
     private val enabled = java.util.concurrent.atomic.AtomicBoolean(true)
+    private val fallbackSrc = java.util.concurrent.atomic.AtomicBoolean(true)
     private var appContext: Context? = null
 
     val isEnabled: Boolean get() = enabled.get()
 
+    /**
+     * 无法播放时是否尝试用其他插件播放同一首歌（不改变当前歌单队列）。
+     * 默认开启。
+     */
+    val fallbackOtherSource: Boolean get() = fallbackSrc.get()
+
     fun init(context: Context) {
         appContext = context.applicationContext
-        enabled.set(appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.getBoolean(KEY_ENABLED, true) ?: true)
+        val sp = appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        enabled.set(sp?.getBoolean(KEY_ENABLED, true) ?: true)
+        fallbackSrc.set(sp?.getBoolean(KEY_FALLBACK_SRC, true) ?: true)
     }
 
     fun setEnabled(on: Boolean) {
         enabled.set(on)
         appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             ?.edit()?.putBoolean(KEY_ENABLED, on)?.apply()
+    }
+
+    fun setFallbackOtherSource(on: Boolean) {
+        fallbackSrc.set(on)
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.edit()?.putBoolean(KEY_FALLBACK_SRC, on)?.apply()
     }
 
     private fun enc(s: String): String =

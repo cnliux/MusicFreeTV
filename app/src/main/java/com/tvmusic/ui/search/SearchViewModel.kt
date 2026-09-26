@@ -402,7 +402,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             .map { QueueEntry(it.plugin, it.raw) }
         val idx = queue.indexOfFirst { it.raw == entry.raw }.coerceAtLeast(0)
         if (queue.isNotEmpty()) {
-            PlayerManager.play(entry.plugin, queue[idx], queue, idx)
+            PlayerManager.play(entry.plugin, queue[idx], queue, idx, source = "${entry.plugin} · 搜索结果")
         }
     }
 
