@@ -129,6 +129,43 @@ class PluginStore(context: Context) {
         return out
     }
 
+    /**
+     * 元数据轻量查询：不读 source 大字段（单个插件源码可达数百 KB~MB）。
+     * 供列表展示 / 仓库 StateFlow / 远程管理使用——这些场景只看 name/info/enabled/
+     * loadError/hash，从不碰源码。旧实现每次刷新都物化全部源码，多插件时造成
+     * 数 MB 级分配抖动，电视端表现为远程管理插件页操作后整机卡死。
+     * 需要源码的场景（warmup 注册引擎）仍走 [loadPlugins]。
+     */
+    @Synchronized
+    fun loadPluginMetas(): List<PluginRecord> {
+        val out = mutableListOf<PluginRecord>()
+        val db = helper.readableDatabase
+        val c = db.query(
+            "plugins",
+            arrayOf("name", "url", "version", "enabled", "installed_at", "plugin_info", "load_error", "hash"),
+            null, null, null, null,
+            "installed_at ASC"
+        )
+        c.use {
+            while (it.moveToNext()) {
+                out.add(
+                    PluginRecord(
+                        name = it.getString(0),
+                        url = it.getString(1) ?: "",
+                        version = it.getString(2) ?: "",
+                        enabled = it.getInt(3) == 1,
+                        installedAt = it.getLong(4),
+                        source = null,
+                        info = parseInfo(it.getString(5)),
+                        loadError = it.getString(6),
+                        hash = it.getString(7) ?: ""
+                    )
+                )
+            }
+        }
+        return out
+    }
+
     /** 读取可选字符串字段：缺失/NULL/空串统一返回 null（避免 optString(key, null) 的类型不匹配警告）。 */
     private fun optStr(o: JSONObject, key: String): String? = o.optString(key).takeIf { it.isNotEmpty() }
 

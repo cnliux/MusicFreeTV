@@ -859,7 +859,9 @@ class RemoteConfigService : Service() {
 
     private fun pluginsJson(): JSONObject {
         val arr = JSONArray()
-        app().store.loadPlugins().map { it.takeIf { p -> p.info != null } }
+        // 元数据查询：远程管理只需要 name/platform/version/enabled/loadError，
+        // 不读源码大字段（旧实现每次打开插件页都物化全部源码，电视端内存抖动卡死）
+        app().store.loadPluginMetas().map { it.takeIf { p -> p.info != null } }
             .filterNotNull()
             .forEach { p ->
                 arr.put(
@@ -881,7 +883,8 @@ class RemoteConfigService : Service() {
      */
     private fun pluginVarsJson(): JSONObject {
         val arr = JSONArray()
-        app().store.loadPlugins().forEach { p ->
+        // 同 pluginsJson：元数据查询，避免每次变量视图都物化全部插件源码
+        app().store.loadPluginMetas().forEach { p ->
             val defs = p.info?.userVariables.orEmpty()
             if (defs.isEmpty()) return@forEach
             val pk = p.info?.platform?.takeIf { it.isNotBlank() } ?: p.name

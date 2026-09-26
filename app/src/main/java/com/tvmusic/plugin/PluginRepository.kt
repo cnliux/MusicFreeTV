@@ -97,7 +97,8 @@ class PluginRepository(
     }
 
     fun refreshFromDb() {
-        _plugins.value = store.loadPlugins()
+        // 元数据轻量查询：StateFlow 常驻内存，不放源码（warmup 注册用全量查询，互不影响）
+        _plugins.value = store.loadPluginMetas()
         _subscribed.value = store.listSubscriptions().map { it.url }
     }
 
@@ -368,7 +369,8 @@ class PluginRepository(
             // 唯一 id：源码指纹。同一份源码（哪怕订阅里名字不同）只安装一次，
             // 防止重复注册进 JS 引擎互相覆盖 platform。
             val hash = sourceHash(js)
-            val existing = store.loadPlugins()
+            // 去重与更新判定只需要 hash/enabled/installedAt，元数据查询即可（不物化全部旧源码）
+            val existing = store.loadPluginMetas()
             existing.firstOrNull { it.hash.isNotEmpty() && it.hash == hash }?.let { dup ->
                 Log.i("PluginRepository", "skip duplicate source: ${dup.name} ($name)")
                 return@withContext null
