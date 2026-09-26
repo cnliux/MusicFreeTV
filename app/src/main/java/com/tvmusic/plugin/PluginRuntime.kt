@@ -202,7 +202,7 @@ class PluginRuntime private constructor(
     private fun ensureRegistered(lane: Int, platform: String) {
         if (lane >= laneRegistered.size) return
         if (synchronized(laneLock) { platform in laneRegistered[lane] }) return
-        val source = platformSources[platform] ?: return
+        val source = synchronized(laneLock) { platformSources[platform] } ?: return
         val engine = lanes.getOrNull(lane) ?: return
         synchronized(laneRegisterLocks[lane]) {
             // 双重检查：同引擎同平台的并发调用只注册一次
@@ -252,7 +252,9 @@ class PluginRuntime private constructor(
      * 同时缓存“平台 → 源码”，供新扩容引擎按需注册（无需回查 DB/网络）。
      */
     suspend fun loadPlugin(platform: String, source: String): Boolean = withContext(Dispatchers.IO) {
-        platformSources[platform] = source
+        synchronized(laneLock) {
+            platformSources[platform] = source
+        }
         val targets = lanes.toList()
         val ok = targets.all { it.registerPlugin(platform, source) }
         if (ok) {
