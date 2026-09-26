@@ -218,8 +218,18 @@ class RemoteConfigService : Service() {
                 }
                 val repo = app().repository
                 repo.addSubscription(url)
+                var msg = "已添加订阅并同步"
+                if (url.substringBefore('?').endsWith(".js", ignoreCase = true)) {
+                    // js 直链：等安装完成再响应，把真实结果告诉用户。
+                    // 旧实现只加订阅后异步同步，安装失败（下载失败/引擎注册超时）时
+                    // 用户只看到列表里没有插件 + 配置残留的"已卸载"幽灵行，无从排查。
+                    val err = runCatching {
+                        kotlinx.coroutines.runBlocking { repo.importFromUrl(url) }
+                    }.getOrNull()
+                    msg = if (err == null) "插件安装成功" else "插件安装失败：$err"
+                }
                 repo.syncAll(force = true)
-                respond(socket, 200, JSONObject().put("ok", true).put("message", "已添加订阅并同步").toString())
+                respond(socket, 200, JSONObject().put("ok", true).put("message", msg).toString())
             }
             method == "POST" && path == "/api/subscriptions/remove" -> {
                 val body = readBody(input, headers)
@@ -633,6 +643,29 @@ class RemoteConfigService : Service() {
                 respond(socket, 200, JSONObject()
                     .put("ok", true)
                     .put("enabled", com.tvmusic.config.MetaSettings.isEnabled)
+                    .toString())
+            }
+            // 无操作自动进入播放器页（电视待机显示）：开关 + 时长（分钟）
+            method == "GET" && path == "/api/idle" -> {
+                respond(socket, 200, JSONObject()
+                    .put("ok", true)
+                    .put("enabled", com.tvmusic.config.IdleSettings.isEnabled)
+                    .put("minutes", com.tvmusic.config.IdleSettings.currentMinutes)
+                    .toString())
+            }
+            method == "POST" && path == "/api/idle" -> {
+                val body = readBody(input, headers)
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                if (json?.has("enabled") == true) {
+                    com.tvmusic.config.IdleSettings.setEnabled(json.optBoolean("enabled", true))
+                }
+                if (json?.has("minutes") == true) {
+                    com.tvmusic.config.IdleSettings.setMinutes(json.optInt("minutes", 1))
+                }
+                respond(socket, 200, JSONObject()
+                    .put("ok", true)
+                    .put("enabled", com.tvmusic.config.IdleSettings.isEnabled)
+                    .put("minutes", com.tvmusic.config.IdleSettings.currentMinutes)
                     .toString())
             }
             method == "GET" && path == "/api/export" -> {
@@ -1695,6 +1728,18 @@ private val PAGE_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="card">
+      <h2>待机显示</h2>
+      <div class="row" style="border:none;padding:0 0 6px;">
+        <span class="muted" style="flex:1;">无操作达设定时长且正在播放时，电视自动进入播放器页</span>
+        <button class="small" id="idleToggle" onclick="toggleIdle()">开</button>
+      </div>
+      <div class="row" style="border:none;padding:6px 0 0;">
+        <span class="muted" style="flex:1;">无操作时长（分钟，1-60）</span>
+        <input type="number" id="idleMinutes" min="1" max="60" style="width:78px;flex:none;">
+        <button class="small" onclick="saveIdleMinutes()">保存</button>
+      </div>
+    </div>
+    <div class="card">
       <h2>音源与插件 <span id="pluginCount" class="muted"></span></h2>
       <div class="muted" style="padding:0 0 8px;">每行一个音源插件：启用/停用、配置登录变量、调整搜索优先级（越靠上越先搜索、结果越靠前），都在这一行里完成。</div>
       <div class="row" style="border:none;padding:0 0 8px;flex-wrap:wrap;gap:8px;">
@@ -1805,7 +1850,7 @@ function switchTab(name) {
   if (name === 'fav') loadFavLists();
   if (name === 'history') loadHistory();
   if (name === 'search') loadSearchCfg();
-  if (name === 'manage') { loadSubs(); loadSearchCfg(); loadLyric(); loadMeta(); }
+  if (name === 'manage') { loadSubs(); loadSearchCfg(); loadLyric(); loadMeta(); loadIdle(); }
 }
 
 /* ---------------- 播放器 ---------------- */
@@ -2080,8 +2125,15 @@ function renderSrcList() {
   var cnt = el('pluginCount');
   if (cnt) cnt.textContent = plugins.length ? '· ' + plugins.length + ' 个' : '';
   if (!orderUI.length) { box.innerHTML = '<div class="empty">还没有音源插件，先在下方添加订阅源</div>'; return; }
+  /* 兜底：插件库里存在但不在配置顺序中的音源（如 js 直链导入后未触发配置保存）
+     追加到末尾显示——绝不隐藏已安装的插件，否则用户会误以为导入失败。 */
+  var list = orderUI.slice();
+  plugins.forEach(function (p) {
+    var key = p.platform || p.name;
+    if (key && list.indexOf(key) < 0) list.push(key);
+  });
   var html = '';
-  orderUI.forEach(function (pk, i) {
+  list.forEach(function (pk, i) {
     var p = null;
     for (var k = 0; k < plugins.length; k++) {
       if ((plugins[k].platform || plugins[k].name) === pk) { p = plugins[k]; break; }
@@ -2703,6 +2755,31 @@ function loadMeta() {
       metaCfg = { enabled: d.enabled != null ? d.enabled : true };
       renderMeta();
     }
+  }).catch(function () {});
+}
+
+/* ---------------- 待机显示（无操作自动进入播放器页） ---------------- */
+var idleCfg = { enabled: true, minutes: 1 };
+function renderIdle() {
+  el('idleToggle').textContent = idleCfg.enabled ? '开' : '关';
+  el('idleToggle').className = 'small' + (idleCfg.enabled ? '' : ' ghost');
+  if (document.activeElement !== el('idleMinutes')) el('idleMinutes').value = idleCfg.minutes || 1;
+}
+function toggleIdle() {
+  post('/api/idle', { enabled: !idleCfg.enabled }).then(function (d) {
+    if (d.ok) { idleCfg = { enabled: d.enabled, minutes: d.minutes }; renderIdle(); toast(d.enabled ? '已开启待机显示' : '已关闭待机显示'); }
+  }).catch(function () { toast('保存失败'); });
+}
+function saveIdleMinutes() {
+  var m = parseInt(el('idleMinutes').value || '1', 10) || 1;
+  if (m < 1) m = 1; if (m > 60) m = 60;
+  post('/api/idle', { minutes: m }).then(function (d) {
+    if (d.ok) { idleCfg = { enabled: d.enabled, minutes: d.minutes }; renderIdle(); toast('已保存：无操作 ' + d.minutes + ' 分钟进入播放器'); }
+  }).catch(function () { toast('保存失败'); });
+}
+function loadIdle() {
+  api('/api/idle').then(function (d) {
+    if (d.ok) { idleCfg = { enabled: d.enabled != null ? d.enabled : true, minutes: d.minutes || 1 }; renderIdle(); }
   }).catch(function () {});
 }
 

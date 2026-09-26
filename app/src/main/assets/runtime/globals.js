@@ -4,7 +4,7 @@
 //   nativeBridge.log(level, msg)
 //   nativeBridge.scheduleTimer(id, ms)
 //   nativeBridge.httpRequest(method, url, headersJson, body)
-//   nativeBridge.getUserVariables()
+//   nativeBridge.getUserVariables(platform)
 
 (function (global) {
     'use strict';

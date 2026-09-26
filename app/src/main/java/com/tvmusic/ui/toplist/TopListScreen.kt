@@ -52,7 +52,8 @@ fun TopListScreen(
             contentPadding = PaddingValues(horizontal = 28.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            items(plugins, key = { it.info!!.platform }) { rec ->
+            // key 拼插件名：不同插件可能声明同一 platform，裸 platform 会重复 key 闪退
+            items(plugins, key = { "${it.info!!.platform}_${it.name}" }) { rec ->
                 val platform = rec.info!!.platform
                 FilterChip(
                     label = rec.name,

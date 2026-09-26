@@ -6,44 +6,65 @@
 
     var AuthType = { Password: 'password', None: 'none' };
 
-    function stripPrefix(name) {
-        return String(name).replace(/^[^:>]*:/, '');
-    }
+    var AUDIO_EXT = {
+        mp3: 'audio/mpeg', flac: 'audio/flac', wav: 'audio/wav', aac: 'audio/aac',
+        m4a: 'audio/mp4', ogg: 'audio/ogg', opus: 'audio/opus', wma: 'audio/x-ms-wma',
+        ape: 'audio/x-ape', dsf: 'audio/x-dsf', dff: 'audio/x-dff'
+    };
 
     function xmlRe(xml, tag) {
-        var re = new RegExp('<' + tag + '\\b[^>]*>([\\s\\S]*?)<\\/' + tag + '>', 'i');
+        var re = new RegExp('<(?:[^:>\\s]+:)?' + tag + '\\b[^>]*>([\\s\\S]*?)<\\/(?:[^:>\\s]+:)?' + tag + '>', 'i');
         var m = re.exec(xml);
         return m ? m[1].trim() : '';
     }
 
+    function guessMime(name, declared) {
+        if (declared && /^audio\//i.test(declared)) return declared;
+        var ext = String(name).split('.').pop().toLowerCase();
+        return AUDIO_EXT[ext] || declared || '';
+    }
+
     function parseResponses(xml) {
         var items = [];
-        var parts = xml.split(/<[^:>]*:?response\b[^>]*>/i);
+        var parts = xml.split(/<(?:[^:>\s]+:)?response\b[^>]*>/i);
         for (var i = 1; i < parts.length; i++) {
-            var block = parts[i].split(/<\/[^:>]*:?response>/i)[0];
+            var block = parts[i].split(/<\/(?:[^:>\s]+:)?response>/i)[0];
             if (!block) continue;
             var href = xmlRe(block, 'href');
-            var basename = decodeURIComponent(String(href).split('/').filter(Boolean).pop() || '');
+            try { href = decodeURIComponent(href); } catch (e) { /* keep raw */ }
+            var basename = String(href).split('/').filter(Boolean).pop() || '';
+            try { basename = decodeURIComponent(basename); } catch (e) { /* keep */ }
             var typeEl = xmlRe(block, 'resourcetype');
-            var isDir = /collection/i.test(typeEl);
+            var isDir = /collection/i.test(typeEl) || /<(?:[^:>\s]+:)?collection\b/i.test(block);
             var mime = xmlRe(block, 'getcontenttype');
             var sizeStr = xmlRe(block, 'getcontentlength');
             var size = sizeStr ? parseInt(sizeStr, 10) || 0 : 0;
             if (isDir) {
                 items.push({ filename: href, basename: basename, type: 'directory', mime: '', size: size });
             } else {
-                items.push({ filename: href, basename: basename, type: 'file', mime: mime, size: size });
+                items.push({
+                    filename: href,
+                    basename: basename,
+                    type: 'file',
+                    mime: guessMime(basename, mime),
+                    size: size
+                });
             }
         }
         return items;
     }
+
+    var PROPFIND_BODY =
+        '<?xml version="1.0" encoding="utf-8"?>' +
+        '<d:propfind xmlns:d="DAV:"><d:prop>' +
+        '<d:resourcetype/><d:getcontenttype/><d:getcontentlength/><d:displayname/>' +
+        '</d:prop></d:propfind>';
 
     function createClient(url, options) {
         options = options || {};
         var username = options.username || '';
         var password = options.password || '';
         var token = options.token || '';
-        // authType：'password'（默认，Basic）/ 'digest' / 'token'（Bearer）
         var authType = options.authType || (options.token ? 'token' : 'password');
         var base = String(url).replace(/\/+$/, '');
 
@@ -55,42 +76,44 @@
             return { Authorization: 'Basic ' + b64 };
         }
 
+        function originOf(u) {
+            var m = String(u).match(/^(https?:\/\/[^/]+)/i);
+            return m ? m[1] : u;
+        }
+
         function joinPath(path) {
-            var p = path ? String(path).replace(/^\/+/, '') : '';
-            return p ? base + '/' + p : base;
+            var p = path == null ? '' : String(path);
+            if (/^https?:\/\//i.test(p)) return p;
+            if (p.charAt(0) === '/') return originOf(base) + p;
+            return p ? base + '/' + p.replace(/^\/+/, '') : base;
+        }
+
+        function withBasicUserinfo(href) {
+            if (!username) return href;
+            var m = String(href).match(/^(https?):\/\/([^/]+)(\/.*)?$/i);
+            if (!m) return href;
+            return m[1] + '://' + encodeURIComponent(username) + ':' + encodeURIComponent(password) + '@' + m[2] + (m[3] || '');
         }
 
         return {
             getDirectoryContents: function (path) {
                 var href = joinPath(path);
-                var headers = Object.assign({}, authHeader(), { Depth: '1' });
-                try {
-                    var raw = globalThis.nativeBridge.httpRequest('PROPFIND', href, JSON.stringify(headers), '');
-                    var parsed = JSON.parse(raw);
-                    if (parsed.__error) throw new Error(parsed.__error);
-                    return parseResponses(parsed.body);
-                } catch (e) {
-                    // 原生桥不支持自定义 method 时回退：直接返回空
-                    throw e;
+                var headers = Object.assign({}, authHeader(), {
+                    Depth: '1',
+                    'Content-Type': 'application/xml; charset=utf-8'
+                });
+                var raw = globalThis.nativeBridge.httpRequest('PROPFIND', href, JSON.stringify(headers), PROPFIND_BODY);
+                var parsed = JSON.parse(raw);
+                if (parsed.__error) throw new Error(parsed.__error);
+                if (parsed.status && parsed.status >= 400) {
+                    throw new Error('PROPFIND ' + parsed.status + ' ' + (parsed.statusText || ''));
                 }
+                return parseResponses(parsed.body || '');
             },
             getFileDownloadLink: function (path) {
                 var href = joinPath(path);
-                if (authType === 'token' || token) {
-                    // Bearer 认证无法通过 URL 传递（仅 Basic 支持 userinfo）。
-                    // 返回原始链接，播放若需要 Authorization 头需插件在 getMediaSource 中
-                    // 自行返回 headers（原生桥已支持 Authorization 透传）。
-                    return href;
-                }
-                if (username) {
-                    var scheme = base.indexOf('https://') === 0 ? 'https://' : 'http://';
-                    var rest = base.slice(scheme.length);
-                    var hostPart = rest.split('/')[0];
-                    var after = rest.slice(hostPart.length);
-                    var pathPart = String(path) ? '/' + String(path).replace(/^\/+/, '') : '';
-                    return scheme + encodeURIComponent(username) + ':' + encodeURIComponent(password) + '@' + hostPart + after + pathPart;
-                }
-                return href;
+                if (authType === 'token' || token) return href;
+                return withBasicUserinfo(href);
             },
             getQuota: function () { return null; }
         };

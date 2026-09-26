@@ -5,7 +5,10 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
 import android.webkit.JavascriptInterface
+import com.quickjs.JSArray
 import com.quickjs.JSContext
+import com.quickjs.JSValue
+import com.quickjs.JavaCallback
 import com.quickjs.JavaVoidCallback
 import com.quickjs.QuickJS
 import okhttp3.OkHttpClient
@@ -25,7 +28,9 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * 架构说明：
  *  1. 所有 JSContext 调用都收口到单条 JS HandlerThread 上（jsBlock），保证顺序与线程安全；
- *  2. 原生能力通过 addJavascriptInterface 暴露为 `nativeBridge`：
+ *  2. 原生能力通过 registerJavaMethod 注册 `__bridge_*` 全局函数，再由桥垫片
+ *     （BRIDGE_SHIM_JS）组装为 `nativeBridge` 对象（手动绑定替代反射绑定，
+ *     见 [registerNativeBridge] 注释）：
  *     - httpRequest(method, url, headersJson, body)  -> OkHttp 同步请求
  *     - getUserVariables(platform)                    -> 该插件用户变量（env.getUserVariables）
  *     - scheduleTimer(id, ms, repeat)                 -> setTimeout / setInterval
@@ -93,9 +98,55 @@ class QuickJsEngine(
         pumpReady = runtimePtr != 0L && runCatching { nativeInitPump() }.getOrDefault(false)
         Log.i(TAG, "job pump ready=$pumpReady runtimePtr=$runtimePtr")
         jsBlock {
-            jsContext.addJavascriptInterface(NativeBridge(), "nativeBridge")
+            registerNativeBridge()
             jsContext.executeVoidScript(buildBootstrap(), "bootstrap.js")
         }
+    }
+
+    /**
+     * 注册原生桥：registerJavaMethod 手动绑定（替代 addJavascriptInterface 反射绑定）。
+     *
+     * 为什么必须弃用 addJavascriptInterface：反射绑定按 Java 方法签名严格校验参数个数，
+     * 第三方插件以错误参数个数调用桥方法（如 0 参调用 getUserVariables/clearTimer）时，
+     * Method.invoke 抛 IllegalArgumentException 成为 JNI pending exception，库自身
+     * 随后继续调 JNI（createJSValue/FindClass）触发 CheckJNI SIGABRT，整个进程无差别
+     * 崩溃（2026-09-26「搜索点击内容闪退」的根因，try/catch 无法拦截）。
+     * registerJavaMethod 回调直接拿到 JSArray，由 [bridgeStr]/[bridgeInt]/[bridgeBool]
+     * 自行解析：越界/类型不符一律取默认值；回调体整体 try/catch——任何插件错参调用
+     * 只记日志，绝不向 JNI 抛异常。
+     */
+    private fun registerNativeBridge() {
+        val nb = NativeBridge()
+        fun voidFn(name: String, block: (JSArray?) -> Unit) {
+            jsContext.registerJavaMethod(JavaVoidCallback { _, args ->
+                try {
+                    block(args)
+                } catch (e: Throwable) {
+                    Log.w(TAG, "bridge $name: ${e.message}")
+                }
+            }, name)
+        }
+        fun strFn(name: String, block: (JSArray?) -> String) {
+            jsContext.registerJavaMethod(JavaCallback { _, args ->
+                try {
+                    block(args)
+                } catch (e: Throwable) {
+                    Log.w(TAG, "bridge $name: ${e.message}")
+                    ""
+                }
+            }, name)
+        }
+        voidFn("__bridge_log") { args -> nb.log(args.bridgeStr(0, "log"), args.bridgeStr(1)) }
+        strFn("__bridge_getUserVariables") { args -> nb.getUserVariables(args.bridgeStr(0)) }
+        strFn("__bridge_httpRequest") { args ->
+            nb.httpRequest(args.bridgeStr(0), args.bridgeStr(1), args.bridgeStr(2), args.bridgeStr(3))
+        }
+        voidFn("__bridge_scheduleTimer") { args ->
+            nb.scheduleTimer(args.bridgeInt(0), args.bridgeInt(1), args.bridgeBool(2))
+        }
+        voidFn("__bridge_clearTimer") { args -> nb.clearTimer(args.bridgeInt(0)) }
+        voidFn("__bridge_onPluginResult") { args -> nb.onPluginResult(args.bridgeInt(0), args.bridgeStr(1)) }
+        voidFn("__bridge_onPluginError") { args -> nb.onPluginError(args.bridgeInt(0), args.bridgeStr(1)) }
     }
 
     /** QuickJS 的 runtimePtr 是包级字段，反射取出交给 native pump。 */
@@ -329,6 +380,8 @@ class QuickJsEngine(
 
     private fun buildBootstrap(): String {
         val sb = StringBuilder(1 shl 17)
+        // 桥垫片必须在 globals.js 之前：globals.js 顶层立即捕获 global.nativeBridge。
+        sb.append(BRIDGE_SHIM_JS).append('\n')
         sb.append(loadAssets("runtime/globals.js")).append('\n')
         sb.append(loadAssets("runtime/moduleLoader.js")).append('\n')
         for (lib in parseLibsOrder) {
@@ -341,11 +394,38 @@ class QuickJsEngine(
         return sb.toString()
     }
 
+    /**
+     * 把 __bridge_* 全局函数组装成 nativeBridge 对象。JS 包装为直接引用，不校验参数
+     * 个数——插件错参调用会以 undefined/缺参进入 Java 侧，由 bridgeStr/bridgeInt/
+     * bridgeBool 兜底为默认值，不再有反射签名校验崩溃。
+     */
+    private val BRIDGE_SHIM_JS = """
+(function (g) {
+    'use strict';
+    if (typeof g.__bridge_log !== 'function') { return; }
+    g.nativeBridge = {
+        log: g.__bridge_log,
+        getUserVariables: g.__bridge_getUserVariables,
+        httpRequest: g.__bridge_httpRequest,
+        scheduleTimer: g.__bridge_scheduleTimer,
+        clearTimer: g.__bridge_clearTimer,
+        onPluginResult: g.__bridge_onPluginResult,
+        onPluginError: g.__bridge_onPluginError
+    };
+})(globalThis);
+"""
+
     // ---------------- 原生桥 ----------------
 
+    /**
+     * 桥实现本体：由 [registerNativeBridge] 逐方法以 registerJavaMethod 绑定。
+     * 注意：quickjs-android 的 JSObject.getParameters 只支持
+     * int/Integer、double/Double、boolean/Boolean、String、JSArray、JSObject、JSFunction，
+     * **不支持 long**——本类所有方法不直接面对 JS（参数已由调用方从 JSArray 解析为
+     * Int/String/Boolean），杜绝了类型不匹配崩溃。
+     */
     private inner class NativeBridge {
 
-        @JavascriptInterface
         fun log(level: String, msg: String) {
             when (level) {
                 "error" -> Log.e(TAG, msg)
@@ -355,7 +435,6 @@ class QuickJsEngine(
             }
         }
 
-        @JavascriptInterface
         fun getUserVariables(platform: String): String {
             return try {
                 JSONObject(variablesProvider(platform.orEmpty()) as Map<*, *>).toString()
@@ -364,7 +443,6 @@ class QuickJsEngine(
             }
         }
 
-        @JavascriptInterface
         fun httpRequest(method: String, url: String, headersJson: String, body: String): String {
             val t0 = System.currentTimeMillis()
             return try {
@@ -408,14 +486,6 @@ class QuickJsEngine(
             }
         }
 
-        /**
-         * 注意：quickjs-android 的 JSObject.getParameters 只支持
-         * int/Integer、double/Double、boolean/Boolean、String、JSArray、JSObject、JSFunction，
-         * **不支持 long**——参数用 long 会抛 RuntimeException("Type error")，
-         * 该异常以 pending exception 身份进入 JNI，下一次 JNI 调用触发 CheckJNI SIGABRT，
-         * 整个进程崩溃（这是此前"插件循环崩溃"的根因）。所有桥方法参数一律用 Int/String/Boolean。
-         */
-        @JavascriptInterface
         fun scheduleTimer(id: Int, ms: Int, repeat: Boolean) {
             val handler = jsHandler ?: return
             val delay = ms.toLong().coerceAtLeast(0L)
@@ -438,19 +508,73 @@ class QuickJsEngine(
             handler.postDelayed(runnable, delay)
         }
 
-        @JavascriptInterface
         fun clearTimer(id: Int) {
             timers.remove(id)?.let { jsHandler?.removeCallbacks(it) }
         }
 
-        @JavascriptInterface
         fun onPluginResult(cbId: Int, json: String) {
             pending.remove(cbId)?.complete(json)
         }
 
-        @JavascriptInterface
         fun onPluginError(cbId: Int, message: String) {
             pending.remove(cbId)?.completeExceptionally(PluginCallException(message))
         }
+    }
+}
+
+// ---------------- 桥参数防御性解析 ----------------
+// 插件 JS 可能以任意参数个数/类型调用桥方法。以下扩展一律：null/越界/类型不符/
+// 抛异常 → 返回默认值，绝不向 JNI 抛异常（否则 CheckJNI SIGABRT 杀死整个进程）。
+
+/** 第 i 个参数按字符串取；对象/数组序列化为 JSON 文本。 */
+private fun JSArray?.bridgeStr(i: Int, def: String = ""): String {
+    if (this == null) return def
+    return try {
+        if (i < 0 || i >= length()) def
+        else when (getType(i)) {
+            JSValue.TYPE.STRING -> getString(i) ?: def
+            JSValue.TYPE.INTEGER -> getInteger(i).toString()
+            JSValue.TYPE.DOUBLE -> getDouble(i).toString()
+            JSValue.TYPE.BOOLEAN -> getBoolean(i).toString()
+            JSValue.TYPE.JS_OBJECT -> getObject(i)?.toJSONObject()?.toString() ?: def
+            JSValue.TYPE.JS_ARRAY -> getArray(i)?.toJSONArray()?.toString() ?: def
+            else -> def
+        }
+    } catch (_: Throwable) {
+        def
+    }
+}
+
+/** 第 i 个参数按 Int 取（接受数字/布尔/数字字符串）。 */
+private fun JSArray?.bridgeInt(i: Int, def: Int = 0): Int {
+    if (this == null) return def
+    return try {
+        if (i < 0 || i >= length()) def
+        else when (getType(i)) {
+            JSValue.TYPE.INTEGER -> getInteger(i)
+            JSValue.TYPE.DOUBLE -> getDouble(i).toInt()
+            JSValue.TYPE.STRING -> getString(i)?.trim()?.toDoubleOrNull()?.toInt() ?: def
+            JSValue.TYPE.BOOLEAN -> if (getBoolean(i)) 1 else 0
+            else -> def
+        }
+    } catch (_: Throwable) {
+        def
+    }
+}
+
+/** 第 i 个参数按 Boolean 取。 */
+private fun JSArray?.bridgeBool(i: Int, def: Boolean = false): Boolean {
+    if (this == null) return def
+    return try {
+        if (i < 0 || i >= length()) def
+        else when (getType(i)) {
+            JSValue.TYPE.BOOLEAN -> getBoolean(i)
+            JSValue.TYPE.INTEGER -> getInteger(i) != 0
+            JSValue.TYPE.DOUBLE -> getDouble(i) != 0.0
+            JSValue.TYPE.STRING -> getString(i)?.let { it.equals("true", true) || it == "1" } ?: def
+            else -> def
+        }
+    } catch (_: Throwable) {
+        def
     }
 }

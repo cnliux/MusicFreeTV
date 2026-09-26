@@ -66,22 +66,25 @@ import com.tvmusic.ui.toplist.TopListViewModel
 
 class MainActivity : ComponentActivity() {
 
-    /** 无操作 60 秒且正在播放时自动进入播放器页（电视待机显示）。true 由 Compose 侧消费后复位。 */
+    /** 无操作达配置时长且正在播放时自动进入播放器页（电视待机显示）。true 由 Compose 侧消费后复位。 */
     private val autoNavigateToPlayer = androidx.compose.runtime.mutableStateOf(false)
 
     private val idleHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     private val idleRunnable = object : Runnable {
         override fun run() {
-            if (PlayerManager.uiState.value.isPlaying) autoNavigateToPlayer.value = true
-            idleHandler.postDelayed(this, IDLE_INTERVAL_MS)
+            // 开关与时长每次 tick 重新读取：远程管理后台改动即时生效
+            if (com.tvmusic.config.IdleSettings.isEnabled &&
+                PlayerManager.uiState.value.isPlaying
+            ) autoNavigateToPlayer.value = true
+            idleHandler.postDelayed(this, com.tvmusic.config.IdleSettings.intervalMs)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        idleHandler.postDelayed(idleRunnable, IDLE_INTERVAL_MS)
+        idleHandler.postDelayed(idleRunnable, com.tvmusic.config.IdleSettings.intervalMs)
         setContent {
             com.tvmusic.ui.theme.MusicFreeTheme {
                 App()
@@ -92,16 +95,12 @@ class MainActivity : ComponentActivity() {
     /** 遥控器按键/触屏等任何交互都会回调：重置无操作计时。 */
     override fun onUserInteraction() {
         idleHandler.removeCallbacks(idleRunnable)
-        idleHandler.postDelayed(idleRunnable, IDLE_INTERVAL_MS)
+        idleHandler.postDelayed(idleRunnable, com.tvmusic.config.IdleSettings.intervalMs)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         idleHandler.removeCallbacks(idleRunnable)
-    }
-
-    private companion object {
-        const val IDLE_INTERVAL_MS = 60_000L
     }
 
     /** 调试：确认遥控器按键是否到达 Activity（logcat -s DpadDebug）。仅 debug 构建启用。 */

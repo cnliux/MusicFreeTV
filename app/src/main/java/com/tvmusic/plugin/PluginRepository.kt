@@ -214,21 +214,59 @@ class PluginRepository(
     /**
      * 卸载单个插件：删除插件行与变量，并把 name/platform 记入卸载名单。
      * 名单会阻止订阅同步把同一插件再次装回（"卸载了又自动出现"的根因）。
+     * 同时把该插件从远程管理配置的音源优先级（sourceOrder）中移除——否则
+     * /api/plugins 里已没有它，配置里却还在，前端会一直显示"已卸载"幽灵行。
      */
     fun uninstall(nameOrPlatform: String): Boolean {
         val hit = store.deletePlugin(nameOrPlatform) ?: return false
         store.markUninstalled(hit.first)
         hit.second?.let { store.markUninstalled(it) }
+        removeFromSourceOrder(listOfNotNull(hit.first, hit.second))
         refreshFromDb()
         return true
     }
 
     /** 一键全部卸载：清空全部插件与变量并记入卸载名单（订阅保留，但不再自动复装）。 */
     fun uninstallAll(): Int {
+        val metas = store.loadPluginMetas()
+        val keys = metas.flatMap { listOfNotNull(it.name, it.info?.platform) }
         val n = store.deleteAllPlugins()
-        if (n > 0) refreshFromDb()
+        if (n > 0) {
+            removeFromSourceOrder(keys)
+            refreshFromDb()
+        }
         return n
     }
+
+    /** 把指定插件从后台配置的音源优先级顺序（SearchSettings.sourceOrder）中移除。 */
+    private fun removeFromSourceOrder(platforms: Collection<String>) {
+        val prefs = appContext.getSharedPreferences("search_config", Context.MODE_PRIVATE)
+        val cur = readSourceOrder(prefs)
+        val targets = platforms.filter { it.isNotBlank() }.toSet()
+        val kept = cur.filter { it !in targets }
+        if (kept.size == cur.size) return
+        prefs.edit()
+            .putString("sourceOrder", org.json.JSONArray().apply { kept.forEach { put(it) } }.toString())
+            .apply()
+    }
+
+    /** 安装成功后把新音源追加进远程管理的音源优先级配置——否则前端列表（按 sourceOrder 渲染）
+     *  完全不显示该插件，用户会误以为 js 导入失败（"装上了但列表看不到"的根因）。 */
+    private fun appendToSourceOrder(platform: String) {
+        if (platform.isBlank()) return
+        val prefs = appContext.getSharedPreferences("search_config", Context.MODE_PRIVATE)
+        val cur = readSourceOrder(prefs)
+        if (platform in cur) return
+        prefs.edit()
+            .putString("sourceOrder", org.json.JSONArray().apply { cur.forEach { put(it) }; put(platform) }.toString())
+            .apply()
+    }
+
+    private fun readSourceOrder(prefs: android.content.SharedPreferences): List<String> =
+        runCatching {
+            val a = org.json.JSONArray(prefs.getString("sourceOrder", "[]") ?: "[]")
+            (0 until a.length()).map { a.optString(it) }
+        }.getOrDefault(emptyList())
 
     /**
      * 遍历所有订阅源并安装/更新其中的插件。
@@ -410,6 +448,7 @@ class PluginRepository(
                     hash = hash
                 )
             )
+            appendToSourceOrder(platform)
             installEvents.add(
                 Triple(name.ifBlank { info.platform }, if (oldRecord != null) "updated" else "installed", null)
             )

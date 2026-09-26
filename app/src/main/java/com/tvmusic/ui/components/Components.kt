@@ -66,12 +66,18 @@ private val ModalScrim = Color(0xAA000000)
 @Composable
 fun Modifier.tvInitialFocus(): Modifier {
     val fr = androidx.compose.ui.focus.FocusRequester()
-    // 首帧节点可能尚未挂载导致 requestFocus 静默失败：
-    // requestFocus 不抛异常也不保证立刻命中，这里短间隔重试（上限 20 次 ≈ 1.6s）。
+    // 首帧节点可能尚未挂载/暂不可聚焦：requestFocus 会抛 IllegalStateException
+    // （"FocusRequester is not initialized"，2026-09-26 连环闪退根因），
+    // 必须捕获并重试；成功后立即停止。
     // 组合被销毁时 LaunchedEffect 自动取消，不会泄漏。
     androidx.compose.runtime.LaunchedEffect(Unit) {
         repeat(20) {
-            fr.requestFocus()
+            try {
+                fr.requestFocus()
+                return@LaunchedEffect
+            } catch (_: IllegalStateException) {
+                // 焦点目标还没就绪，稍后重试
+            }
             kotlinx.coroutines.delay(80)
         }
     }
