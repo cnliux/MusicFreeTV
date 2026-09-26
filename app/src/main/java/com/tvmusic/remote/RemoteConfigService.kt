@@ -1564,7 +1564,7 @@ private val PAGE_HTML = """<!DOCTYPE html>
   <!-- 播放 -->
   <section class="page on" id="page-player">
     <div class="card">
-      <div class="nowart"><img id="pArt" src="" alt="" onerror="this.src=''"></div>
+      <div class="nowart"><img id="pArt" alt="" onerror="this.onerror=null;this.removeAttribute('src')"></div>
       <div class="nowtitle ellip" id="pTitle">未在播放</div>
       <div class="nowartist ellip" id="pArtist"></div>
       <div class="seekwrap">
@@ -1841,7 +1841,13 @@ function handlePlayerData(d) {
   var art = el('pArt');
   var want = d.artwork || '';
   var wantSrc = want ? '/api/img?url=' + encodeURIComponent(want) : '';
-  if (art.getAttribute('src') !== wantSrc) art.src = wantSrc;
+  // JS 里给 img.src 赋空字符串会被解析为当前页 URL 并再次触发 onerror，
+  // 旧代码 onerror="this.src=''" 与之叠加形成无限请求循环（封面加载失败时
+  // 浏览器每秒反复拉整页 HTML，CPU/网络双风暴导致页面卡死）。
+  // 修复：无封面时移除 src 属性；onerror 首次触发后自毁并不再重试。
+  if (art.getAttribute('src') !== wantSrc) {
+    if (wantSrc) art.src = wantSrc; else art.removeAttribute('src');
+  }
   art.style.visibility = want ? 'visible' : 'hidden';
   el('pToggle').textContent = d.playing ? '⏸︎' : '▶︎';
   var favBtn = el('pFav');
@@ -2271,8 +2277,13 @@ function doSearch() {
     pollSearch(d.id);
   }).catch(function () { toast('搜索失败'); });
 }
+var pollFetching = false;
 function pollSearch(id) {
+  /* 在途标记：慢网下响应未回时跳过本轮，避免 1.2s 轮询堆积并发拖死页面 */
+  if (pollFetching) return;
+  pollFetching = true;
   api('/api/search/poll?id=' + encodeURIComponent(id)).then(function (d) {
+    pollFetching = false;
     if (!d || !d.ok) {
       clearInterval(sTimer); sTimer = null;
       el('searchInfo').textContent = '共 ' + (searchResults.length) + ' 条';
@@ -2287,7 +2298,7 @@ function pollSearch(id) {
     el('collectAllBtn').style.display = searchResults.length ? '' : 'none';
     renderSearch();
     if (d.finished) { clearInterval(sTimer); sTimer = null; el('searchInfo').textContent = '共 ' + (d.total || 0) + ' 条'; }
-  }).catch(function () { });
+  }).catch(function () { pollFetching = false; });
 }
 function playAllSearch() {
   if (!searchResults.length) return;
