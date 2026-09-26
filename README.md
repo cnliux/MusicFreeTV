@@ -1,8 +1,8 @@
 # MusicFree TV（安卓 tv）
 
-基于 [musicfree-plugins](https://github.com/maotoumao/MusicFreePlugins) 插件仓库理念的 **Android TV / 盒子** 播放器（Kotlin + Jetpack Compose for TV + Media3 + QuickJS），支持局域网 **Web 远程控制台**（手机浏览器搜歌/控制/管理插件），已配好 arm64-v8a / x86_64。
+基于 [musicfree-plugins](https://github.com/maotoumao/MusicFreePlugins) 插件仓库理念的 **Android TV / 盒子** 播放器（Kotlin + Jetpack Compose for TV + Media3 + QuickJS），支持局域网 **Web 远程控制台**（手机浏览器搜歌/控制/管理插件）与**应用内检查更新**（GitHub Release，CDN 多线路择优下载），已配好 arm64-v8a / x86_64。
 
-> ⚠ 本工程为「可编译骨架 + 全链路功能」：已完整实现 JS 引擎加载、插件调用协议、首页/搜索/歌单/播放器/设置/远程 Web 控制台；搜索支持**多引擎并行 + 渐进式出结果**，插件支持**内容识别安装**（plugins.json / .js 直链），另含通知栏封面、歌词翻译、WebDAV 认证、远程主题/歌词/收藏导出导入等。
+> ⚠ 本工程为「可编译骨架 + 全链路功能」：已完整实现 JS 引擎加载、插件调用协议、首页/搜索/歌单/播放器/设置/远程 Web 控制台；搜索支持**多引擎并行 + 渐进式出结果**，插件支持**内容识别安装**（plugins.json / .js 直链），另含通知栏封面、歌词翻译、WebDAV 认证、远程主题/歌词/收藏导出导入、插件备份恢复等。
 
 ---
 
@@ -32,17 +32,18 @@
 │       │   ├─ bootstrap.js                     # env.getUserVariables + __registerPlugin + __invoke RPC + 全局库暴露
 │       │   └─ libs/                            # crypto-js / qs / dayjs / he / big-integer / cheerio / webdav / axios
 │       ├─ java/com/tvmusic/
-│       │   ├─ MainActivity.kt                  # Compose NavHost + 迷你播放条 + 悬浮歌词 + 深链处理
+│       │   ├─ MainActivity.kt                  # Compose NavHost + 迷你播放条 + 待机显示(无操作自动进播放器页) + 深链处理
 │       │   ├─ core/TvMusicApp.kt               # Application：初始化 Store/Runtime/Repository/Player
 │       │   ├─ data/                            # Models.kt + PluginStore.kt（SQLite）
-│       │   ├─ runtime/                         # JsEngine 接口 + QuickJsEngine（taoweiji quickjs-android 1.4.6 + native job pump）
-│       │   ├─ plugin/                          # PluginRuntime（并行引擎池）+ PluginRepository（订阅/安装/探测 platform）
-│       │   ├─ config/                          # SearchSettings（搜索配置：音源优先级/排序/封顶数）
+│       │   ├─ runtime/                         # JsEngine 接口 + QuickJsEngine（taoweiji quickjs-android 1.4.6 + native job pump + 防御性原生桥）
+│       │   ├─ plugin/                          # PluginRuntime（粘性路由并行引擎池，3→5 动态扩容）+ PluginRepository（订阅/安装/备份/探测 platform）
+│       │   ├─ config/                          # SearchSettings（音源优先级/排序/封顶数）+ IdleSettings（待机显示）+ MetaSettings（lrc.cx 兜底）
 │       │   ├─ player/                          # PlayerManager + PlaybackService（Media3 + MediaSessionService）
 │       │   ├─ remote/                          # RemoteConfigService（局域网 HTTP 服务 + Web 控制台，端口 9527）
 │       │   └─ ui/
-│       │       ├─ theme/Theme.kt + LyricSettings.kt  # 深色 Material3 配色 + 歌词显示配置（默认关闭悬浮）
-│       │       ├─ components/Components.kt     # AppTitleBar / LyricOverlay / MediaCard / MusicRow / tvFocus / LoadingBox
+│       │       ├─ theme/Theme.kt + LyricSettings.kt  # 深色 Material3 配色 + 歌词显示配置
+│       │       ├─ components/Components.kt     # AppTitleBar / MediaCard / MusicRow / tvFocus / LoadingBox / ModalCard 等共享件
+│       │       ├─ about/AboutScreen            # 关于：开源声明 + 检查更新（GitHub Release + CDN 多线路择优下载安装）
 │       │       ├─ home/HomeScreen+ViewModel    # 首页：推荐歌单（getRecommendSheetTags）+ 排行榜（getTopLists）
 │       │       ├─ search/SearchScreen+ViewModel# 搜索：多音源并行 + 边搜边出 + 音源/时长/封面/排序过滤
 │       │       ├─ sheet/SheetScreen+ViewModel  # 歌单详情（musicList / getTopListDetail / importMusicSheet）
@@ -66,8 +67,9 @@
 
 - **引擎选型**：[taoweiji/quickjs-android](https://github.com/taoweiji/quickjs-android) `1.4.6`（支持 Event Queue、CommonJS、Java→JS 回调），并配套 `cpp/js_job_pump.c` 手动推进 Promise/await 微任务队列（否则插件 async 方法在首个 `await` 处永久挂起）。
 - **async RPC**：JS 端 `__invoke(platform, method, argsJson, cbId)` → `Promise.then` → `nativeBridge.onPluginResult(cbId, json)` 回吐；Java 侧用 `CompletableFuture` + 轮询推进 job（超时抛 `PluginCallException`）。
-- **并行搜索引擎池**：单 QuickJS 引擎单线程、插件 HTTP 为同步阻塞桥，音源只能逐个搜。`PluginRuntime` 启动 3 台独立引擎（各自 JS 线程 + 独立 runtime，均注册全量插件），搜索按「最空闲引擎」分发实现真并行；播放/详情等仍走主引擎，避免跨引擎状态问题。
-- **HTTP 原生桥**：`nativeBridge.httpRequest` → OkHttp 同步请求；自动剥离插件传入的 `Accept-Encoding`，由 OkHttp 透明处理 gzip/br。
+- **并行搜索引擎池（粘性路由）**：单 QuickJS 引擎单线程、插件 HTTP 为同步阻塞桥，音源只能逐个搜。`PluginRuntime` 维护多台独立引擎（各自 JS 线程 + 独立 runtime，均注册全量插件），**同一平台固定绑定同一引擎**（粘性路由，保证 cookie/token 等模块级状态不分裂）；播放解析/歌词等关键调用走平台专属 home 引擎，与浏览流量隔离，避免被慢源搜索排队阻塞。引擎池默认 3 台，全部忙碌时**动态扩容至 5 台**（零预注册、按需注册目标插件）。
+- **HTTP 原生桥（防御性绑定）**：原生能力以 `registerJavaMethod` 手动绑定 `__bridge_*` 全局函数，再由垫片组装为 `nativeBridge` 对象——**不使用 `addJavascriptInterface` 反射绑定**（其按 Java 方法签名严格校验参数个数，第三方插件错参调用会成为 JNI pending exception 触发 CheckJNI SIGABRT 整进程崩溃）。回调内对参数越界/类型不符一律取默认值并整体 try/catch，任何插件错参只记日志绝不向 JNI 抛异常。
+- **nativeBridge.httpRequest** → OkHttp 同步请求；自动剥离插件传入的 `Accept-Encoding`，由 OkHttp 透明处理 gzip/br。
 - **全局库暴露**：`bootstrap.js` 将 axios/dayjs/he/qs/cheerio/crypto-js/big-integer/webdav 暴露为全局，兼容「裸 `axios.get`」等直接引用库的插件。
 - **Parcel 打包兼容**：`__registerPlugin` 自动识别 `module.exports.default` 与普通 CommonJS；平台名取源码**最后一次出现**的 `platform: "..."`（支持字面量与变量引用）。
 - **方法缺失处理**：未实现的方法统一返回 `{ __notImplemented: true }`，UI 层静默跳过。
@@ -83,8 +85,9 @@
 
 - **PlayerManager**：单例持有 ExoPlayer，对外暴露 `StateFlow<PlayerUiState>`（当前歌曲 / 播放状态 / 队列 / 歌词 / 进度）。
 - **按需取流**：播放时调用插件 `getMediaSource(item, "standard")` → `{ url, headers }` → 写入 `DefaultHttpDataSource` 默认请求头（含 Referer 等，HLS 片段同样生效）。
-- **队列管理**：歌单全部歌曲作为队列传入 `PlayerManager.play`，支持上/下一首（`skipTo` 重新 fetch URL）。
-- **歌词**：`getLyric` 兼容 `{ rawLrc, translation }`、`lyricList`、`translationList`；播放页内嵌逐行歌词，非播放页可有全局悬浮歌词层（**默认关闭**，设置页可开启并调节字号/颜色/位置/透明度）。
+- **队列管理**：歌单全部歌曲作为队列传入 `PlayerManager.play`，支持上/下一首（`skipTo` 重新 fetch URL）；下一首预加载缓存（最多 4 条 / 10 分钟有效）；系统均衡器 + 重低音（设置持久化）。
+- **歌词**：`getLyric` 兼容 `{ rawLrc, translation }`、`lyricList`、`translationList`；播放页内嵌逐行歌词；歌词加载带代数计数器防快速切歌串词。插件无歌词/无封面时自动走 **lrc.cx 兜底**（`/lyrics` 取 LRC、`/cover` 取封面，含 301 跟随与 LRC/JSON 形态判别）。
+- **待机显示**：播放中一段时间无遥控器操作自动进入播放器页；时长与开关可在远程管理后台配置（默认 1 分钟）。
 
 ### 4. 远程 Web 控制台（端口 9527）
 
@@ -107,7 +110,7 @@ TV 端启动后会在局域网内开启 HTTP 服务，**手机 / PC 浏览器访
 - **播放**：当前歌曲/封面/歌词、播放进度、循环模式切换，控制按钮直接作用于电视端 ExoPlayer。
 - **搜索**：音源多选 chips（顺序按已保存的优先级）、时长过滤、必需封面、结果排序；搜索结果可单点播放或批量入队。
 - **收藏**：查看/切换收藏专辑、新建/重命名/删除收藏夹、将当前歌曲收藏到指定收藏夹。
-- **管理**：订阅源增删、全部订阅同步、插件启用/停用/卸载、「搜索设置」卡片（见下）、歌词显示调整、主题切换、配置导出/导入。
+- **管理**：订阅源增删、全部订阅同步、插件启用/停用/卸载（两步确认防误触 + 一键全部卸载）、**插件备份导出/导入**（见 4.4）、「搜索设置」卡片（见下）、「待机显示」卡片（开关 + 分钟数）、歌词显示调整、主题切换、配置导出/导入。粘贴 .js 直链安装会同步等待并直接反馈成功/失败原因。
 
 #### 4.3 搜索设置（音源优先级 + 排序）
 
@@ -117,19 +120,34 @@ TV 端启动后会在局域网内开启 HTTP 服务，**手机 / PC 浏览器访
 - **默认排序 / 升降序 / 最多返回结果**：作用于全局聚合结果。
 - 搜索页底部也有同一套排序控件，并提供“存为新默认”把当前页的选择写入后台。
 
-#### 4.4 HTTP API（插件开发 / 自动化可用）
+#### 4.4 插件备份与恢复（每插件 js 直链）
+
+「管理 → 配置」卡片的「导出/导入插件备份」用于把已装插件迁移到其他设备：
+
+- **导出**：JSON 备份文件，内容为**每个插件各自的 js 直链地址**（含订阅安装的插件——订阅条目本身就是条目级 js 地址）+ 音源优先级顺序；**不含源码、不含订阅合集地址**。
+- **导入**：按地址逐个重新拉取安装（清除卸载名单，等同手动导入），恢复音源顺序；恢复后的插件独立于订阅存在，不会被订阅同步复装/覆盖。
+- 卸载会记入 `uninstalled_plugins` 名单，订阅同步时命中名单的插件自动跳过，避免「卸了又自动装回」。
+
+```
+GET  /api/plugins/export    → 下载备份 JSON（musicfreetv-backup-日期.json）
+POST /api/plugins/import    → 恢复备份（installed/skipped/failed 明细）
+```
+
+#### 4.5 HTTP API（插件开发 / 自动化可用）
 
 ```
 GET  /                    → 控制台首页（HTML，含状态/插件/搜索/播放器/收藏/设置）
 GET  /api/status          → { app, version, host, port, status }
 GET  /api/plugins         → 插件列表（启用状态 / loadError）
-POST /api/plugins/toggle、/api/plugins/uninstall
+POST /api/plugins/toggle、/api/plugins/uninstall、/api/plugins/uninstallAll（一键全部卸载）
+GET  /api/plugins/export、POST /api/plugins/import   → 插件备份（见 4.4）
 POST /api/subscriptions、/api/subscriptions/remove、/api/sync
 GET  /api/search?q=&sources=&minD=&maxD=&art=1&sort=&asc=
      → 渐进式搜索：立即返回会话 id，后台按音源并行搜索
 GET  /api/search/poll?id= → 轮询增量结果 { done/totalEnabled, total, results, perSource }
 GET  /api/search/config   → 搜索共享配置（音源优先级/默认排序/最大结果数）
 POST /api/search/config   → 保存（管理页「搜索设置」卡片）
+GET/POST /api/idle        → 待机显示（enabled 开关 + minutes 分钟数，默认开 / 1 分钟）
 POST /api/play、/api/play/queue、/api/player/{playpause|next|prev|seek|volume|skip|mode}
 GET  /api/player、/api/lyric、/api/themes
 POST /api/theme、/api/lyric、/api/export、/api/import
@@ -140,7 +158,7 @@ GET  /api/img?url=...     → 图片代理（绕过图床防盗链，控制台�
 
 搜索说明：`sources`（音源多选，逗号分隔）、`minD`/`maxD`（时长秒）、`art=1`（必须有封面）、`sort/asc`（全局排序）。搜索结果实时刷新，全部音源完成后封顶展示前 `maxTotal` 条。
 
-#### 4.5 深链口令与扫码接收（无需浏览器的配置下发）
+#### 4.6 深链口令与扫码接收（无需浏览器的配置下发）
 
 ```
 tvmusic://config?data=<base64url(json)>     # 单条配置
@@ -148,6 +166,14 @@ tvmusic://config?sub=<订阅地址>               # 添加订阅
 ```
 
 深链口令支持 URL-safe Base64 编码；也可在设置页打开「扫码接收」，用 CameraX + zxing 扫描二维码获取配置。
+
+---
+
+## 检查更新与发版
+
+- **应用内检查更新**（「关于」页）：对比 GitHub 最新 Release 与本地版本，有新版则弹窗提示并可直接下载安装（FileProvider 调起系统安装器）。
+- **下载线路择优**：版本检测与 APK 下载均优先走国内 CDN 代理（gh-proxy / ghfast.top / moeyy / wget.la / gh.catmak.name / cdn.gh-proxy.org / g.blfrp.cn / fastly.jsdelivr 等），下载前对全部线路做**并行最快探测**（Range 小请求竞速），选响应最快者下载、其余按序兜底，最后回退 GitHub 直连。
+- **自动发版**：推送 `main` 即触发 CI——自动递增版本号、打 tag、生产签名构建、创建 GitHub Release 附 APK 与 changelog，本地零操作。
 
 ---
 
