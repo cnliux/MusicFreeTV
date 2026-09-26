@@ -25,6 +25,7 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
 
     private val runtime = app.runtime
     private val repository = app.repository
+    private val appContext = app.applicationContext
 
     private val _sections = MutableStateFlow<List<HomeSection>>(emptyList())
     val sections: StateFlow<List<HomeSection>> = _sections.asStateFlow()
@@ -67,8 +68,13 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
     }
 
     private fun refreshPlugins() {
-        _availablePlugins.value = repository.listEnabled()
-            .filter { it.info != null && it.loadError.isNullOrBlank() }
+        // 按用户配置的插件优先级排列（远程管理「音源与插件」的顺序），
+        // 配置里没提到的保持在末尾原次序；默认选中即配置里的第一个音源
+        val order = com.tvmusic.config.SearchSettings.load(appContext).sourceOrder
+        _availablePlugins.value = com.tvmusic.config.SearchSettings.ordered(
+            repository.listEnabled().filter { it.info != null && it.loadError.isNullOrBlank() },
+            order
+        ) { it.info?.platform ?: it.name }
     }
 
     private fun pickFirst() {

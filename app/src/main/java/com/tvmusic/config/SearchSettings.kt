@@ -51,10 +51,14 @@ data class SearchSettings(
         /**
          * 把待搜索的 sources 按配置优先级排列；config 里没提到的保持在末尾原次序。
          */
-        fun ordered(sources: List<String>, order: List<String>): List<String> {
+        fun ordered(sources: List<String>, order: List<String>): List<String> =
+            ordered(sources, order) { it }
+
+        /** 泛型版：按 [key] 取出平台名参与优先级排序。 */
+        fun <T> ordered(sources: List<T>, order: List<String>, key: (T) -> String): List<T> {
             if (order.isEmpty()) return sources
             val index = order.withIndex().associate { it.value to it.index }
-            return sources.sortedBy { index[it] ?: (order.size + 1) }
+            return sources.sortedBy { index[key(it)] ?: (order.size + 1) }
         }
 
         /**
