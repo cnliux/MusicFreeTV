@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -107,7 +108,12 @@ object PlayerManager {
      * 供播放页外壳订阅——ticker 刷新时该流不发射，避免整屏随之秒级重组。
      */
     val screenState: Flow<PlayerUiState> = _uiState
-        .map { it.copy(positionMs = 0, durationMs = 0, bufferedPositionMs = 0, lrcIndex = -1, lrcLines = emptyList()) }
+        .map {
+            it.copy(
+                positionMs = 0, durationMs = 0, bufferedPositionMs = 0,
+                lrcIndex = -1, lrcLines = emptyList(), sleepRemainingMs = 0
+            )
+        }
         .distinctUntilChanged()
 
     var player: ExoPlayer? = null
@@ -146,7 +152,16 @@ object PlayerManager {
      * 过期的解析结果直接丢弃。
      */
     @Volatile
-    private var playSession = 0
+    private var playSession = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * 最近一次 play() 提交给 ExoPlayer 的 mediaId（plugin:id）。
+     * onMediaItemTransition 用媒体本身的 mediaId 定位队列条目，而不是按当前 queueIndex 反查：
+     * 快速连点「下一首」时 queueIndex 已被第二次 play 改掉，反查会拿到第三首的条目，
+     * 写错 current/历史/歌词。命中不到就放弃更新，宁可不刷新也不要写错。
+     */
+    @Volatile
+    private var pendingMediaId: String? = null
 
     // ---------------- 下一首预加载 ----------------
 
@@ -229,7 +244,7 @@ object PlayerManager {
      */
     private fun reportPlayError(message: String, autoSkip: Boolean = true) {
         val st = _uiState.value
-        _uiState.value = st.copy(error = message, buffering = false)
+        _uiState.update { it.copy(error = message, buffering = false) }
         android.util.Log.w("PlayerManager", "play error: $message (streak=$errorStreak)")
         if (!autoSkip) return
         if (st.queue.size <= 1 || st.playMode == PlayMode.LOOP_ONE) return
@@ -271,13 +286,15 @@ object PlayerManager {
             PlayMode.valueOf(qualityPrefs?.getString(KEY_PLAY_MODE, PlayMode.ORDER.name) ?: PlayMode.ORDER.name)
         }.getOrDefault(PlayMode.ORDER)
         val savedSpeed = qualityPrefs?.getFloat(KEY_SPEED, 1f) ?: 1f
-        _uiState.value = _uiState.value.copy(
-            playMode = savedMode,
-            speed = savedSpeed,
-            eqEnabled = qualityPrefs?.getBoolean(KEY_EQ_ENABLED, false) ?: false,
-            bassStrength = qualityPrefs?.getInt(KEY_BASS, 0) ?: 0,
-            eqPreset = qualityPrefs?.getInt(KEY_EQ_PRESET, 0) ?: 0
-        )
+        _uiState.update {
+            it.copy(
+                playMode = savedMode,
+                speed = savedSpeed,
+                eqEnabled = qualityPrefs?.getBoolean(KEY_EQ_ENABLED, false) ?: false,
+                bassStrength = qualityPrefs?.getInt(KEY_BASS, 0) ?: 0,
+                eqPreset = qualityPrefs?.getInt(KEY_EQ_PRESET, 0) ?: 0
+            )
+        }
     }
 
     fun setQuality(q: String) {
@@ -371,7 +388,7 @@ object PlayerManager {
     }
 
     fun setEqEnabled(enabled: Boolean) {
-        _uiState.value = _uiState.value.copy(eqEnabled = enabled)
+        _uiState.update { it.copy(eqEnabled = enabled) }
         qualityPrefs?.edit()?.putBoolean(KEY_EQ_ENABLED, enabled)?.apply()
         applyAudioEffects()
     }
@@ -379,7 +396,7 @@ object PlayerManager {
     /** 低音增强强度：0~1000。 */
     fun setBassStrength(v: Int) {
         val c = v.coerceIn(0, 1000)
-        _uiState.value = _uiState.value.copy(bassStrength = c)
+        _uiState.update { it.copy(bassStrength = c) }
         qualityPrefs?.edit()?.putInt(KEY_BASS, c)?.apply()
         applyAudioEffects()
     }
@@ -387,7 +404,7 @@ object PlayerManager {
     /** 选择均衡器预设：0 = 原声，1..N = 系统预设。 */
     fun setEqPreset(index: Int) {
         val c = index.coerceIn(0, _eqPresets.value.lastIndex.coerceAtLeast(0))
-        _uiState.value = _uiState.value.copy(eqPreset = c)
+        _uiState.update { it.copy(eqPreset = c) }
         qualityPrefs?.edit()?.putInt(KEY_EQ_PRESET, c)?.apply()
         applyAudioEffects()
     }
@@ -407,7 +424,7 @@ object PlayerManager {
     }
 
     fun setSpeed(s: Float) {
-        _uiState.value = _uiState.value.copy(speed = s)
+        _uiState.update { it.copy(speed = s) }
         qualityPrefs?.edit()?.putFloat(KEY_SPEED, s)?.apply()
         ticker.post {
             player?.setPlaybackSpeed(s)
@@ -424,12 +441,12 @@ object PlayerManager {
             val now = android.os.SystemClock.elapsedRealtime()
             if (now >= dl) {
                 sleepDeadline = 0L
-                _uiState.value = _uiState.value.copy(sleepRemainingMs = 0L)
+                _uiState.update { it.copy(sleepRemainingMs = 0L) }
                 // 到点暂停播放（不销毁播放器，用户仍可手动继续）
                 ticker.post { player?.pause() }
                 return
             }
-            _uiState.value = _uiState.value.copy(sleepRemainingMs = dl - now)
+            _uiState.update { it.copy(sleepRemainingMs = dl - now) }
             ticker.postDelayed(this, 1000)
         }
     }
@@ -439,18 +456,18 @@ object PlayerManager {
         ticker.removeCallbacks(sleepRunnable)
         if (minutes <= 0) {
             sleepDeadline = 0L
-            _uiState.value = _uiState.value.copy(sleepRemainingMs = 0L)
+            _uiState.update { it.copy(sleepRemainingMs = 0L) }
             return
         }
         sleepDeadline = android.os.SystemClock.elapsedRealtime() + minutes * 60_000L
-        _uiState.value = _uiState.value.copy(sleepRemainingMs = minutes * 60_000L)
+        _uiState.update { it.copy(sleepRemainingMs = minutes * 60_000L) }
         ticker.postDelayed(sleepRunnable, 1000)
     }
 
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             if (isPlaying) errorStreak = 0
-            _uiState.value = _uiState.value.copy(isPlaying = isPlaying)
+            _uiState.update { it.copy(isPlaying = isPlaying) }
             // 事件驱动 ticker：仅播放中周期刷新；暂停/停止时停表并做一次最终刷新，
             // 把最后的进度/歌词行写进 uiState，避免 UI 停在旧帧。
             if (isPlaying) startTicker() else stopTickerWithFinalRefresh()
@@ -459,10 +476,12 @@ object PlayerManager {
         }
 
         override fun onPlaybackStateChanged(playbackState: Int) {
-            _uiState.value = _uiState.value.copy(
-                buffering = playbackState == Player.STATE_BUFFERING,
-                error = null
-            )
+            _uiState.update {
+                it.copy(
+                    buffering = playbackState == Player.STATE_BUFFERING,
+                    error = null
+                )
+            }
             // 队列由应用层管理（每次只 setMediaItem 单曲），
             // 播完不会自动切歌，必须在此监听 ENDED 主动推进——这是歌单无法连续播放的根因。
             if (playbackState == Player.STATE_ENDED) {
@@ -493,20 +512,20 @@ object PlayerManager {
                 group.type == C.TRACK_TYPE_VIDEO && group.isSelected
             }
             if (_uiState.value.isVideo != hasVideo) {
-                _uiState.value = _uiState.value.copy(isVideo = hasVideo)
+                _uiState.update { it.copy(isVideo = hasVideo) }
             }
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
             if (mediaItem == null) return
-            val idx = _uiState.value.queueIndex
-            if (idx in _uiState.value.queue.indices) {
-                val entry = _uiState.value.queue[idx]
-                val fav = playbackStore?.isFavorite(entry.raw) ?: false
-                _uiState.value = _uiState.value.copy(current = entry, isFavorite = fav)
-                playbackStore?.addHistory(entry.raw)
-                fetchLyric(entry)
-            }
+            // 以媒体自身 mediaId（plugin:id，与 entryKeyOf 同规则）定位条目，
+            // 避免连点切歌提交期 queueIndex 已指向别的条目而把 current/历史/歌词写错。
+            val wantId = mediaItem.mediaId
+            val entry = _uiState.value.queue.firstOrNull { entryKeyOf(it) == wantId } ?: return
+            val fav = playbackStore?.isFavorite(entry.raw) ?: false
+            _uiState.update { it.copy(current = entry, isFavorite = fav) }
+            playbackStore?.addHistory(entry.raw)
+            fetchLyric(entry)
         }
     }
 
@@ -539,14 +558,17 @@ object PlayerManager {
     /** 把播放器当前进度/歌词行/音量刷进 uiState（ticker 周期与 seek/discontinuity 共用）。 */
     private fun refreshTickState() {
         val p = player ?: return
-        val st = _uiState.value
-        _uiState.value = st.copy(
-            durationMs = p.duration,
-            positionMs = p.currentPosition,
-            bufferedPositionMs = p.bufferedPosition,
-            lrcIndex = findLrcIndex(st.lrcLines, p.currentPosition),
-            volume = (p.volume * 100).toInt()
-        )
+        // lrcIndex 在 update 闭包内基于最新 lrcLines 计算：避免与 fetchLyric 并发写歌词时
+        // 用旧快照的 lrcLines 算出的索引覆盖刚写进去的新歌词列表。
+        _uiState.update {
+            it.copy(
+                durationMs = p.duration,
+                positionMs = p.currentPosition,
+                bufferedPositionMs = p.bufferedPosition,
+                lrcIndex = findLrcIndex(it.lrcLines, p.currentPosition),
+                volume = (p.volume * 100).toInt()
+            )
+        }
         // 每秒进度刷新顺带检查：进入后半段则后台预解析下一首
         maybePreloadNext()
     }
@@ -584,12 +606,13 @@ object PlayerManager {
     ) {
         // 插件解析（含阻塞式 JS 调用）放 Default 线程；
         // ExoPlayer 只能在主线程访问，拿到地址后必须切回主线程。
-        val my = ++playSession
+        val my = playSession.incrementAndGet()
+        lastLyricKey = null // 新会话重置：重播/切歌后重试同一首歌时不再因旧 key 被跳过
         scope.launch(Dispatchers.Default) {
             try {
                 // 快速连点时本协程可能已过期（更新的切歌请求接管）：必须先校验再写状态。
                 // 旧实现在守卫前写 current/queue，旧协程若晚调度会用旧歌覆盖新歌的 UI 状态。
-                if (my != playSession) return@launch
+                if (my != playSession.get()) return@launch
                 preloadTriggeredFor = null // 新曲开始：允许对本曲触发一次"下一首预加载"
                 // 无封面且开启了兜底补全时，按 曲名/歌手 换成带 lrc.cx 回退封面的条目：
                 // QueueEntry.artwork 是不可变构造值，只能通过 copy 产生新条目，原地改 raw 无效。
@@ -599,12 +622,14 @@ object PlayerManager {
                 val effectiveQueue = provided.map { withFallbackArtwork(it) }
                 val shown = effectiveQueue[startIndex.coerceIn(0, effectiveQueue.lastIndex)]
                 if (shown !== item) showMetaNotice("已用 lrc.cx 补充封面")
-                _uiState.value = _uiState.value.copy(
-                    current = shown,
-                    queue = effectiveQueue,
-                    queueIndex = startIndex,
-                    error = null
-                )
+                _uiState.update {
+                    it.copy(
+                        current = shown,
+                        queue = effectiveQueue,
+                        queueIndex = startIndex,
+                        error = null
+                    )
+                }
                 // 队列内容/索引已变化：调度防抖写入恢复快照
                 scheduleResumeSave()
                 val rt = runtime ?: error("PlayerManager runtime not attached")
@@ -677,18 +702,19 @@ object PlayerManager {
                 withContext(Dispatchers.Main) {
                     // 会话守卫：解析期间用户又点了别的歌，本次过期结果直接丢弃，
                     // 否则旧地址 setMediaItem 会覆盖新歌（"点新歌放旧歌"）
-                    if (my != playSession) return@withContext
+                    if (my != playSession.get()) return@withContext
                     // 每个音源可能带不同请求头：更新 DataSourceFactory（同一 DefaultMediaSourceFactory 实例）
                     val p = requirePlayer()
-                    if (headers.isNotEmpty()) {
-                        mediaSourceFactory?.setDataSourceFactory(
-                            DefaultHttpDataSource.Factory()
-                                .setAllowCrossProtocolRedirects(true)
-                                .setDefaultRequestProperties(headers)
-                        )
-                    }
+                    // 每首歌都重置默认请求头：上一首若带 Cookie/Authorization，
+                    // 空 headers 时不重置会把鉴权头带到下一首公开直链上。
+                    mediaSourceFactory?.setDataSourceFactory(
+                        DefaultHttpDataSource.Factory()
+                            .setAllowCrossProtocolRedirects(true)
+                            .setDefaultRequestProperties(headers)
+                    )
                     p.setMediaItem(mediaItem)
                     p.prepare()
+                    pendingMediaId = mediaItem.mediaId // 提交后记录本次媒体身份，transition 据此定位队列条目
                     // 恢复播放：prepare 后先 seek 到上次进度再起播（未 ready 的 seek 会在 prepared 后生效）
                     if (startOffsetMs > 0) p.seekTo(startOffsetMs)
                     p.play()
@@ -709,7 +735,7 @@ object PlayerManager {
         val st = _uiState.value
         if (index in st.queue.indices && index != st.queueIndex) {
             val entry = st.queue[index]
-            _uiState.value = st.copy(queueIndex = index)
+            _uiState.update { it.copy(queueIndex = index) }
             // 当前索引变化：调度防抖写入恢复快照（next/prev 最终都走到这里）
             scheduleResumeSave()
             play(entry.plugin, entry, st.queue, index)
@@ -743,7 +769,7 @@ object PlayerManager {
     /** 设置播放模式并持久化。 */
     fun setPlayMode(mode: PlayMode) {
         qualityPrefs?.edit()?.putString(KEY_PLAY_MODE, mode.name)?.apply()
-        _uiState.value = _uiState.value.copy(playMode = mode)
+        _uiState.update { it.copy(playMode = mode) }
     }
 
     /** 循环切换：顺序 → 单曲循环 → 随机 → 顺序。 */
@@ -810,7 +836,8 @@ object PlayerManager {
     fun toggleFavorite(listId: String = com.tvmusic.data.PlaybackStore.DEFAULT_FAV_ID): Boolean {
         val entry = _uiState.value.current ?: return false
         val fav = playbackStore?.toggleFavorite(entry.raw, listId) ?: false
-        _uiState.value = _uiState.value.copy(isFavorite = playbackStore?.isFavorite(entry.raw) ?: fav)
+        // 与函数契约一致：isFavorite 表示"该条目是否在任意专辑内"，收藏/取消后重新查询
+        _uiState.update { it.copy(isFavorite = playbackStore?.isFavorite(entry.raw) ?: fav) }
         return fav
     }
 
@@ -953,10 +980,10 @@ object PlayerManager {
     /** 播放页瞬时提示：lrc.cx 兜底进行中/成功/失败时的可见反馈。 */
     private fun showMetaNotice(text: String) {
         metaNoticeJob?.cancel()
-        _uiState.value = _uiState.value.copy(metaNotice = text)
+        _uiState.update { it.copy(metaNotice = text) }
         metaNoticeJob = scope.launch {
             kotlinx.coroutines.delay(5_000)
-            _uiState.value = _uiState.value.copy(metaNotice = null)
+            _uiState.update { it.copy(metaNotice = null) }
         }
     }
 
@@ -1000,10 +1027,10 @@ object PlayerManager {
                         else -> showMetaNotice("lrc.cx 未找到该歌曲歌词")
                     }
                 }
-                _uiState.value = _uiState.value.copy(lrcLines = lines.sortedBy { it.timeMs }, lrcIndex = -1)
+                _uiState.update { it.copy(lrcLines = lines.sortedBy { it.timeMs }, lrcIndex = -1) }
             } catch (_: Exception) {
                 if (gen == lrcGeneration) {
-                    _uiState.value = _uiState.value.copy(lrcLines = emptyList())
+                    _uiState.update { it.copy(lrcLines = emptyList()) }
                 }
             }
         }

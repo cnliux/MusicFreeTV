@@ -56,11 +56,13 @@ private fun generateQr(text: String, size: Int): Bitmap {
     hints[com.google.zxing.EncodeHintType.ERROR_CORRECTION] = ErrorCorrectionLevel.M
     hints[com.google.zxing.EncodeHintType.MARGIN] = 1
     val matrix: BitMatrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size, hints)
-    val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    val pixels = IntArray(size * size)
     for (x in 0 until size) {
         for (y in 0 until size) {
-            bmp.setPixel(x, y, if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+            pixels[x + y * size] = if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE
         }
     }
+    val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+    bmp.setPixels(pixels, 0, size, 0, 0, size, size)
     return bmp
 }

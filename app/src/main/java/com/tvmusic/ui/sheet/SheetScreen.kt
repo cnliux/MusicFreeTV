@@ -98,9 +98,7 @@ fun SheetScreen(
                         count = entries.size
                     )
                 }
-                itemsIndexed(entries, key = { i, item ->
-                    "${item.optString("platform")}-${item.optString("id")}-$i"
-                }) { index, item ->
+                itemsIndexed(entries, key = { _, item -> playback.primaryKey(item) }) { index, item ->
                     val key = playback.primaryKey(item)
                     MusicRow(
                         index = index,

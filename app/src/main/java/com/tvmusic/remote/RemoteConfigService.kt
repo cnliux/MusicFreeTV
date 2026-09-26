@@ -603,12 +603,8 @@ class RemoteConfigService : Service() {
                 val c = com.tvmusic.ui.theme.LyricSettings.config.value
                 respond(socket, 200, JSONObject()
                     .put("ok", true)
-                    .put("enabled", c.enabled)
                     .put("fontSizeSp", c.fontSizeSp)
                     .put("colorHex", c.colorHex)
-                    .put("position", c.position.name)
-                    .put("offsetY", c.offsetY)
-                    .put("opacity", c.opacity)
                     .toString())
             }
             method == "POST" && path == "/api/lyric" -> {
@@ -616,17 +612,9 @@ class RemoteConfigService : Service() {
                 val json = runCatching { JSONObject(body) }.getOrNull()
                 val cur = com.tvmusic.ui.theme.LyricSettings.config.value
                 val next = com.tvmusic.ui.theme.LyricConfig(
-                    enabled = json?.optBoolean("enabled", cur.enabled) ?: cur.enabled,
                     fontSizeSp = json?.optInt("fontSizeSp", cur.fontSizeSp)?.coerceIn(10, 40) ?: cur.fontSizeSp,
                     colorHex = json?.optString("colorHex", cur.colorHex)?.trim()?.trimStart('#')?.take(6)
-                        ?.ifBlank { cur.colorHex } ?: cur.colorHex,
-                    position = try {
-                        com.tvmusic.ui.theme.LyricPosition.valueOf(
-                            json?.optString("position", cur.position.name) ?: cur.position.name
-                        )
-                    } catch (_: Exception) { cur.position },
-                    offsetY = json?.optInt("offsetY", cur.offsetY)?.coerceIn(-300, 300) ?: cur.offsetY,
-                    opacity = json?.optDouble("opacity", cur.opacity.toDouble())?.toFloat()?.coerceIn(0.2f, 1f) ?: cur.opacity
+                        ?.ifBlank { cur.colorHex } ?: cur.colorHex
                 )
                 com.tvmusic.ui.theme.LyricSettings.update(next)
                 respond(socket, 200, JSONObject().put("ok", true).toString())
@@ -665,12 +653,8 @@ class RemoteConfigService : Service() {
                     .put(
                         "lyric",
                         JSONObject()
-                            .put("enabled", c.enabled)
                             .put("fontSizeSp", c.fontSizeSp)
                             .put("colorHex", c.colorHex)
-                            .put("position", c.position.name)
-                            .put("offsetY", c.offsetY)
-                            .put("opacity", c.opacity)
                     )
                     .put("favLists", listsArr)
                     .toString()
@@ -699,15 +683,9 @@ class RemoteConfigService : Service() {
                 if (lo != null) {
                     val cur = com.tvmusic.ui.theme.LyricSettings.config.value
                     val next = com.tvmusic.ui.theme.LyricConfig(
-                        enabled = lo.optBoolean("enabled", cur.enabled),
                         fontSizeSp = lo.optInt("fontSizeSp", cur.fontSizeSp).coerceIn(10, 40),
                         colorHex = lo.optString("colorHex", cur.colorHex).trim().trimStart('#').take(6)
-                            .ifBlank { cur.colorHex },
-                        position = try {
-                            com.tvmusic.ui.theme.LyricPosition.valueOf(lo.optString("position", cur.position.name))
-                        } catch (_: Exception) { cur.position },
-                        offsetY = lo.optInt("offsetY", cur.offsetY).coerceIn(-300, 300),
-                        opacity = lo.optDouble("opacity", cur.opacity.toDouble()).toFloat().coerceIn(0.2f, 1f)
+                            .ifBlank { cur.colorHex }
                     )
                     com.tvmusic.ui.theme.LyricSettings.update(next)
                     lyricApplied = true
@@ -1689,10 +1667,9 @@ private val PAGE_HTML = """<!DOCTYPE html>
       <div class="muted">选择后立即应用到电视端与本页。</div>
     </div>
     <div class="card">
-      <h2>歌词显示</h2>
+      <h2>播放页歌词</h2>
       <div class="row" style="border:none;padding:0 0 6px;">
-        <span class="muted" style="flex:1;">在播放页与首页底部显示歌词</span>
-        <button class="small" id="lyricToggle" onclick="toggleLyric()">开</button>
+        <span class="muted" style="flex:1;">播放页逐行歌词的显示效果</span>
       </div>
       <div class="row" style="border:none;padding:6px 0;">
         <span class="muted" style="flex:1;">字体大小</span>
@@ -1705,18 +1682,6 @@ private val PAGE_HTML = """<!DOCTYPE html>
         <input type="color" id="lyricColor" style="width:44px;height:30px;border:none;background:none;padding:0;" onchange="setLyricColor(this.value)">
       </div>
       <div class="chips" id="lyricColorBar" style="margin-top:2px;"></div>
-      <div class="chips" id="lyricPosBar" style="margin-top:8px;"></div>
-      <div class="row" style="border:none;padding:6px 0 0;margin-top:8px;">
-        <span class="muted" style="flex:1;">垂直微调</span>
-        <button class="ghost small" onclick="stepLyricOffset(-20)">↑</button>
-        <span id="lyricOffset" style="min-width:44px;text-align:center;"></span>
-        <button class="ghost small" onclick="stepLyricOffset(20)">↓</button>
-      </div>
-      <div class="row" style="border:none;padding:6px 0 0;margin-top:8px;">
-        <span class="muted" style="flex:1;">透明度</span>
-        <input type="range" id="lyricOpacityBar" min="20" max="100" value="100" style="flex:2;" onchange="setLyricOpacity(this.value)" oninput="el('lyricOpacity').textContent=this.value+'%'">
-        <span id="lyricOpacity" style="min-width:44px;text-align:center;">100%</span>
-      </div>
     </div>
     <div class="card">
       <h2>歌词/封面补全</h2>
@@ -2660,8 +2625,8 @@ function loadThemes() {
   }).catch(function () {});
 }
 
-/* ---------------- 歌词显示设置 ---------------- */
-var lyricCfg = { enabled: true, fontSizeSp: 16, colorHex: 'FFFFFF', position: 'CENTER', offsetY: 0, opacity: 1.0 };
+/* ---------------- 播放页歌词设置 ---------------- */
+var lyricCfg = { fontSizeSp: 16, colorHex: 'FFFFFF' };
 var LRC_COLORS = [
   { hex: 'FFFFFF', name: '白' },
   { hex: 'FF6B9D', name: '粉' },
@@ -2669,18 +2634,8 @@ var LRC_COLORS = [
   { hex: 'FFB74D', name: '橙' },
   { hex: '34D399', name: '绿' }
 ];
-var LRC_POS = [
-  { id: 'TOP', name: '顶部' },
-  { id: 'CENTER', name: '居中' },
-  { id: 'BOTTOM', name: '底部' }
-];
 function renderLyric() {
-  el('lyricToggle').textContent = lyricCfg.enabled ? '开' : '关';
-  el('lyricToggle').className = 'small' + (lyricCfg.enabled ? '' : ' ghost');
   el('lyricSize').textContent = lyricCfg.fontSizeSp + ' sp';
-  el('lyricOffset').textContent = lyricCfg.offsetY;
-  el('lyricOpacity').textContent = Math.round(lyricCfg.opacity * 100) + '%';
-  el('lyricOpacityBar').value = Math.round(lyricCfg.opacity * 100);
   el('lyricColor').value = '#' + lyricCfg.colorHex;
   var cb = el('lyricColorBar');
   cb.innerHTML = '';
@@ -2692,42 +2647,24 @@ function renderLyric() {
     chip.onclick = function () { saveLyric({ colorHex: c.hex }); };
     cb.appendChild(chip);
   });
-  var pb = el('lyricPosBar');
-  pb.innerHTML = '';
-  LRC_POS.forEach(function (p) {
-    var chip = document.createElement('span');
-    chip.className = 'chip' + (p.id === lyricCfg.position ? ' on' : '');
-    chip.textContent = p.name;
-    chip.onclick = function () { saveLyric({ position: p.id }); };
-    pb.appendChild(chip);
-  });
 }
 function saveLyric(patch) {
   var body = {
-    enabled: patch.enabled != null ? patch.enabled : lyricCfg.enabled,
     fontSizeSp: patch.fontSizeSp != null ? patch.fontSizeSp : lyricCfg.fontSizeSp,
-    colorHex: patch.colorHex != null ? patch.colorHex : lyricCfg.colorHex,
-    position: patch.position != null ? patch.position : lyricCfg.position,
-    offsetY: patch.offsetY != null ? patch.offsetY : lyricCfg.offsetY,
-    opacity: patch.opacity != null ? patch.opacity : lyricCfg.opacity
+    colorHex: patch.colorHex != null ? patch.colorHex : lyricCfg.colorHex
   };
   post('/api/lyric', body).then(function (d) {
     if (d.ok) { lyricCfg = body; renderLyric(); }
   }).catch(function () { toast('保存失败'); });
 }
-function toggleLyric() { saveLyric({ enabled: !lyricCfg.enabled }); }
 function stepLyricSize(delta) {
   saveLyric({ fontSizeSp: Math.min(40, Math.max(10, lyricCfg.fontSizeSp + delta)) });
 }
-function stepLyricOffset(delta) {
-  saveLyric({ offsetY: Math.min(300, Math.max(-300, lyricCfg.offsetY + delta)) });
-}
 function setLyricColor(v) { saveLyric({ colorHex: String(v).replace('#', '').toUpperCase() }); }
-function setLyricOpacity(v) { saveLyric({ opacity: Math.min(1, Math.max(0.2, parseInt(v) / 100)) }); }
 function loadLyric() {
   api('/api/lyric').then(function (d) {
     if (d.ok) {
-      lyricCfg = { enabled: d.enabled, fontSizeSp: d.fontSizeSp, colorHex: d.colorHex, position: d.position, offsetY: d.offsetY || 0, opacity: d.opacity != null ? d.opacity : 1.0 };
+      lyricCfg = { fontSizeSp: d.fontSizeSp, colorHex: d.colorHex };
       renderLyric();
     }
   }).catch(function () {});

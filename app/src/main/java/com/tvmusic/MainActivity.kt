@@ -11,6 +11,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,7 +48,6 @@ import androidx.navigation.navArgument
 import com.tvmusic.core.TvMusicApp
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.ui.components.AppTitleBar
-import com.tvmusic.ui.components.LyricOverlay
 import com.tvmusic.ui.components.tvFocus
 import com.tvmusic.ui.home.HomeScreen
 import com.tvmusic.ui.home.HomeViewModel
@@ -66,14 +66,42 @@ import com.tvmusic.ui.toplist.TopListViewModel
 
 class MainActivity : ComponentActivity() {
 
+    /** 无操作 60 秒且正在播放时自动进入播放器页（电视待机显示）。true 由 Compose 侧消费后复位。 */
+    private val autoNavigateToPlayer = androidx.compose.runtime.mutableStateOf(false)
+
+    private val idleHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    private val idleRunnable = object : Runnable {
+        override fun run() {
+            if (PlayerManager.uiState.value.isPlaying) autoNavigateToPlayer.value = true
+            idleHandler.postDelayed(this, IDLE_INTERVAL_MS)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        idleHandler.postDelayed(idleRunnable, IDLE_INTERVAL_MS)
         setContent {
             com.tvmusic.ui.theme.MusicFreeTheme {
                 App()
             }
         }
+    }
+
+    /** 遥控器按键/触屏等任何交互都会回调：重置无操作计时。 */
+    override fun onUserInteraction() {
+        idleHandler.removeCallbacks(idleRunnable)
+        idleHandler.postDelayed(idleRunnable, IDLE_INTERVAL_MS)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        idleHandler.removeCallbacks(idleRunnable)
+    }
+
+    private companion object {
+        const val IDLE_INTERVAL_MS = 60_000L
     }
 
     /** 调试：确认遥控器按键是否到达 Activity（logcat -s DpadDebug）。仅 debug 构建启用。 */
@@ -95,12 +123,14 @@ class MainActivity : ComponentActivity() {
 
         val needed = navController.currentBackStackEntryAsState().value
         val route = needed?.destination?.route
-        val tabKey = when {
-            route == "search" -> "search"
-            route == "settings" -> "settings"
-            route == "mylist" -> "mylist"
-            route == "about" -> "about"
-            else -> "home"
+        val tabKey = when (route) {
+            "search" -> "search"
+            "settings" -> "settings"
+            "mylist" -> "mylist"
+            "about" -> "about"
+            "home", null -> "home"
+            // 二级/详情页（recommend/toplist/sheet/player）不高亮任何页签
+            else -> ""
         }
 
         // 主界面按返回：弹退出确认，避免遥控器返回键一按就直接退出应用
@@ -111,15 +141,26 @@ class MainActivity : ComponentActivity() {
             showExitDialog.value = true
         }
 
-        Box(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        // 无操作 60 秒且正在播放：自动进入播放器页（已在播放页则只消费标记不导航）
+        androidx.compose.runtime.LaunchedEffect(autoNavigateToPlayer.value) {
+            if (autoNavigateToPlayer.value) {
+                autoNavigateToPlayer.value = false
+                if (route != "player") {
+                    navController.navigate("player") { launchSingleTop = true }
+                }
+            }
+        }
+
+Box(Modifier.focusable().fillMaxSize()) {
+         Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             AppTitleBar(
-                selected = if (route == "sheet" || route == "player") "" else tabKey,
+                selected = tabKey,
                 onSelect = { key ->
                     when (key) {
-                        "home" -> navController.navigate("home") {
-                            popUpTo(navController.graph.startDestinationId) { inclusive = true }
-                        }
+"home" -> navController.navigate("home") {
+                             popUpTo(navController.graph.startDestinationId) { inclusive = true }
+                             launchSingleTop = true
+                         }
                         // launchSingleTop：重复点同一页签不再叠层（叠层会让返回键"按了没反应"）
                         "search" -> navController.navigate("search") { launchSingleTop = true }
                         "settings" -> navController.navigate("settings") { launchSingleTop = true }
@@ -247,35 +288,24 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // 全局悬浮歌词层：仅在非播放页叠加（播放页有独立逐行歌词视图）。
-                // 就地订阅 uiState，避免在 App 根部订阅导致 ticker 每秒驱动整棵树重组
-                if (route != "player") {
-                    val ps by com.tvmusic.player.PlayerManager.uiState.collectAsState()
-                    if (ps.current != null) {
-                        LyricOverlay(
-                            lines = ps.lrcLines,
-                            currentIndex = ps.lrcIndex
-                        )
-                    }
                 }
-            }
 
             // 迷你播放条：同上，订阅粒度收敛到本作用域（标题栏/NavHost 不再每秒重组）
             if (route != "player") {
                 val ps by com.tvmusic.player.PlayerManager.uiState.collectAsState()
                 if (ps.current != null) {
-                    val lyricCfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
                     MiniPlayerBar(
                         entry = ps.current!!,
                         isPlaying = ps.isPlaying,
                         positionMs = ps.positionMs,
                         durationMs = ps.durationMs,
-                        lyricLine = if (lyricCfg.enabled)
-                            ps.lrcLines.getOrNull(ps.lrcIndex)?.text ?: "" else "",
+                        lyricLine = ps.lrcLines.getOrNull(ps.lrcIndex)?.text ?: "",
                         onPrev = { PlayerManager.prev() },
                         onToggle = { PlayerManager.playPause() },
                         onNext = { PlayerManager.next() },
-                        onClick = { navController.navigate("player") }
+                        onClick = {
+                            navController.navigate("player") { launchSingleTop = true }
+                        }
                     )
                 }
             }

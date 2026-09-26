@@ -1,23 +1,30 @@
 package com.tvmusic.ui.recommend
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import com.tvmusic.ui.components.BackTopBar
 import com.tvmusic.ui.components.EmptyState
@@ -27,6 +34,7 @@ import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
 import com.tvmusic.ui.sheet.DetailKind
 import com.tvmusic.ui.sheet.DetailTarget
+import kotlinx.coroutines.flow.distinctUntilChanged
 import org.json.JSONObject
 
 @Composable
@@ -47,12 +55,16 @@ fun RecommendScreen(
 
     val gridState = rememberLazyGridState()
 
-    // 接近底部自动翻页（对应 RN FlashList onEndReached）
-    LaunchedEffect(gridState, sheets.size, isEnd, loadingMore) {
+    // 接近底部自动翻页（对应 RN FlashList onEndReached）。
+    // 单 key 启动一次收集器；游标+总数随布局读取（不捕获陈旧快照），
+    // distinctUntilChanged 去重 + VM 侧 loading/isEnd 防重入，避免加载风暴。
+    LaunchedEffect(gridState) {
         androidx.compose.runtime.snapshotFlow {
-            gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-        }.collect { last ->
-            if (last >= 0 && last >= sheets.size - 8) viewModel.loadMore()
+            val info = gridState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: -1
+            last to info.totalItemsCount
+        }.distinctUntilChanged().collect { (last, total) ->
+            if (last >= 0 && last >= total - 8) viewModel.loadMore()
         }
     }
 
@@ -114,11 +126,11 @@ fun RecommendScreen(
                     state = gridState,
                     columns = GridCells.Adaptive(164.dp),
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 28.dp, end = 28.dp, top = 8.dp, bottom = 36.dp),
+                    contentPadding = PaddingValues(start = 28.dp, end = 28.dp, top = 8.dp, bottom = 64.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    gridItems(sheets, key = { "${it.plugin}-${it.raw.optString("id")}-${it.title}" }) { sheet ->
+                    gridItemsIndexed(sheets, key = { i, sheet -> "${sheet.plugin}-${sheet.raw.optString("id")}-${sheet.title}-$i" }) { i, sheet ->
                         MediaCard(
                             title = sheet.title,
                             subtitle = sheet.description.ifBlank { selectedPlatform },
@@ -138,16 +150,24 @@ fun RecommendScreen(
                 }
             }
 
-            // 底部浮层：加载中提示；分页失败时提供重试（自动翻页已触发过才会出现此层）
-            if (loadingMore || (error != null && sheets.isNotEmpty())) {
-                LoadMoreFooter(
-                    loading = loadingMore,
-                    hasMore = false,
-                    error = if (!loadingMore) error else null,
-                    allLoadedText = null,
-                    onLoadMore = { viewModel.loadMore() },
-                    modifier = Modifier.align(Alignment.BottomCenter)
-                )
+            // 底部加载更多：自动翻页在铺满一屏前不触发时，用户可手动加载下一页。
+            // 悬浮于网格之上，包一层半透明圆角底，避免与卡片文案叠在一起不可读。
+            if (loadingMore || (error != null && sheets.isNotEmpty()) || (!isEnd && sheets.isNotEmpty())) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 14.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.background.copy(alpha = 0.9f))
+                ) {
+                    LoadMoreFooter(
+                        loading = loadingMore,
+                        hasMore = !isEnd,
+                        error = if (!loadingMore) error else null,
+                        allLoadedText = null,
+                        onLoadMore = { viewModel.loadMore() }
+                    )
+                }
             }
         }
     }

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -20,6 +21,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -31,8 +33,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.sp
 import com.tvmusic.plugin.PlatformHealth
+import kotlinx.coroutines.delay
 import com.tvmusic.ui.components.ErrorBox
 import com.tvmusic.ui.components.SectionHeader
 import com.tvmusic.ui.components.tvFocus
@@ -52,10 +57,23 @@ fun SettingsScreen(
     val syncReport by viewModel.syncReport.collectAsState()
     val healthByPlatform = remember(health) { health.associateBy { it.platform } }
 
+    LaunchedEffect(message) {
+        if (message != null) {
+            delay(3_000)
+            viewModel.clearMessage()
+        }
+    }
+
     var subUrl by remember { mutableStateOf("") }
     var pluginUrl by remember { mutableStateOf("") }
 
     LazyColumn(Modifier.fillMaxSize()) {
+        // 提示信息置于首项：打开设置即可见，3s 后自动消失
+        message?.let { msg ->
+            item(key = "__message__") {
+                Box(Modifier.padding(horizontal = 28.dp, vertical = 4.dp)) { ErrorBox(msg) }
+            }
+        }
 
         item(key = "remote") {
             SectionHeader("远程管理（手机/电脑访问电视）")
@@ -97,7 +115,7 @@ fun SettingsScreen(
             SettingsCard {
                 // 预设列表来自播放器音效实例：进入设置页即确保播放器已创建（否则列表只有"原声"）
                 androidx.compose.runtime.LaunchedEffect(Unit) { com.tvmusic.player.PlayerManager.ensurePlayer() }
-                val pmState by com.tvmusic.player.PlayerManager.uiState.collectAsState()
+                val pmState by com.tvmusic.player.PlayerManager.screenState.collectAsState(initial = com.tvmusic.player.PlayerManager.uiState.value)
                 val presets by com.tvmusic.player.PlayerManager.eqPresets.collectAsState()
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 6.dp),
@@ -126,18 +144,18 @@ fun SettingsScreen(
                         Modifier.fillMaxWidth().padding(top = 6.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        presets.take(6).forEachIndexed { idx, name ->
+                        presets.forEachIndexed { idx, name ->
                             val active = idx == pmState.eqPreset
-                            Box(
-                                modifier = Modifier
-                                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(
-                                        if (active) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.surfaceVariant
-                                    )
-                                    .clickable { com.tvmusic.player.PlayerManager.setEqPreset(idx) }
-                                    .padding(horizontal = 12.dp, vertical = 7.dp)
+Box(
+                                 modifier = Modifier
+                                     .clip(RoundedCornerShape(8.dp))
+                                     .background(
+                                         if (active) MaterialTheme.colorScheme.primary
+                                         else MaterialTheme.colorScheme.surfaceVariant
+                                     )
+                                     .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                                     .clickable { com.tvmusic.player.PlayerManager.setEqPreset(idx) }
+                                     .padding(horizontal = 12.dp, vertical = 7.dp)
                             ) {
                                 Text(
                                     name,
@@ -240,77 +258,82 @@ fun SettingsScreen(
             }
         }
 
-        item(key = "plugins") {
+        item(key = "plugins-header") {
             SectionHeader("插件（${plugins.size}）")
+            // 健康状态为本次运行统计（内存态，重启后清零）
+            Text(
+                "健康状态为本次运行统计（内存态，重启后清零）",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 11.sp
+            )
+        }
+        items(plugins, key = { it.name }) { plugin ->
+            val info = plugin.info
+            val h = info?.platform?.let { healthByPlatform[it] }
             SettingsCard {
-                Text(
-                    "健康状态为本次运行统计（内存态，重启后清零）",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp
-                )
-                plugins.forEach { plugin ->
-                    val info = plugin.info
-                    val h = info?.platform?.let { healthByPlatform[it] }
-                    SettingsRow(
-                        title = plugin.name.ifBlank { info?.platform ?: "?" },
-                        subtitle = buildString {
-                            if (h != null && h.calls > 0) {
-                                append("调用${h.calls}次/失败${h.fails} · ")
-                            }
-                            append(
-                                listOf(
-                                    info?.platform,
-                                    plugin.version ?: info?.version,
-                                    plugin.loadError?.let { "加载失败" }
-                                ).filterNotNull().joinToString(" · ")
-                            )
-                            if (h != null && h.fails > 0 && !h.lastError.isNullOrBlank()) {
-                                append(" · 最近错误：${h.lastError}")
-                            }
-                        },
-                        dotColor = healthDotColor(h)
-                    ) {
-                        if (plugin.loadError.isNullOrBlank() && info != null && info.userVariables.isNotEmpty()) {
-                            val key = info.platform
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                ActionButton(if (key in expandedVars) "收起变量" else "配置变量") {
-                                    viewModel.loadVarsAsDraft(key)
-                                    viewModel.toggleExpanded(key)
-                                }
+                SettingsRow(
+                    title = plugin.name.ifBlank { info?.platform ?: "?" },
+                    subtitle = buildString {
+                        if (h != null && h.calls > 0) {
+                            append("调用${h.calls}次/失败${h.fails} · ")
+                        }
+                        append(
+                            listOf(
+                                info?.platform,
+                                plugin.version ?: info?.version,
+                                plugin.loadError?.let { "加载失败" }
+                            ).filterNotNull().joinToString(" · ")
+                        )
+                        if (h != null && h.fails > 0 && !h.lastError.isNullOrBlank()) {
+                            append(" · 最近错误：${h.lastError}")
+                        }
+                    },
+                    dotColor = healthDotColor(h)
+                ) {
+                    if (plugin.loadError.isNullOrBlank() && info != null && info.userVariables.isNotEmpty()) {
+                        val key = info.platform
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            ActionButton(if (key in expandedVars) "收起变量" else "配置变量") {
+                                viewModel.loadVarsAsDraft(key)
+                                viewModel.toggleExpanded(key)
                             }
                         }
-                        Switch(
-                            checked = plugin.enabled,
-                            onCheckedChange = { viewModel.togglePlugin(plugin.name, it) },
-                            modifier = Modifier.tvFocus()
-                        )
-                        ActionButton("卸载") { viewModel.uninstall(plugin.name) }
                     }
+                    Switch(
+                        checked = plugin.enabled,
+                        onCheckedChange = { viewModel.togglePlugin(plugin.name, it) },
+                        modifier = Modifier.tvFocus()
+                    )
+                    ActionButton("卸载") { viewModel.uninstall(plugin.name) }
+                }
 
-                    if (info != null && info.platform in expandedVars) {
-                        // 变量编辑区
-                        Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
-                            Column(Modifier.fillMaxWidth()) {
-                                info.userVariables.forEach { v ->
-                                    val pk = info.platform
-                                    val draftVal = (drafts[pk] ?: emptyMap())[v.key] ?: ""
-                                    OutlinedTextField(
-                                        value = draftVal,
-                                        onValueChange = { viewModel.setDraft(pk, v.key, it) },
-                                        label = { Text("${v.name}（${v.key}）") },
-                                        singleLine = true,
-                                        shape = RoundedCornerShape(8.dp),
-                                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                                    )
-                                }
-                                Row(Modifier.padding(top = 8.dp)) {
-                                    ActionButton("保存变量") { viewModel.saveVars(info.platform) }
-                                }
+                if (info != null && info.platform in expandedVars) {
+                    // 变量编辑区
+                    Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+                        Column(Modifier.fillMaxWidth()) {
+                            info.userVariables.forEach { v ->
+                                val pk = info.platform
+                                val draftVal = (drafts[pk] ?: emptyMap())[v.key] ?: ""
+                                OutlinedTextField(
+                                    value = draftVal,
+                                    onValueChange = { viewModel.setDraft(pk, v.key, it) },
+                                    label = { Text("${v.name}（${v.key}）") },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                                )
+                            }
+                            Row(Modifier.padding(top = 8.dp)) {
+                                ActionButton("保存变量") { viewModel.saveVars(info.platform) }
                             }
                         }
                     }
                 }
+            }
+        }
 
+        item(key = "plugins-import") {
+            SettingsCard {
                 OutlinedTextField(
                     value = pluginUrl,
                     onValueChange = { pluginUrl = it },
@@ -342,16 +365,16 @@ fun SettingsScreen(
                     val qualities = listOf("low" to "低", "standard" to "标准", "high" to "高", "super" to "无损")
                     qualities.forEach { (key, label) ->
                         val selected = com.tvmusic.player.PlayerManager.quality == key
-                        Box(
-                            modifier = Modifier
-                                .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                                .clickable { com.tvmusic.player.PlayerManager.setQuality(key) }
-                                .background(
-                                    if (selected) MaterialTheme.colorScheme.primaryContainer
-                                    else MaterialTheme.colorScheme.surfaceVariant,
-                                    RoundedCornerShape(8.dp)
-                                )
-                                .padding(horizontal = 16.dp, vertical = 8.dp)
+Box(
+                             modifier = Modifier
+                                 .clickable { com.tvmusic.player.PlayerManager.setQuality(key) }
+                                 .background(
+                                     if (selected) MaterialTheme.colorScheme.primaryContainer
+                                     else MaterialTheme.colorScheme.surfaceVariant,
+                                     RoundedCornerShape(8.dp)
+                                 )
+                                 .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                                 .padding(horizontal = 16.dp, vertical = 8.dp)
                         ) {
                             Text(
                                 label,
@@ -414,33 +437,12 @@ fun SettingsScreen(
         }
 
         item(key = "lyric") {
-            SectionHeader("歌词显示")
+            SectionHeader("播放页歌词")
             SettingsCard {
                 val cfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "显示歌词",
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontSize = 15.sp,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Switch(
-                        checked = cfg.enabled,
-                        onCheckedChange = { on ->
-                            com.tvmusic.ui.theme.LyricSettings.update(cfg.copy(enabled = on))
-                        },
-                        colors = androidx.compose.material3.SwitchDefaults.colors(
-                            checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
-                            checkedTrackColor = MaterialTheme.colorScheme.primary
-                        )
-                    )
-                }
                 // 字号
                 Row(
-                    Modifier.fillMaxWidth().padding(top = 14.dp),
+                    Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("字号", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp,
@@ -491,83 +493,6 @@ fun SettingsScreen(
                         }
                     }
                 }
-                // 位置（播放页歌词区对齐方式）
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("位置", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp,
-                        modifier = Modifier.weight(1f))
-                    listOf(
-                        com.tvmusic.ui.theme.LyricPosition.TOP to "顶部",
-                        com.tvmusic.ui.theme.LyricPosition.CENTER to "居中",
-                        com.tvmusic.ui.theme.LyricPosition.BOTTOM to "底部"
-                    ).forEach { (pos, name) ->
-                        val sel = cfg.position == pos
-                        Box(
-                            modifier = Modifier
-                                .padding(start = 10.dp)
-                                .clip(RoundedCornerShape(16.dp))
-                                .background(if (sel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant)
-                                .tvFocus(shapeOverride = RoundedCornerShape(16.dp))
-                                .clickable {
-                                    com.tvmusic.ui.theme.LyricSettings.update(cfg.copy(position = pos))
-                                }
-                                .padding(horizontal = 16.dp, vertical = 7.dp)
-                        ) {
-                            Text(name, fontSize = 13.sp,
-                                color = if (sel) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                }
-                // 垂直微调：在位置基础上上下移动歌词悬浮层
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("垂直微调", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp,
-                        modifier = Modifier.weight(1f))
-                    StepperButton("↑") {
-                        com.tvmusic.ui.theme.LyricSettings.update(
-                            cfg.copy(offsetY = (cfg.offsetY - 20).coerceIn(-300, 300))
-                        )
-                    }
-                    Text(
-                        "${cfg.offsetY}",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 14.sp,
-                        modifier = Modifier.padding(horizontal = 14.dp)
-                    )
-                    StepperButton("↓") {
-                        com.tvmusic.ui.theme.LyricSettings.update(
-                            cfg.copy(offsetY = (cfg.offsetY + 20).coerceIn(-300, 300))
-                        )
-                    }
-                }
-                // 透明度
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("透明度", color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp,
-                        modifier = Modifier.weight(1f))
-                    StepperButton("－") {
-                        com.tvmusic.ui.theme.LyricSettings.update(
-                            cfg.copy(opacity = (cfg.opacity - 0.1f).coerceIn(0.2f, 1f))
-                        )
-                    }
-                    Text(
-                        "${(cfg.opacity * 100).toInt()}%",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 14.sp,
-                        modifier = Modifier.padding(horizontal = 14.dp)
-                    )
-                    StepperButton("＋") {
-                        com.tvmusic.ui.theme.LyricSettings.update(
-                            cfg.copy(opacity = (cfg.opacity + 0.1f).coerceIn(0.2f, 1f))
-                        )
-                    }
-                }
             }
         }
 
@@ -582,10 +507,6 @@ fun SettingsScreen(
                 )
             }
         }
-    }
-
-    message?.let {
-        Box(Modifier.padding(horizontal = 28.dp, vertical = 4.dp)) { ErrorBox(it) }
     }
 }
 
@@ -663,13 +584,14 @@ private fun healthDotColor(h: PlatformHealth?): Color {
 fun ActionButton(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+            .semantics { contentDescription = label }
             .clickable(onClick = onClick)
             .background(
                 MaterialTheme.colorScheme.primaryContainer,
                 RoundedCornerShape(8.dp)
             )
-            .padding(horizontal = 16.dp, vertical = 9.dp)
+            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+             .padding(horizontal = 16.dp, vertical = 9.dp)
     ) {
         Text(
             label,
@@ -684,6 +606,7 @@ fun ActionButton(label: String, onClick: () -> Unit) {
 private fun StepperButton(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
+            .semantics { contentDescription = label }
             .size(38.dp)
             .clip(RoundedCornerShape(8.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)

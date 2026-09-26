@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -84,13 +85,14 @@ fun PlayerScreen(onBack: () -> Unit) {
     var showNameDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     var showSleepDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
     var showEqDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    val cfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
 
     Box(Modifier.fillMaxSize()) {
         // 背景：模糊封面 + 暗色蒙层
         if (state.current != null) {
             Artwork(
                 state.current!!.artwork,
-                Modifier.fillMaxSize().blur(80.dp).scale(1.2f)
+                Modifier.fillMaxSize().blur(40.dp).scale(1.2f)
             )
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background.copy(alpha = 0.8f)))
         } else {
@@ -202,18 +204,28 @@ fun PlayerScreen(onBack: () -> Unit) {
 
                 // 下：控制条（进度 + 时间 + 全部控制按钮）；进度每秒刷新只在卡片内部重组
                 ProgressSection(onSeek = { PlayerManager.seek(it) })
+                // 按键分三组：状态（收藏/循环）· 主控（快退/上下首/播放/快进）· 功能（倍速/定时/音效/返回），
+                // 组内紧凑、组间留大间距，d-pad 焦点沿行序自然移动
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(22.dp, Alignment.CenterHorizontally),
+                    horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 收藏
+                    // 状态组
                     RoundCtrlButton(
                         if (state.isFavorite) "♥" else "♡",
                         size = 52.dp, iconSize = 22.sp, filled = false,
                         desc = "收藏",
                         onClick = { showFavDialog = true }
                     )
+                    RoundCtrlButton(
+                        playModeIcon(state.playMode), size = 52.dp, iconSize = 20.sp, filled = false,
+                        desc = "循环模式"
+                    ) {
+                        PlayerManager.cyclePlayMode()
+                    }
+                    Spacer(Modifier.width(36.dp))
+                    // 主控组
                     RoundCtrlButton("⏪", size = 52.dp, iconSize = 20.sp, filled = false, desc = "快退30秒") {
                         PlayerManager.seekRelative(-30_000)
                     }
@@ -227,12 +239,8 @@ fun PlayerScreen(onBack: () -> Unit) {
                     RoundCtrlButton("⏩", size = 52.dp, iconSize = 20.sp, filled = false, desc = "快进30秒") {
                         PlayerManager.seekRelative(30_000)
                     }
-                    RoundCtrlButton(
-                        playModeIcon(state.playMode), size = 52.dp, iconSize = 20.sp, filled = false,
-                        desc = "循环模式"
-                    ) {
-                        PlayerManager.cyclePlayMode()
-                    }
+                    Spacer(Modifier.width(36.dp))
+                    // 功能组
                     // 倍速：点击循环 0.75/1/1.25/1.5/2.0，非 1x 时高亮
                     RoundCtrlButton(
                         speedLabel(state.speed),
@@ -333,8 +341,9 @@ private fun PlayerLyricLines(modifier: Modifier = Modifier) {
     val lrcColor = com.tvmusic.ui.theme.LyricSettings.parseColor()
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     LaunchedEffect(currentIndex) {
+        // 列表前有一个 60.dp Spacer 占位（index 0），歌词行实际从 index 1 开始
         if (currentIndex in lines.indices) {
-            listState.animateScrollToItem(currentIndex)
+            listState.animateScrollToItem(currentIndex + 1)
         }
     }
     if (lines.isEmpty()) {
@@ -347,9 +356,8 @@ private fun PlayerLyricLines(modifier: Modifier = Modifier) {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         item { Spacer(Modifier.height(60.dp)) }
-        items(lines.size) { i ->
+        itemsIndexed(lines, key = { i, line -> "${line.timeMs}_$i" }) { i, line ->
             val isCurrent = i == currentIndex
-            val line = lines[i]
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
@@ -384,7 +392,7 @@ private fun FavAlbumDialog(
         DialogTextButton("关闭", onDismiss)
     }) {
         LazyColumn(modifier = Modifier.height(260.dp)) {
-            items(lists) { fl ->
+            items(lists, key = { it.id }) { fl ->
                 val inIt = fl.id in inLists
                 Row(
                     modifier = Modifier
@@ -522,14 +530,14 @@ private fun EqDialog(state: PlayerUiState, onDismiss: () -> Unit) {
 /** 音效弹层的步进小按钮（低音 −/＋）。 */
 @Composable
 private fun EqStepButton(label: String, desc: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 6.dp)
-            .semantics { contentDescription = desc },
+Box(
+         modifier = Modifier
+             .clip(RoundedCornerShape(8.dp))
+             .background(MaterialTheme.colorScheme.surfaceVariant)
+             .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+             .clickable(onClick = onClick)
+             .padding(horizontal = 14.dp, vertical = 6.dp)
+             .semantics { contentDescription = desc },
         contentAlignment = Alignment.Center
     ) { Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp) }
 }
@@ -600,7 +608,7 @@ private fun SeekBar(
     // 遥控快进退的本地基准：positionMs prop 最旧 1 秒一拍，1 秒内连按多键会都基于
     // 同一个旧值而互相覆盖。手动 seek 后以本地值累加，播放器状态追上后（prop 更新）清除
     var manualPos by remember { mutableStateOf<Long?>(null) }
-    androidx.compose.runtime.LaunchedEffect(positionMs, durationMs) { manualPos = null }
+    androidx.compose.runtime.LaunchedEffect(positionMs, durationMs) { if (manualPos != null) return@LaunchedEffect; manualPos = null }
     val effectivePos = manualPos ?: positionMs
     val fraction = dragFraction
         ?: if (durationMs > 0) (effectivePos.toFloat() / durationMs).coerceIn(0f, 1f) else 0f
@@ -667,7 +675,7 @@ private fun SeekBar(
                 }
             }
     ) {
-        val barWidth = maxWidth
+        val barWidth = maxWidth - 16.dp // 手柄在两端的半圆不会溢出到侧 padding 之外
         // 缓冲段：半透明主题色
         Box(
             Modifier

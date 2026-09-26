@@ -32,6 +32,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +54,12 @@ import com.tvmusic.ui.components.ModalCard
 import com.tvmusic.ui.components.tvFocus
 import org.json.JSONObject
 
+/** rememberSaveable 用：进程重建/转屏后仍保持"勾选了哪些条目"。 */
+private val setStringSaver = Saver<Set<String>, List<String>>(
+    save = { it.toList() },
+    restore = { it.toSet() }
+)
+
 /** 我的列表：当前播放队列 / 播放历史 / 多个自定义收藏专辑。 */
 @Composable
 fun MyListScreen(
@@ -60,14 +68,14 @@ fun MyListScreen(
 ) {
     val history by playback.history.collectAsState()
     val lists by playback.lists.collectAsState()
-    val playerState by PlayerManager.uiState.collectAsState()
+    val playerState by PlayerManager.screenState.collectAsState(initial = PlayerManager.uiState.value)
 
     // null = 播放历史；QUEUE_ID = 当前播放队列；其他 = 所选收藏专辑 id
-    var selectedListId by remember { mutableStateOf<String?>(null) }
-    var showNameDialog by remember { mutableStateOf<String?>(null) } // null=不显示；""=新建；其他=重命名的当前名称
+    var selectedListId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showNameDialog by rememberSaveable { mutableStateOf<String?>(null) } // null=不显示；""=新建；其他=重命名的当前名称
     // 批量管理模式：勾选条目后一次性删除（历史 / 收藏专辑通用）
-    var batchMode by remember { mutableStateOf(false) }
-    var checkedKeys by remember { mutableStateOf(setOf<String>()) }
+    var batchMode by rememberSaveable { mutableStateOf(false) }
+    var checkedKeys by rememberSaveable(stateSaver = setStringSaver) { mutableStateOf(setOf<String>()) }
 
     val queue = playerState.queue
     val isQueue = selectedListId == QUEUE_ID
@@ -174,13 +182,13 @@ fun MyListScreen(
                     itemsIndexed(
                         queue,
                         // 稳定 key：用来源插件+条目 id；id 缺失（少数插件）退回索引保证唯一
-                        key = { i, e ->
-                            val id = e.raw.optString(
-                                "id",
-                                e.raw.optString("songmid", e.raw.optString("lid", ""))
-                            )
-                            if (id.isNotBlank()) "q-${e.plugin}-$id" else "q-idx-$i"
-                        }
+key = { i, e ->
+                             val id = e.raw.optString(
+                                 "id",
+                                 e.raw.optString("songmid", e.raw.optString("lid", ""))
+                             )
+                             "q-${e.plugin}-$id-$i"
+                         }
                     ) { index, entry ->
                         QueueRow(
                             index = index,

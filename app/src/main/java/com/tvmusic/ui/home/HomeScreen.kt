@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.LinearProgressIndicator
@@ -116,8 +117,8 @@ fun HomeScreen(
                         // 稳定 key：旧实现用 Int 索引，刷新/换音源后焦点位置与复用会错位
                         key = { i ->
                             when (val s = sections[i]) {
-                                is HomeSection.Recommend -> "rec-${s.plugin}-${s.tagTitle}"
-                                is HomeSection.Ranking -> "rank-${s.plugin}-${s.listTitle}"
+                                is HomeSection.Recommend -> "rec-${s.plugin}-${s.tagTitle}-$i"
+                                is HomeSection.Ranking -> "rank-${s.plugin}-${s.listTitle}-$i"
                                 is HomeSection.Error -> "err-${s.plugin}-$i"
                             }
                         }
@@ -133,7 +134,7 @@ fun HomeScreen(
                                     contentPadding = PaddingValues(horizontal = 28.dp),
                                     horizontalArrangement = Arrangement.spacedBy(14.dp)
                                 ) {
-                                    items(section.items, key = { "${it.plugin}|${it.raw.optString("id").ifBlank { it.title }}" }) { sheet ->
+                                    itemsIndexed(section.items, key = { i, sheet -> "${sheet.plugin}|${sheet.raw.optString("id").ifBlank { sheet.title }}|$i" }) { i, sheet ->
                                         MediaCard(
                                             title = sheet.title,
                                             subtitle = section.plugin,
@@ -158,7 +159,7 @@ fun HomeScreen(
                                     contentPadding = PaddingValues(horizontal = 28.dp),
                                     horizontalArrangement = Arrangement.spacedBy(14.dp)
                                 ) {
-                                    items(section.items, key = { "${it.plugin}|${it.raw.optString("id").ifBlank { it.title }}" }) { item ->
+                                    itemsIndexed(section.items, key = { i, item -> "${item.plugin}|${item.raw.optString("id").ifBlank { item.title }}|$i" }) { i, item ->
                                         MediaCard(
                                             title = item.title,
                                             subtitle = section.plugin,
@@ -290,9 +291,9 @@ private fun NowPlayingPanel(onOpenPlayer: () -> Unit) {
 @Composable
 private fun NowPlayingLive() {
     val ps by PlayerManager.uiState.collectAsState()
-    // 当前歌词行：开关/颜色跟随歌词设置
+    // 当前歌词行：颜色/字号跟随歌词设置
     val lyricCfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
-    val lrcText = if (lyricCfg.enabled && ps.lrcIndex in ps.lrcLines.indices)
+    val lrcText = if (ps.lrcIndex in ps.lrcLines.indices)
         ps.lrcLines[ps.lrcIndex].text else ""
     if (lrcText.isNotBlank()) {
         Text(

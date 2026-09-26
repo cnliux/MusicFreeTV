@@ -49,7 +49,7 @@ class PluginRuntime private constructor(
     private val primary: JsEngine,
     extras: List<JsEngine>,
     private val appContext: Context?,
-    private val variablesProvider: (() -> Map<String, String>)?
+    private val variablesProvider: ((platform: String) -> Map<String, String>)?
 ) {
 
     /**
@@ -224,7 +224,10 @@ class PluginRuntime private constructor(
         fun create(context: Context, store: com.tvmusic.data.PluginStore): PluginRuntime {
             val existing = INSTANCE
             if (existing != null) return existing
-            val provider = { store.allVariablesMerged() }
+            val provider: (String) -> Map<String, String> = { platform ->
+                if (platform.isBlank()) emptyMap()
+                else store.loadVariables(platform)
+            }
             val primary = QuickJsEngine(context.applicationContext, provider)
             primary.initialize()
             val extras = ArrayList<JsEngine>()

@@ -59,6 +59,7 @@ class RecommendViewModel(
     val error: StateFlow<String?> = _error.asStateFlow()
 
     private var page = 1
+    @Volatile
     private var switchSession = 0
 
     init {
@@ -104,8 +105,9 @@ class RecommendViewModel(
         _error.value = null
         viewModelScope.launch(Dispatchers.Default) {
             _loading.value = true
-            _tags.value = loadTags(platform)
+            val tags = loadTags(platform)
             if (my != switchSession) return@launch
+            _tags.value = tags
             loadFirstPage(platform, DEFAULT_TAG, my)
         }
     }

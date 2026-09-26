@@ -31,6 +31,9 @@ class SettingsViewModel(app: TvMusicApp) : ViewModel() {
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message.asStateFlow()
 
+    /** 清除提示（UI 侧会 3s 后自动调用）。 */
+    fun clearMessage() { _message.value = null }
+
     private val _expandedVars = MutableStateFlow<Set<String>>(emptySet())
     val expandedVars: StateFlow<Set<String>> = _expandedVars.asStateFlow()
 

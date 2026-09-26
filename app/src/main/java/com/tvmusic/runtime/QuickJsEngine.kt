@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *  1. 所有 JSContext 调用都收口到单条 JS HandlerThread 上（jsBlock），保证顺序与线程安全；
  *  2. 原生能力通过 addJavascriptInterface 暴露为 `nativeBridge`：
  *     - httpRequest(method, url, headersJson, body)  -> OkHttp 同步请求
- *     - getUserVariables()                            -> 用户变量（env.getUserVariables）
+ *     - getUserVariables(platform)                    -> 该插件用户变量（env.getUserVariables）
  *     - scheduleTimer(id, ms, repeat)                 -> setTimeout / setInterval
  *     - onPluginResult / onPluginError                -> async RPC 回吐
  *  3. async 方法调用：__invoke -> Promise.then -> nativeBridge.onPluginResult。
@@ -35,7 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class QuickJsEngine(
     private val appContext: Context,
-    private val variablesProvider: () -> Map<String, String>
+    private val variablesProvider: (platform: String) -> Map<String, String>
 ) : JsEngine {
 
     private var jsHandler: Handler? = null
@@ -356,9 +356,9 @@ class QuickJsEngine(
         }
 
         @JavascriptInterface
-        fun getUserVariables(): String {
+        fun getUserVariables(platform: String): String {
             return try {
-                JSONObject(variablesProvider() as Map<*, *>).toString()
+                JSONObject(variablesProvider(platform.orEmpty()) as Map<*, *>).toString()
             } catch (e: Exception) {
                 "{}"
             }

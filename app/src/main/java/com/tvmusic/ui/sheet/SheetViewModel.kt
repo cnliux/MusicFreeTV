@@ -3,6 +3,7 @@ package com.tvmusic.ui.sheet
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tvmusic.core.TvMusicApp
+import com.tvmusic.data.PlaybackStore
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.player.QueueEntry
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -98,7 +99,7 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
             item.optJSONArray("musicList")?.let { arr ->
                 val list = arr.toObjectList()
                 if (list.isNotEmpty()) {
-                    _entries.value = list
+                    _entries.value = dedupMusic(list)
                     _hasMore.value = false
                     _loading.value = false
                     return@launch
@@ -109,7 +110,7 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
                 _error.value = "无法解析详情内容（可能需要配置用户变量、插件不支持或已失效）"
             } else {
                 applyHeader(page.header)
-                _entries.value = page.music
+                _entries.value = dedupMusic(page.music)
                 _hasMore.value = !page.isEnd && page.music.isNotEmpty()
                 if (_hasMore.value) nextPage += 1
             }
@@ -127,7 +128,7 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
                 val page = fetchPage(pageNo)
                 if (page != null) {
                     applyHeader(page.header)
-                    _entries.value = _entries.value + page.music
+                    _entries.value = dedupMusic(_entries.value + page.music)
                     _hasMore.value = !page.isEnd && page.music.isNotEmpty()
                     if (_hasMore.value) nextPage = pageNo + 1
                     _error.value = null
@@ -145,7 +146,7 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
     fun play(index: Int) {
         val list = _entries.value
         if (index !in list.indices) return
-        val queue = list.map { QueueEntry(plugin, it) }
+        val queue = list.map { QueueEntry(it.optString("platform", plugin), it) }
         PlayerManager.play(plugin, queue[index], queue, index)
     }
 
@@ -161,6 +162,12 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
         } else {
             load()
         }
+    }
+
+    /** 按 MusicFree 主键规则去重（同 platform+id，缺失时回退标题+歌手），跨翻页可能重复返回。 */
+    private fun dedupMusic(list: List<JSONObject>): List<JSONObject> {
+        val seen = HashSet<String>()
+        return list.filter { seen.add(PlaybackStore.favKeyOf(it)) }
     }
 
     private data class FetchedPage(

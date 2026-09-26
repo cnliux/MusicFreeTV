@@ -1,6 +1,5 @@
 package com.tvmusic.ui.components
 
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,7 +18,14 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -60,11 +66,12 @@ private val ModalScrim = Color(0xAA000000)
 @Composable
 fun Modifier.tvInitialFocus(): Modifier {
     val fr = androidx.compose.ui.focus.FocusRequester()
-    // 首帧节点可能尚未挂载导致 requestFocus 失败：逐次短间隔重试直到拿到焦点
-    // （组合被销毁时 LaunchedEffect 自动取消，不会泄漏）
+    // 首帧节点可能尚未挂载导致 requestFocus 静默失败：
+    // requestFocus 不抛异常也不保证立刻命中，这里短间隔重试（上限 20 次 ≈ 1.6s）。
+    // 组合被销毁时 LaunchedEffect 自动取消，不会泄漏。
     androidx.compose.runtime.LaunchedEffect(Unit) {
-        while (true) {
-            if (runCatching { fr.requestFocus() }.isSuccess) break
+        repeat(20) {
+            fr.requestFocus()
             kotlinx.coroutines.delay(80)
         }
     }
@@ -83,20 +90,14 @@ fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false, shap
     var focused by remember { mutableStateOf(false) }
     val glow = MaterialTheme.colorScheme.primary
     val scale = scaleOverride ?: tokens.focusScale
-    val animated by animateFloatAsState(if (focused) scale else 1f, label = "tvScale")
-    val shape = shapeOverride ?: if (circle) androidx.compose.foundation.shape.CircleShape else RoundedCornerShape(tokens.radius)
     return this
         .onFocusChanged { focused = it.isFocused }
-        // 边框必须画在 graphicsLayer 之外：调用方的 clip 位于本 Modifier 外侧，
-        // 若 border 在 graphicsLayer 内会被放大 1.08x 后超出 clip 边界，
-        // 圆角被裁掉只剩上下直边——这就是"白条"的真正根因。
-        .let {
-            if (focused) it.border(3.dp, tokens.focusBorder, shape) else it
-        }
+        // 焦点缩放/亮度/边框全部在绘制阶段读取 State（graphicsLayer/drawBehind 是延迟读），
+        // 焦点在列表间移动时不再触发宿主子树重组，列表滚动与遥控切换帧率不受影响。
         .graphicsLayer {
             if (!tokens.focusBrightnessOnly) {
-                scaleX = animated
-                scaleY = animated
+                scaleX = if (focused) scale else 1f
+                scaleY = if (focused) scale else 1f
             }
             alpha = when {
                 tokens.focusBrightnessOnly -> if (focused) 1f else 0.62f
@@ -106,72 +107,24 @@ fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false, shap
             // 阴影只会向下偏移，在深色背景上表现为难看的底部阴影。
         }
         .drawBehind {
-            if (focused) drawRect(glow.copy(alpha = if (tokens.focusBrightnessOnly) 0.08f else 0.14f))
-        }
-}
-
-/**
- * 全局悬浮歌词层：叠加在非播放页最上层，不拦截焦点（userScrollEnabled=false）。
- * 位置（顶部/居中/底部 + 垂直微调）、字号、颜色、透明度均由歌词设置控制。
- * 播放页有独立的逐行歌词视图，故仅在非 player 路由下由 MainActivity 挂载本层。
- */
-@Composable
-fun LyricOverlay(lines: List<com.tvmusic.player.LrcLine>, currentIndex: Int) {
-    val cfg by com.tvmusic.ui.theme.LyricSettings.config.collectAsState()
-    if (!cfg.enabled) return
-    val lrcColor = com.tvmusic.ui.theme.LyricSettings.parseColor()
-    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(currentIndex) {
-        if (currentIndex in lines.indices) {
-            listState.animateScrollToItem(currentIndex)
-        }
-    }
-    val density = androidx.compose.ui.platform.LocalDensity.current
-    val align = when (cfg.position) {
-        com.tvmusic.ui.theme.LyricPosition.TOP -> Alignment.TopCenter
-        com.tvmusic.ui.theme.LyricPosition.BOTTOM -> Alignment.BottomCenter
-        else -> Alignment.Center
-    }
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(start = 64.dp, end = 64.dp, top = 24.dp, bottom = 120.dp)
-            .offset { androidx.compose.ui.unit.IntOffset(0, with(density) { cfg.offsetY.dp.roundToPx() }) }
-            .graphicsLayer { alpha = cfg.opacity },
-        contentAlignment = align
-    ) {
-        if (lines.isEmpty()) {
-            Text(
-                "暂无歌词",
-                color = lrcColor.copy(alpha = 0.45f),
-                fontSize = 15.sp,
-                modifier = Modifier.padding(vertical = 30.dp)
-            )
-        } else {
-            androidx.compose.foundation.lazy.LazyColumn(
-                state = listState,
-                userScrollEnabled = false,
-                modifier = Modifier.fillMaxWidth().height(300.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                item { Spacer(Modifier.height(120.dp)) }
-                items(lines.size) { i ->
-                    val isCurrent = i == currentIndex
-                    val line = lines[i]
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 6.dp)
-                            .graphicsLayer { alpha = if (isCurrent) 1f else 0.6f }
-                    ) {
-                        LyricLineBlock(line, isCurrent, lrcColor, cfg.fontSizeSp.toFloat())
-                    }
-                }
-                item { Spacer(Modifier.height(120.dp)) }
+            if (focused) {
+                drawRect(glow.copy(alpha = if (tokens.focusBrightnessOnly) 0.08f else 0.14f))
+                // 圆角来自本 Modifier 自身的圆钮开关与主题 Token（shapeOverride 仅用于焦点外型一致性，
+                // 边框半径以 tokens.radius 为准；圆钮用整圆）。
+                val radius = if (circle) CornerRadius(size.minDimension / 2f)
+                else CornerRadius(tokens.radius.toPx())
+                val stroke = 3.dp.toPx()
+                // 边框画在自身 DrawModifier 上（不受上方 graphicsLayer 缩放影响），
+                // topLeft+size 内缩半个线宽，圆角处不再溢出直角。
+                drawRoundRect(
+                    color = tokens.focusBorder,
+                    style = Stroke(width = stroke),
+                    cornerRadius = radius,
+                    topLeft = Offset(stroke / 2f, stroke / 2f),
+                    size = Size(size.width - stroke, size.height - stroke)
+                )
             }
         }
-    }
 }
 
 @Composable
@@ -309,7 +262,7 @@ fun FilterChip(
             )
             .tvFocus(shapeOverride = RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 13.dp, vertical = 6.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
         Text(
             label,
@@ -330,23 +283,18 @@ fun MediaCard(
     /** LazyRow 场景默认 168dp 固定宽；网格内传 fillMaxWidth() 跟随格宽 */
     modifier: Modifier = Modifier.width(168.dp)
 ) {
-    val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
     Column(
         modifier = modifier
             .tvFocus()
             .clickable(onClick = onClick)
     ) {
         // 封面：1:1，圆角随主题 Token，加载失败/无图时深灰渐变+音符兜底（Artwork 内置）
+        // aspectRatio(1f)：默认 168dp 宽时高度同前；网格 fillMaxWidth 时跟随列宽保持正方形
         Artwork(
             artwork,
             Modifier
                 .fillMaxWidth()
-                .height(168.dp)
-                .graphicsLayer {
-                    shadowElevation = 8.dp.toPx()
-                    clip = true
-                    shape = RoundedCornerShape(tokens.radius)
-                }
+                .aspectRatio(1f)
         )
         // 标题/平台分层：14sp 白 / 11sp 灰
         Text(
@@ -503,11 +451,11 @@ fun CollectSongsDialog(
         subtitle = "将本页已加载的 ${entries.size} 首加入所选收藏夹（已收藏的自动跳过）",
         onDismiss = onDismiss
     ) {
+        val entryKeys = remember(entries) { entries.mapTo(HashSet()) { playback.primaryKey(it) } }
         androidx.compose.foundation.lazy.LazyColumn(modifier = Modifier.height(280.dp)) {
-            items(lists.size) { i ->
-                val fl = lists[i]
-                val keys = remember(fl) { fl.items.map { playback.primaryKey(it) }.toSet() }
-                val have = entries.count { playback.primaryKey(it) in keys }
+            items(lists, key = { it.id }) { fl ->
+                val keys = remember(fl) { fl.items.mapTo(HashSet()) { playback.primaryKey(it) } }
+                val have = entryKeys.count { it in keys }
                 val all = entries.isNotEmpty() && have >= entries.size
                 Row(
                     modifier = Modifier
@@ -566,9 +514,8 @@ fun PickFavDialog(
         onDismiss = onDismiss
     ) {
         androidx.compose.foundation.lazy.LazyColumn(modifier = Modifier.height(280.dp)) {
-            items(lists.size) { i ->
-                val fl = lists[i]
-                val has = fl.items.any { playback.primaryKey(it) == key }
+            items(lists, key = { it.id }) { fl ->
+                val has = remember(fl) { fl.items.any { playback.primaryKey(it) == key } }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -640,6 +587,11 @@ fun ModalCard(
     bottomBar: (@Composable RowScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    if (onDismiss != null) {
+        androidx.activity.compose.BackHandler { onDismiss() }
+    }
+    // 至少有一个可关闭/操作按钮时才有可聚焦子节点，可安全接管焦点
+    val focusSafe = onDismiss != null || bottomBar != null
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -650,6 +602,9 @@ fun ModalCard(
             modifier = Modifier
                 .width(width)
                 .clip(RoundedCornerShape(14.dp))
+                // 弹层自身可聚焦并请求初始焦点（tvInitialFocus 放在 focusable 之前，
+                // 使 FocusRequester 处于外层、焦点目标在其内侧，请求焦点才能命中）。
+                .let { if (focusSafe) it.tvInitialFocus().focusable() else it }
                 .background(MaterialTheme.colorScheme.surface)
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -685,12 +640,12 @@ fun DialogTextButton(
     textColor: Color = MaterialTheme.colorScheme.onSurface
 ) {
     Box(
-        modifier = Modifier
-            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-            .clip(RoundedCornerShape(8.dp))
-            .background(background)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 9.dp)
+modifier = Modifier
+             .clip(RoundedCornerShape(8.dp))
+             .background(background)
+             .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+             .clickable(onClick = onClick)
+             .padding(horizontal = 18.dp, vertical = 9.dp)
     ) {
         Text(label, color = textColor, fontSize = 14.sp)
     }
@@ -749,10 +704,13 @@ fun BackTopBar(
     ) {
         item(key = "back") {
             Box(
-                modifier = Modifier.tvFocus().clickable(onClick = onBack),
+                modifier = Modifier
+                    .tvFocus()
+                    .clickable(onClick = onBack)
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text("← 返回", color = MaterialTheme.colorScheme.primary, fontSize = 16.sp)
+                Text("← 返回", color = MaterialTheme.colorScheme.primary, fontSize = 15.sp)
             }
         }
         item(key = "title") {

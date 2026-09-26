@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -68,7 +69,7 @@ fun TopListScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(bottom = 32.dp)
             ) {
-                items(groups, key = { it.title }) { group ->
+                itemsIndexed(groups, key = { i, group -> "$i-${group.title}" }) { i, group ->
                     Text(
                         text = group.title,
                         fontSize = 19.sp,
@@ -79,7 +80,7 @@ fun TopListScreen(
                         contentPadding = PaddingValues(horizontal = 28.dp),
                         horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
-                        items(group.boards, key = { it.title + it.raw.optString("id") }) { board ->
+                        itemsIndexed(group.boards, key = { bi, board -> "$bi-${board.title}-${board.raw.optString("id")}" }) { bi, board ->
                             MediaCard(
                                 title = board.title,
                                 subtitle = selectedPlatform,
