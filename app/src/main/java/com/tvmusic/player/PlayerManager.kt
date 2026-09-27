@@ -139,22 +139,25 @@ object PlayerManager {
     /** 供服务/UI 获取播放器实例（不存在则创建）。 */
     fun ensurePlayer(): ExoPlayer = requirePlayer()
 
-    /** 通知栏封面下载器：封面 URL 通常与音源同源，需带上 getMediaSource 返回的请求头才能加载。 */
-    private val artworkLoader = OkHttpClient.Builder()
-        .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
-        .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
+    /** 通知栏封面下载器：封面 URL 通常与音源同源，需带上 getMediaSource 返回的请求头才能加载。
+     *  M1：从共享 strict 客户端派生，复用连接池/线程池。 */
+    private val artworkLoader = com.tvmusic.net.HttpClients.derive(com.tvmusic.net.HttpClients.strict).build()
+
+    /** lrc.cx 兜底下载器：独立超时（放宽 + 总时限），便于网络抖动时重试。
+     *  M1：从共享 relaxed 客户端派生。 */
+    private val metaHttp = com.tvmusic.net.HttpClients.derive(com.tvmusic.net.HttpClients.relaxed)
+        .callTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
         .build()
 
-    /** lrc.cx 兜底下载器：独立超时（放宽 + 总时限），便于网络抖动时重试。 */
-    private val metaHttp = OkHttpClient.Builder()
-        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-        .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-        .callTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
+    /** M2：歌词兜底专用短超时客户端（8s 总时限），歌词是可缺失的辅助信息，不配长重试。 */
+    private val lyricsHttp = com.tvmusic.net.HttpClients.derive()
+        .connectTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(6, java.util.concurrent.TimeUnit.SECONDS)
+        .callTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
         .build()
+
+    /** M2：歌词兜底负缓存（曲目 key -> 失败时刻 elapsedRealtime），TTL 内不再重试。 */
+    private val lrcNegativeCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     private var runtime: PluginRuntime? = null
     private var playbackStore: com.tvmusic.data.PlaybackStore? = null
@@ -217,6 +220,12 @@ object PlayerManager {
 
     /** 版权短播连环换源的最大重试次数（每曲）：逐个插件试完即放弃，防死循环。 */
     private const val SHORT_PLAY_MAX_RETRY = 4
+
+    /** M2：歌词兜底最多尝试的候选条数（歌词是可缺失的辅助信息，不配全候选长重试）。 */
+    private const val LRC_FALLBACK_CANDIDATES = 2
+
+    /** M2：歌词兜底负缓存 TTL——同一曲目失败后 10 分钟内不再重试。 */
+    private const val LRC_NEG_TTL_MS = 10 * 60_000L
 
     /** 换源扫描中单个候选插件单次调用（search/getMediaSource）的超时：慢平台快速跳过。 */
     private const val FALLBACK_CALL_TIMEOUT_MS = 8_000L
@@ -425,8 +434,19 @@ object PlayerManager {
         val msf = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(ctx)
             .setDataSourceFactory(dsFactory)
         mediaSourceFactory = msf
+        // M3：显式缓冲策略。TV 弱网场景默认参数起播偏慢（5s 起播缓冲），
+        // 调为 2.5s 起播 / 15s 起播上限 / 50s 最大缓冲，兼顾秒开与流畅。
+        val loadControl = androidx.media3.exoplayer.DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                /* minBufferMs = */ 15_000,
+                /* maxBufferMs = */ 50_000,
+                /* bufferForPlaybackMs = */ 2_500,
+                /* bufferForPlaybackAfterRebufferMs = */ 5_000
+            )
+            .build()
         val p = ExoPlayer.Builder(ctx)
             .setMediaSourceFactory(msf)
+            .setLoadControl(loadControl)
             .build()
         p.setPlaybackSpeed(_uiState.value.speed)
         p.addListener(playerListener)
@@ -1643,6 +1663,14 @@ object PlayerManager {
         }
     }
 
+    /** H8：内存紧张时收缩缓存（由 TvMusicApp.onTrimMemory 调用）。
+     *  清空换源预加载缓存与负缓存，释放内存；不影响正在播放的曲目。 */
+    fun onTrimMemory() {
+        synchronized(preloadCache) { preloadCache.clear() }
+        fallbackSearchCache.clear()
+        android.util.Log.i("PlayerManager", "onTrimMemory: preload/fallback caches cleared")
+    }
+
     fun release() {
         // 释放前立即落盘恢复快照（此时队列/进度还有效），顺带清掉防抖任务
         flushResumeNow()
@@ -1764,7 +1792,14 @@ object PlayerManager {
      * 候选按优先级：完整歌手 → 净化歌手（去掉“·专辑”等后缀）→ 仅曲名。
      */
     private suspend fun fetchFallbackLyric(entry: QueueEntry): List<LrcLine>? {
+        // M2 负缓存：同一曲目兜底失败后 10 分钟内不再重试，防弱网下连续曲目重试风暴
+        val negKey = entryKeyOf(entry)
+        lrcNegativeCache[negKey]?.let {
+            if (android.os.SystemClock.elapsedRealtime() - it < LRC_NEG_TTL_MS) return null
+        }
+        // M2：候选只试前 2 条（原为全候选 × 2 轮，最坏 2×N×20s）
         val urls = com.tvmusic.config.MetaSettings.lyricsCandidates(entry.title, entry.artist, entry.album)
+            .take(LRC_FALLBACK_CANDIDATES)
         if (urls.isEmpty()) return emptyList()
         var networkFailed = false
         repeat(2) {
@@ -1773,7 +1808,8 @@ object PlayerManager {
                     val req = okhttp3.Request.Builder().url(url)
                         .header("User-Agent", "MusicFreeTV/1.0")
                         .build()
-                    val lines = metaHttp.newCall(req).execute().use { resp ->
+                    // M2：歌词兜底走短超时客户端（8s），不再用 20s 的 metaHttp
+                    val lines = lyricsHttp.newCall(req).execute().use { resp ->
                         val body = resp.body?.string() ?: return@use emptyList()
                         if (!resp.isSuccessful) return@use emptyList()
                         // 仅当"数组首元素是对象且带非空 lyrics"时才按 JSON 响应处理。
@@ -1788,14 +1824,27 @@ object PlayerManager {
                             ?: parseLrc(body)
                         parsed
                     }
-                    if (lines.isNotEmpty()) return lines
+                    if (lines.isNotEmpty()) {
+                        lrcNegativeCache.remove(negKey)
+                        return lines
+                    }
                 } catch (_: Exception) {
                     networkFailed = true // 网络/TLS/超时：本候选失败，继续下一候选/下一轮
                 }
             }
-            if (networkFailed) kotlinx.coroutines.delay(800)
+            if (networkFailed) kotlinx.coroutines.delay(400)
         }
-        return if (networkFailed) null else emptyList()
+        if (networkFailed) {
+            lrcNegativeCache[negKey] = android.os.SystemClock.elapsedRealtime()
+            // 上限保护：超 64 条时清一半（与 fallbackSearchCache 同策略）
+            if (lrcNegativeCache.size > 64) {
+                val it = lrcNegativeCache.keys.iterator()
+                var n = lrcNegativeCache.size / 2
+                while (it.hasNext() && n > 0) { it.next(); it.remove(); n-- }
+            }
+            return null
+        }
+        return emptyList()
     }
 
     /**

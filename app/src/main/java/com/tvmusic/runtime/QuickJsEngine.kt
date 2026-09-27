@@ -66,6 +66,9 @@ class QuickJsEngine(
     companion object {
         private const val TAG = "QuickJsEngine"
 
+        /** jsBlock 跨线程同步等待的超时（ms）：防 JS 线程挂死引发 ANR（H6）。 */
+        private const val JS_BLOCK_TIMEOUT_MS = 5_000L
+
         private val parseLibsOrder = listOf(
             "crypto-js", "qs", "dayjs", "he", "big-integer", "cheerio", "webdav", "axios"
         )
@@ -79,13 +82,9 @@ class QuickJsEngine(
         }
     }
 
-    private val okHttp = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
-        .retryOnConnectionFailure(true)
-        .build()
+    // M1：JS 引擎网络请求从共享 standard 客户端派生（原来每台引擎独立建客户端，
+    // 最多 6 台引擎 = 6 套连接池/线程池；newBuilder 派生后复用同一套）。
+    private val okHttp = com.tvmusic.net.HttpClients.derive().build()
 
     override val timeoutMillis: Long = TimeUnit.SECONDS.toMillis(60)
 
@@ -382,11 +381,28 @@ class QuickJsEngine(
         }
         val future = FutureTask<T> { block() }
         handler.post(future)
-        return future.get()
+        // H6 修复：future.get() 无超时会在 JS 线程挂死（插件死循环）时引发 ANR。
+        // 与 invoke 的 5s 兜底对齐：超时抛出后由调用方按 PluginCallException 处理，
+        // 避免主线程/启动线程无限等待。
+        return try {
+            future.get(JS_BLOCK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: java.util.concurrent.TimeoutException) {
+            throw PluginCallException("js engine busy/timeout (jsBlock)")
+        } catch (e: java.util.concurrent.ExecutionException) {
+            throw (e.cause ?: e)
+        }
     }
 
     private fun loadAssets(path: String): String {
         return appContext.assets.open(path).bufferedReader(Charsets.UTF_8).use { it.readText() }
+    }
+
+    /** M19：URL 脱敏——query 可能带签名 token/Cookie，日志只保留 host+path。 */
+    private fun sanitizeUrl(url: String): String = try {
+        val u = java.net.URI(url)
+        "${u.scheme}://${u.host}${u.path ?: ""}?…"
+    } catch (_: Exception) {
+        url.substringBefore('?').take(80)
     }
 
     private fun buildBootstrap(): String {
@@ -438,11 +454,15 @@ class QuickJsEngine(
     private inner class NativeBridge {
 
         fun log(level: String, msg: String) {
+            // M19：第三方插件的 console.log 不再污染 release logcat（无采样/截断风险），
+            // 仅 debug 构建输出，且单条截断 512 字符。
+            if (!com.tvmusic.BuildConfig.DEBUG) return
+            val safe = if (msg.length > 512) msg.take(512) + "…(${msg.length})" else msg
             when (level) {
-                "error" -> Log.e(TAG, msg)
-                "warn" -> Log.w(TAG, msg)
-                "info" -> Log.i(TAG, msg)
-                else -> Log.d(TAG, msg)
+                "error" -> Log.e(TAG, safe)
+                "warn" -> Log.w(TAG, safe)
+                "info" -> Log.i(TAG, safe)
+                else -> Log.d(TAG, safe)
             }
         }
 
@@ -492,7 +512,8 @@ class QuickJsEngine(
                         .toString()
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "http error $method $url ${System.currentTimeMillis() - t0}ms ${e.message}")
+                // M19：URL 脱敏——query 可能带签名 token/Cookie，只打 host+path
+                Log.w(TAG, "http error $method ${sanitizeUrl(url)} ${System.currentTimeMillis() - t0}ms ${e.message}")
                 JSONObject().put("__error", e.message ?: "network error").toString()
             }
         }

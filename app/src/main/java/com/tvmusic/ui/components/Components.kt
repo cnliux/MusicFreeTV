@@ -45,6 +45,9 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -105,10 +108,9 @@ fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false, shap
                 scaleX = if (focused) scale else 1f
                 scaleY = if (focused) scale else 1f
             }
-            alpha = when {
-                tokens.focusBrightnessOnly -> if (focused) 1f else 0.62f
-                else -> if (focused) 1f else 0.92f
-            }
+            // H11 修复：非焦点项不再做透明度衰减（0.92/0.62 让整屏内容半透明，
+            // 与背景对比度低于 WCAG 建议，10 英尺可读性差）。焦点区分仅靠边框/缩放/亮度。
+            alpha = 1f
             // 不再使用 shadowElevation 做"发光"：elevation 模拟顶部光源，
             // 阴影只会向下偏移，在深色背景上表现为难看的底部阴影。
         }
@@ -119,6 +121,27 @@ fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false, shap
                 // 边框半径以 tokens.radius 为准；圆钮用整圆）。
                 val radius = if (circle) CornerRadius(size.minDimension / 2f)
                 else CornerRadius(tokens.radius.toPx())
+                // M13：激活 focusGlow token——外发光环（模糊描边），强度随主题 token 变化。
+                // 不用 shadowElevation（模拟顶部光源、深色底上出现难看下偏阴影），
+                // 改用 BlurMaskFilter 对称模糊。focusGlow=0 的主题（极简黑白/杂志排版）自然无发光。
+                val glowPx = tokens.focusGlow.toPx()
+                if (glowPx > 0f && !tokens.focusBrightnessOnly) {
+                    val glowStroke = glowPx.coerceIn(2f, 14f)
+                    drawIntoCanvas { canvas ->
+                        val native = canvas.nativeCanvas
+                        val paint = android.graphics.Paint().apply {
+                            isAntiAlias = true
+                            color = glow.toArgb()
+                            style = android.graphics.Paint.Style.STROKE
+                            strokeWidth = glowStroke * 2f
+                            alpha = (0.45f * 255).toInt()
+                            maskFilter = android.graphics.BlurMaskFilter(
+                                glowPx, android.graphics.BlurMaskFilter.Blur.NORMAL
+                            )
+                        }
+                        native.drawRoundRect(0f, 0f, size.width, size.height, radius.x, radius.y, paint)
+                    }
+                }
                 val stroke = 3.dp.toPx()
                 // 边框画在自身 DrawModifier 上（不受上方 graphicsLayer 缩放影响），
                 // topLeft+size 内缩半个线宽，圆角处不再溢出直角。
@@ -141,13 +164,15 @@ fun Artwork(url: String, modifier: Modifier = Modifier) {
             listOf(Color(0xFF232C38), Color(0xFF12161D))
         )
     }
+    // M7：加载失败（坏链/弱网超时）回退到音符占位，不再留空白块
+    var loadFailed by remember(url) { mutableStateOf(false) }
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(tokens.radius))
             .background(bgBrush),
         contentAlignment = Alignment.Center
     ) {
-        if (url.startsWith("http")) {
+        if (url.startsWith("http") && !loadFailed) {
             // crossfade：经 ImageRequest 开启（Coil 2 API），换图/复用不再硬闪
             val context = androidx.compose.ui.platform.LocalContext.current
             val request = remember(url) {
@@ -157,7 +182,10 @@ fun Artwork(url: String, modifier: Modifier = Modifier) {
                 model = request,
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
+                contentScale = ContentScale.Crop,
+                onState = { state ->
+                    if (state is coil.compose.AsyncImagePainter.State.Error) loadFailed = true
+                }
             )
         } else {
             // 占位：音符图标（无封面图时不再是空黑块）
@@ -188,11 +216,13 @@ fun AppTitleBar(
             fontSize = 22.sp,
             modifier = Modifier.padding(end = 28.dp)
         )
-        TabItem("首页", "home", selected, onSelect, initialFocus = true)
-        TabItem("搜索", "search", selected, onSelect)
-        TabItem("设置", "settings", selected, onSelect)
-        TabItem("我的歌单", "mylist", selected, onSelect)
-        TabItem("关于", "about", selected, onSelect)
+        // H13：初始焦点跟随当前选中页签（焦点记忆），不再写死首页——
+        // 从子页返回/切换 Tab 后焦点落在当前页签，遥控器体验更连贯。
+        TabItem("首页", "home", selected, onSelect, initialFocus = selected == "home")
+        TabItem("搜索", "search", selected, onSelect, initialFocus = selected == "search")
+        TabItem("设置", "settings", selected, onSelect, initialFocus = selected == "settings")
+        TabItem("我的歌单", "mylist", selected, onSelect, initialFocus = selected == "mylist")
+        TabItem("关于", "about", selected, onSelect, initialFocus = selected == "about")
     }
 }
 
@@ -313,7 +343,7 @@ fun MediaCard(
         )
         Text(
             text = subtitle,
-            fontSize = 11.sp,
+            fontSize = 12.sp, // M11：TV 10 英尺可读性，辅助信息不低于 12sp
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

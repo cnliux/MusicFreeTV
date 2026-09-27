@@ -321,8 +321,9 @@ private fun NowPlayingLive() {
         modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(fmtDuration(ps.positionMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(fmtDuration(ps.durationMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // M11：TV 10 英尺可读性，正文小字不低于 12sp
+        Text(fmtDuration(ps.positionMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(fmtDuration(ps.durationMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

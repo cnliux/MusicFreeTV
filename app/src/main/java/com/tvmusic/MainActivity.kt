@@ -147,8 +147,10 @@ Box(Modifier.focusable().fillMaxSize()) {
                 selected = tabKey,
                 onSelect = { key ->
                     when (key) {
-"home" -> navController.navigate("home") {
-                             popUpTo(navController.graph.startDestinationId) { inclusive = true }
+                        // M16：inclusive=false——回首页时若栈内已有 home 实例则复用（保留滚动位置），
+                        // 与其他页签行为一致；原 inclusive=true 每次重建导致首页状态丢失。
+                        "home" -> navController.navigate("home") {
+                             popUpTo(navController.graph.startDestinationId) { inclusive = false }
                              launchSingleTop = true
                          }
                         // launchSingleTop：重复点同一页签不再叠层（叠层会让返回键"按了没反应"）

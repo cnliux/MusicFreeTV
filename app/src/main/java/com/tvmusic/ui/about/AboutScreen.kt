@@ -43,6 +43,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.security.MessageDigest
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
@@ -307,7 +308,11 @@ private fun UpdateChecker.downloadApkAsync(
                 onState(UpdateState.Ready(version))
                 launchInstaller(context, version)
             } else {
-                onState(UpdateState.DownloadFailed(version, "网络异常或下载中断，请重试"))
+                // 区分安全校验失败与网络失败：校验失败给出更明确的提示
+                val msg = if (UpdateChecker.lastVerifyFailed)
+                    "安全校验未通过（文件可能被篡改），已取消安装"
+                else "网络异常或下载中断，请重试"
+                onState(UpdateState.DownloadFailed(version, msg))
             }
         } catch (e: Exception) {
             android.util.Log.w("AboutScreen", "downloadApkAsync failed", e)
@@ -345,6 +350,11 @@ private const val REPO = "cnliux/MusicFreeTV"
  * 冠军线路优先下载，失败时按其余线路兜底。
  */
 private object UpdateChecker {
+
+    /** 校验失败标记：区分"安全校验未通过"与"网络失败"，供 UI 给出准确提示。 */
+    @Volatile
+    var lastVerifyFailed: Boolean = false
+        private set
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
@@ -456,6 +466,7 @@ private object UpdateChecker {
 
     /** 下载 release APK；progress 按百分比回调。失败返回 null。 */
     fun downloadApk(context: Context, version: String, onProgress: (Int) -> Unit): File? {
+        lastVerifyFailed = false
         val githubUrl = "https://github.com/$REPO/releases/download/v$version/app-release.apk"
         val dir = context.getExternalFilesDir("update") ?: File(context.filesDir, "update")
         if (!dir.exists()) dir.mkdirs()
@@ -508,6 +519,25 @@ private object UpdateChecker {
                         tmp.copyTo(target, overwrite = true)
                         tmp.delete()
                     }
+                    // 安全校验（H3）：下载产物必须过完整性 + 签名两道关才允许安装
+                    // 1. SHA-256 与 GitHub Release 官方摘要比对（取不到官方摘要则跳过该项，不阻断）
+                    val official = fetchOfficialSha256(version)
+                    if (official != null) {
+                        val actual = sha256Of(target)
+                        if (!actual.equals(official, ignoreCase = true)) {
+                            android.util.Log.w("AboutScreen", "apk sha256 mismatch: official=$official actual=$actual")
+                            target.delete()
+                            lastVerifyFailed = true
+                            return null
+                        }
+                    }
+                    // 2. 签名与当前包一致性（防替换为不同签名的包）
+                    if (!signatureMatches(context, target)) {
+                        android.util.Log.w("AboutScreen", "apk signature mismatch")
+                        target.delete()
+                        lastVerifyFailed = true
+                        return null
+                    }
                     return target
                 }
             } catch (_: Exception) {
@@ -526,6 +556,68 @@ private object UpdateChecker {
         client.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) return null
             return resp.body?.string()
+        }
+    }
+
+    /**
+     * 从 GitHub Release API 取指定版本 APK 的官方 SHA-256 摘要（digest 字段）。
+     * 走 HTTPS API，作为下载产物的完整性基准。取不到返回 null（调用方决定降级策略）。
+     */
+    fun fetchOfficialSha256(version: String): String? {
+        return try {
+            val body = fetchString("https://api.github.com/repos/$REPO/releases/tags/v$version")
+                ?: return null
+            val assets = JSONObject(body).optJSONArray("assets") ?: return null
+            for (i in 0 until assets.length()) {
+                val a = assets.optJSONObject(i) ?: continue
+                if (a.optString("name") != "app-release.apk") continue
+                // GitHub 资产 digest 形如 "sha256:xxxx"
+                val digest = a.optString("digest", "")
+                val hex = digest.substringAfter("sha256:", "").trim()
+                if (hex.length == 64) return hex.lowercase()
+            }
+            null
+        } catch (e: Exception) {
+            android.util.Log.w("AboutScreen", "fetchOfficialSha256: ${e.message}")
+            null
+        }
+    }
+
+    /** 计算文件的 SHA-256（十六进制小写）。 */
+    fun sha256Of(file: File): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buf = ByteArray(8192)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return md.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /**
+     * 校验下载 APK 的签名与当前应用签名是否一致（防止替换为不同签名的包）。
+     * API 28+ 用 GET_SIGNING_CERTIFICATES，旧版用 GET_SIGNATURES。
+     */
+    fun signatureMatches(context: Context, apkFile: File): Boolean {
+        return try {
+            val pm = context.packageManager
+            val pkg = pm.getPackageArchiveInfo(
+                apkFile.absolutePath,
+                android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+            ) ?: return false
+            val newSig = pkg.signingInfo?.apkContentsSigners?.firstOrNull()?.toByteArray() ?: return false
+            val cur = pm.getPackageInfo(
+                context.packageName,
+                android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+            )
+            val curSig = cur.signingInfo?.apkContentsSigners?.firstOrNull()?.toByteArray() ?: return false
+            newSig.contentEquals(curSig)
+        } catch (e: Exception) {
+            android.util.Log.w("AboutScreen", "signatureMatches: ${e.message}")
+            false
         }
     }
 }

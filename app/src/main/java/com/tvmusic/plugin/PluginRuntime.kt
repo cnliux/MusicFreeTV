@@ -106,9 +106,10 @@ class PluginRuntime private constructor(
     private fun recordHealth(platform: String, startedAt: Long, error: Throwable?) {
         val stat = healthStats.getOrPut(platform) { HealthStat() }
         val now = SystemClock.elapsedRealtime()
+        val cost = now - startedAt
         synchronized(stat) {
             stat.calls++
-            stat.lastLatencyMs = now - startedAt
+            stat.lastLatencyMs = cost
             if (error != null) {
                 stat.fails++
                 stat.lastError = healthErrorText(error)
@@ -116,6 +117,13 @@ class PluginRuntime private constructor(
                 stat.lastSuccessAtElapsed = now
             }
         }
+        // M20：全局埋点——插件调用成功率/超时率 + 慢调用（>=2s）环形缓冲
+        com.tvmusic.core.Metrics.recordPluginCall(
+            success = error == null,
+            timeout = error is com.tvmusic.runtime.PluginCallException &&
+                (error.message?.contains("timeout") == true || error.message?.contains("busy") == true)
+        )
+        com.tvmusic.core.Metrics.recordSlow("plugin_call", platform, cost)
     }
 
     /**

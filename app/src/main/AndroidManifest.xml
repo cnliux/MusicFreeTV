@@ -25,7 +25,6 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
         android:theme="@style/Theme.MusicFreeTV"
-        android:usesCleartextTraffic="true"
         tools:targetApi="35">
 
         <activity

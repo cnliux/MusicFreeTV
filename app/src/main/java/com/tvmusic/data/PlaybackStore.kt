@@ -57,19 +57,21 @@ class PlaybackStore(context: Context) {
 
     /**
      * 收藏列表写盘防抖：400ms 内的多次增删改合并为一次落盘。
-     * 执行时再取最新内存快照（[saveListsRunnable] 读 [_lists].value），中间态不写盘。
+     * 执行时再取最新内存快照（调度任务读 [_lists].value），中间态不写盘。
      */
-    private val debounceHandler = Handler(Looper.getMainLooper())
-    private val saveListsRunnable = Runnable {
-        writeExecutor.execute { saveLists(_lists.value) }
+    // 防抖改用独立调度线程——原 Handler(主Looper) 在远程线程调用且主线程繁忙时
+    // 落盘时机不确定；ScheduledExecutor 不依赖主线程消息泵。
+    private val debounceExec = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "playback-save-debounce").apply { isDaemon = true }
     }
+    @Volatile
+    private var pendingSave: java.util.concurrent.ScheduledFuture<*>? = null
 
     private fun saveListsDebounced() {
-        // 风险提示：debounceHandler 绑定主线程 Looper，若从远程/后台线程调用，
-        // removeCallbacks/postDelayed 虽线程安全，但防抖窗口依赖主线程消息泵，
-        // 主线程繁忙时延时不确定；彻底修复需引入专属防抖线程，当前仅标记。
-        debounceHandler.removeCallbacks(saveListsRunnable)
-        debounceHandler.postDelayed(saveListsRunnable, 400)
+        pendingSave?.cancel(false)
+        pendingSave = debounceExec.schedule({
+            writeExecutor.execute { saveLists(_lists.value) }
+        }, 400, java.util.concurrent.TimeUnit.MILLISECONDS)
     }
 
     private val _history = MutableStateFlow<List<JSONObject>>(emptyList())

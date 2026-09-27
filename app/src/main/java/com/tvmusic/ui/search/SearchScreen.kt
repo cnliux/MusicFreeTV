@@ -43,6 +43,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -57,6 +59,10 @@ import com.tvmusic.ui.components.SectionHeader
 import com.tvmusic.ui.components.tvFocus
 import com.tvmusic.ui.components.withPlatform
 import com.tvmusic.ui.sheet.DetailTarget
+
+/** M14：热门搜索占位词（产品决策的静态推荐位）。
+ *  后续可改为 SearchSettings 远程配置驱动（远程管理后台已有配置下发通道）。 */
+private val HOT_SEARCHES = listOf("周杰伦", "林俊杰", "陈奕迅", "邓紫棋", "许嵩", "赵雷", "新歌榜", "纯音乐")
 
 /**
  * KTV 点歌风格搜索页：
@@ -663,7 +669,7 @@ private fun HistoryPanel(
         Box(Modifier.padding(top = 20.dp)) {
             SectionHeader("热门搜索")
         }
-        val hot = listOf("周杰伦", "林俊杰", "陈奕迅", "邓紫棋", "许嵩", "赵雷", "新歌榜", "纯音乐")
+        val hot = HOT_SEARCHES
         LazyRow(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -683,26 +689,58 @@ private fun HistoryPanel(
     }
 }
 
+/**
+ * M24：关闭按钮从「嵌套在可点击 Row 内」改为「兄弟节点」。
+ * 原实现两个焦点节点嵌套，D-pad 命中依赖内部 focus 搜索顺序，易出现
+ * "看得到 × 却选不中"（与 SheetScreen 收藏按钮同类问题，已用兄弟结构修复）。
+ * 无 onClose 时保持单一焦点节点，视觉与原样式一致。
+ */
 @Composable
 private fun KtvChip(label: String, onSelect: () -> Unit, onClose: (() -> Unit)? = null) {
+    if (onClose == null) {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(18.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .tvFocus(shapeOverride = RoundedCornerShape(18.dp))
+                .clickable(onClick = onSelect)
+                .padding(horizontal = 18.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
+        }
+        return
+    }
+    // 有删除按钮：胶囊背景 + 两个并列的焦点兄弟节点（标签区 / 删除区）
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(18.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .tvFocus(shapeOverride = RoundedCornerShape(18.dp))
-            .clickable(onClick = onSelect)
-            .padding(horizontal = 18.dp, vertical = 9.dp),
+            .background(MaterialTheme.colorScheme.surface),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
-        if (onClose != null) {
-            Box(
-                modifier = Modifier.padding(start = 10.dp).clip(RoundedCornerShape(8.dp))
-                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp)).clickable(onClick = onClose)
-                    .padding(horizontal = 5.dp)
-            ) {
-                Text("×", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 16.sp)
-            }
+        Box(
+            modifier = Modifier
+                .tvFocus(shapeOverride = RoundedCornerShape(18.dp))
+                .clickable(onClick = onSelect)
+                .padding(start = 18.dp, top = 9.dp, bottom = 9.dp, end = 8.dp)
+        ) {
+            Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
+        }
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                .clickable(onClick = onClose)
+                .padding(horizontal = 5.dp, vertical = 4.dp)
+                .padding(end = 8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                "×",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 16.sp,
+                modifier = Modifier.semantics { contentDescription = "删除 $label" }
+            )
         }
     }
 }

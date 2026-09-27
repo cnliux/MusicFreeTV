@@ -32,3 +32,6 @@ AGENTS.md
 REVIEW_2026-09-27.md
 
 .REVIEW_*.md.artifact.json
+
+# host artifact 登记文件（不入库）
+.*.artifact.json

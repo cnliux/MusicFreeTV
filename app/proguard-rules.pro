@@ -12,19 +12,11 @@
 }
 -keep class com.tvmusic.runtime.QuickJsEngine { *; }
 
+# Media3/OkHttp/zxing/Coil 自带 consumer-proguard，无需全量 keep；如运行出现反射崩溃再按最小规则回补
+
 # OkHttp
 -dontwarn okhttp3.**
 -dontwarn okio.**
--keep class okhttp3.** { *; }
-
-# zxing
--keep class com.google.zxing.** { *; }
-
-# Media3 播放会话：通知/元数据大量依赖反射，保留 MediaSession 相关类
--keep class androidx.media3.session.** { *; }
--keep class androidx.media3.exoplayer.** { *; }
--keep class androidx.media3.common.** { *; }
 
 # Coil
 -dontwarn coil.**
--keep class coil.** { *; }

@@ -53,9 +53,10 @@ class RemoteConfigService : Service() {
         private const val MAX_HEADER_COUNT = 100
         private const val MAX_BODY_BYTES = 4 * 1024 * 1024
 
-        /** 图片代理专用共享 OkHttpClient：自身不自动跟随重定向，由代码逐跳校验后跟随。 */
+        /** 图片代理专用共享 OkHttpClient：自身不自动跟随重定向，由代码逐跳校验后跟随。
+         *  M1：从共享 standard 客户端派生，复用连接池/线程池。 */
         private val imageHttpClient by lazy {
-            okhttp3.OkHttpClient.Builder()
+            com.tvmusic.net.HttpClients.derive()
                 .connectTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                 .readTimeout(8, java.util.concurrent.TimeUnit.SECONDS)
                 .followRedirects(false)
@@ -218,6 +219,10 @@ class RemoteConfigService : Service() {
             method == "GET" && (path == "/info" || path == "/api/status") -> {
                 respond(socket, 200, infoJson().toString())
             }
+            // M20：性能埋点查看端点（本地局域网，无敏感信息）
+            method == "GET" && path == "/api/metrics" -> {
+                respond(socket, 200, com.tvmusic.core.Metrics.snapshotJson().toString())
+            }
             method == "GET" && path.startsWith("/api/img") -> {
                 val target = java.net.URLDecoder.decode(
                     query.substringAfter("url=", ""), Charsets.UTF_8.name()
@@ -241,8 +246,13 @@ class RemoteConfigService : Service() {
                     // js 直链：等安装完成再响应，把真实结果告诉用户。
                     // 旧实现只加订阅后异步同步，安装失败（下载失败/引擎注册超时）时
                     // 用户只看到列表里没有插件 + 配置残留的"已卸载"幽灵行，无从排查。
+                    // M5：runBlocking 加 90s 硬超时——导入必须同步返回结果（F1 约定），
+                    // 但网络/引擎异常挂起时不能无限占死 HTTP 线程槽位。
                     val err = runCatching {
-                        kotlinx.coroutines.runBlocking { repo.importFromUrl(url) }
+                        kotlinx.coroutines.runBlocking {
+                            kotlinx.coroutines.withTimeoutOrNull(90_000) { repo.importFromUrl(url) }
+                                ?: throw RuntimeException("安装超时（90s），请稍后在插件列表确认结果")
+                        }
                     }.getOrNull()
                     msg = if (err == null) "插件安装成功" else "插件安装失败：$err"
                 }
@@ -298,8 +308,11 @@ class RemoteConfigService : Service() {
             }
             method == "POST" && path == "/api/plugins/import" -> {
                 val body = readBody(input, headers)
+                // M5：runBlocking 加 120s 硬超时，防大备份导入挂起时占死 HTTP 线程槽位
                 val report = runCatching {
-                    kotlinx.coroutines.runBlocking { app().repository.importBackupJson(body) }
+                    kotlinx.coroutines.runBlocking {
+                        kotlinx.coroutines.withTimeout(120_000) { app().repository.importBackupJson(body) }
+                    }
                 }.fold(
                     onSuccess = { it },
                     onFailure = {
@@ -1096,6 +1109,9 @@ class RemoteConfigService : Service() {
         pruneSearchSessions()
         Thread({
             try {
+                // M5 说明：此 runBlocking 在专属搜索线程内（不占 HTTP 线程池槽位），
+                // 且内部单源预算 60s / invoke 45s 已有超时兜底，SSE watchdog 另断开连接，
+                // 故保留 runBlocking；若搜索整体需要硬上限可在外层再包 withTimeout。
                 runBlocking {
                     val app = app()
                     val settings = com.tvmusic.config.SearchSettings.load(app)

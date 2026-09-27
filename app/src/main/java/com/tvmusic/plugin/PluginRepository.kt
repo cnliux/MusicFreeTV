@@ -33,10 +33,8 @@ class PluginRepository(
     private val appContext: Context
 ) {
 
-    private val okHttp = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(20, TimeUnit.SECONDS)
-        .build()
+    // M1：从共享 relaxed 客户端派生（订阅下载/更新可能较慢），复用连接池。
+    private val okHttp = com.tvmusic.net.HttpClients.derive(com.tvmusic.net.HttpClients.relaxed).build()
 
     /** 自动同步节流用的偏好存储。 */
     private val syncPrefs by lazy {
@@ -526,12 +524,14 @@ class PluginRepository(
         }
     }
 
-    /** 源码指纹：sha1 前 12 位十六进制，作为插件唯一 id。 */
+    /** 源码指纹：sha256 前 16 位十六进制，作为插件唯一 id。
+     *  非安全用途（仅内容变更检测）；算法从 SHA-1 升级为 SHA-256，变更后已有插件
+     *  会被判定为"源码已变"触发一次重新注册，属可接受的一次性开销。 */
     private fun sourceHash(source: String): String {
         return try {
-            val md = java.security.MessageDigest.getInstance("SHA-1")
+            val md = java.security.MessageDigest.getInstance("SHA-256")
             val bytes = md.digest(source.toByteArray(Charsets.UTF_8))
-            bytes.joinToString("") { "%02x".format(it) }.take(12)
+            bytes.joinToString("") { "%02x".format(it) }.take(16)
         } catch (e: Exception) {
             source.hashCode().toString(16)
         }

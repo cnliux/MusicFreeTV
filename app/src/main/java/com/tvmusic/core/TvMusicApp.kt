@@ -14,6 +14,7 @@ import com.tvmusic.remote.RemoteConfigService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.io.File
 
 class TvMusicApp : Application() {
@@ -32,21 +33,63 @@ class TvMusicApp : Application() {
     override fun onCreate() {
         super.onCreate()
 
+        // 冷启动起点打点（M20）：必须在任何 Metrics 触碰之前，否则类加载时机导致 coldStartMs≈0
+        Metrics.markProcessStart()
+        // 崩溃监控必须最先安装（任何初始化之前），覆盖后续所有初始化路径的崩溃
+        CrashReporter.install(this)
+
+        // H8：注册内存回调，TV 内存吃紧时主动回收图片缓存/JS 多余引擎/预加载缓存，
+        // 提升后台存活率与二次启动速度。
+        registerComponentCallbacks(object : android.content.ComponentCallbacks2 {
+            override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {}
+            @Deprecated("deprecated in framework")
+            override fun onLowMemory() {
+                trimMemory()
+            }
+            override fun onTrimMemory(level: Int) {
+                if (level >= TRIM_MEMORY_UI_HIDDEN) trimMemory()
+            }
+        })
+
         com.tvmusic.ui.theme.ThemeManager.init(this)
         com.tvmusic.ui.theme.LyricSettings.init(this)
         com.tvmusic.config.MetaSettings.init(this)
         com.tvmusic.config.IdleSettings.init(this)
         store = PluginStore(this)
         playback = PlaybackStore(this)
-        runtime = PluginRuntime.create(this, store)
-        repository = PluginRepository(runtime, store, appScope, this)
 
-        PlayerManager.init(this)
-        PlayerManager.attach(runtime)
-        PlayerManager.attachRepository(repository)
-        PlayerManager.attachPlaybackStore(playback)
-        // 启动时异步读取上次的播放快照（供首页「继续播放」对话框）
-        PlayerManager.loadResumeAsync()
+        // H5/H9：JS 引擎创建（3 台 QuickJS runtime + 读 10+ assets JS）与插件 DB 查询/预热
+        // 全部下沉到 IO 线程，不再压冷启动主线程。依赖它们的 PlayerManager 与 UI 通过
+        // 懒初始化/异步通知拿到就绪后的实例（PluginRuntime/Repository 完成后才 attach）。
+        val appCtx = applicationContext
+        appScope.launch(Dispatchers.IO) {
+            val rt = PluginRuntime.create(appCtx, store)
+            val repo = PluginRepository(rt, store, appScope, appCtx)
+            runtime = rt
+            repository = repo
+            // H7：插件目录扫描（外置存储多路径 readText）在 IO 线程执行
+            val sources = readPluginSourcesFromDevice().orEmpty()
+            val subscribed = store.listSubscriptions().map { it.url }.toSet()
+            sources.filter { it !in subscribed }.forEach { store.addSubscription(it) }
+            repo.refreshFromDb()
+
+            // 引擎就绪后再挂到 PlayerManager（主线程只做轻量 attach）
+            kotlinx.coroutines.withContext(Dispatchers.Main) {
+                PlayerManager.init(appCtx)
+                PlayerManager.attach(rt)
+                PlayerManager.attachRepository(repo)
+                PlayerManager.attachPlaybackStore(playback)
+                PlayerManager.loadResumeAsync()
+            }
+            // M20：冷启动关键路径（引擎+DB+warmup 前奏）完成打点
+            com.tvmusic.core.Metrics.markColdStartDone()
+
+            // 不内置任何插件/订阅源：音源一律由用户添加（订阅同步 / 设备 plugin_sources 文件 / 手动安装）。
+            repo.warmup()
+            // 自动同步由 warmup 完成后串行触发（带 4h 节流），避免启动时与插件注册抢 JS 引擎锁
+
+            RemoteConfigService.ensureStarted(appCtx)
+        }
 
         // 应用退出钩子：Application 没有可靠的 onDestroy，改用"最后一个 Activity 停止"
         // 作为退出/切后台时机，立即落盘播放恢复快照（1s 防抖等不及）
@@ -65,20 +108,14 @@ class TvMusicApp : Application() {
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
             override fun onActivityDestroyed(activity: Activity) {}
         })
+    }
 
-        // 插件订阅源：不留任何默认地址。用户自行添加（插件设置 / web 控制台 / 设备上的 plugin_sources.* 文件）。
-        // 这里只做“读取”：若设备上存在用户放置的 plugin_sources 文件，则幂等补全到订阅列表。
-        val sources = readPluginSourcesFromDevice().orEmpty()
-        val subscribed = store.listSubscriptions().map { it.url }.toSet()
-        sources.filter { it !in subscribed }.forEach { store.addSubscription(it) }
-        repository.refreshFromDb()
-
-        // 不内置任何插件/订阅源：音源一律由用户添加（订阅同步 / 设备 plugin_sources 文件 / 手动安装）。
-
-        repository.warmup()
-        // 自动同步由 warmup 完成后串行触发（带 4h 节流），避免启动时与插件注册抢 JS 引擎锁
-
-        RemoteConfigService.ensureStarted(this)
+    /** 内存紧张时回收：图片内存缓存清空，播放器预加载缓存由 PlayerManager 自行收缩。 */
+    private fun trimMemory() {
+        runCatching {
+            coil.ImageLoader(this@TvMusicApp).memoryCache?.clear()
+        }
+        runCatching { PlayerManager.onTrimMemory() }
     }
 
     /**

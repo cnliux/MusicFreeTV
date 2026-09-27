@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- L4：恢复 UnusedResources lint 后，用 tools:keep 显式保留启动图标源素材（mipmap 各密度 + banner）。 -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@mipmap/*,@drawable/banner,@drawable/ic_launcher_foreground,@drawable/ic_stat_remote" />

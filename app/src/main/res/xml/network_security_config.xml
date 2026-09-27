@@ -1,5 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- 第三方音源插件和局域网控制台可能使用 HTTP；网络请求层另行实施鉴权与主机校验。 -->
+    <!--
+      明文 HTTP 策略说明：
+
+      1. 远程控制台（RemoteConfigService）监听设备所在局域网的任意 IP
+         （如 http://192.168.x.x:9527）。Android 的 network-security-config
+         不支持 CIDR/通配网段，无法用 domain 白名单精确覆盖局域网 IP，
+         因此 base-config 必须放行明文 HTTP。
+
+      2. 第三方音源插件可能通过 HTTP 请求音源 API（由 QuickJS 桥发起，
+         桥内另行实施主机校验与请求管控）。
+
+      补偿控制（收紧点）：
+      - 应用更新/下载强制走 HTTPS，并做 SHA-256 完整性校验
+        （见 AboutScreen 更新流程），不接受明文降级。
+      - 局域网控制台服务仅绑定本机，网络请求层另行实施鉴权与主机校验。
+    -->
     <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

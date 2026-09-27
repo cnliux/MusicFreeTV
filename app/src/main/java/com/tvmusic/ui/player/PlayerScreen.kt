@@ -79,6 +79,7 @@ import com.tvmusic.ui.components.DialogTextButton
 import com.tvmusic.ui.components.LyricLineBlock
 import com.tvmusic.ui.components.ModalCard
 import com.tvmusic.ui.components.tvFocus
+import com.tvmusic.ui.components.tvInitialFocus
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
@@ -265,7 +266,8 @@ fun PlayerScreen(onBack: () -> Unit) {
                                 state.playingVia?.takeIf { it.isNotBlank() }?.let { via ->
                                     Text(
                                         text = via,
-                                        fontSize = 10.sp,
+                                        // M11：TV 10 英尺可读性，正文小字不低于 12sp
+                                        fontSize = 12.sp,
                                         color = MaterialTheme.colorScheme.tertiary,
                                         maxLines = 1,
                                         modifier = Modifier.padding(start = 4.dp)
@@ -305,7 +307,8 @@ fun PlayerScreen(onBack: () -> Unit) {
                     RoundCtrlButton(
                         if (state.isPlaying) "⏸" else "▶",
                         size = 72.dp, iconSize = 30.sp, filled = true,
-                        desc = if (state.isPlaying) "暂停" else "播放"
+                        desc = if (state.isPlaying) "暂停" else "播放",
+                        initialFocus = true // H10：进入播放页焦点落在主按钮，遥控器立即可操作
                     ) { PlayerManager.playPause() }
                     RoundCtrlButton("⏭", size = 56.dp, iconSize = 24.sp, filled = false, desc = "下一首") { PlayerManager.next() }
                     RoundCtrlButton("⏩", size = 48.dp, iconSize = 18.sp, filled = false, desc = "快进30秒") {
@@ -413,7 +416,7 @@ private fun NoticePill(text: String?) {
     ) {
         Text(
             text = text ?: "",
-            fontSize = 10.sp,
+            fontSize = 12.sp,
             color = Color.White,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
@@ -637,7 +640,8 @@ Box(
     ) { Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp) }
 }
 
-/** 圆形控制按钮：filled=主色实心（播放/暂停），否则半透明白底；焦点样式走统一 tvFocus。 */
+/** 圆形控制按钮：filled=主色实心（播放/暂停），否则半透明白底；焦点样式走统一 tvFocus。
+ *  initialFocus=true 时请求初始焦点（H10：播放页进入后遥控器立即可操作，不再"无响应"）。 */
 @Composable
 private fun RoundCtrlButton(
     symbol: String,
@@ -645,6 +649,7 @@ private fun RoundCtrlButton(
     iconSize: androidx.compose.ui.unit.TextUnit,
     filled: Boolean,
     desc: String = symbol,
+    initialFocus: Boolean = false,
     onClick: () -> Unit
 ) {
     Box(
@@ -652,6 +657,7 @@ private fun RoundCtrlButton(
             .size(size)
             .clip(CircleShape)
             .background(if (filled) MaterialTheme.colorScheme.primary else Color(0x22FFFFFF))
+            .let { if (initialFocus) it.tvInitialFocus() else it }
             .tvFocus(circle = true)
             .clickable(onClick = onClick)
             .semantics { contentDescription = desc },
