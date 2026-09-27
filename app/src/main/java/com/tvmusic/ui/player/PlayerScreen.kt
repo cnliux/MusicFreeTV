@@ -124,20 +124,6 @@ fun PlayerScreen(onBack: () -> Unit) {
             return@Box
         }
 
-        // 瞬时提示（lrc.cx 兜底歌词/封面进行中或结果），5 秒后播放器自动清除
-        state.metaNotice?.let { msg ->
-            Box(
-                Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 20.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color(0xCC000000))
-                    .padding(horizontal = 22.dp, vertical = 10.dp)
-            ) {
-                Text(msg, color = Color.White, fontSize = 13.sp)
-            }
-        }
-
         Row(
             modifier = Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 28.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -211,22 +197,34 @@ fun PlayerScreen(onBack: () -> Unit) {
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // 来源标签（收藏按钮左侧）：插件名 · 歌单名
+                    // 来源标签（收藏按钮左侧）：插件名 · 歌单名；已换源时右上角固定显示实际取流插件
                     state.sourceLabel?.takeIf { it.isNotBlank() }?.let { src ->
                         val parts = src.split(" · ", limit = 2)
                         Column(
                             horizontalAlignment = androidx.compose.ui.Alignment.End,
                             modifier = Modifier.widthIn(max = 200.dp)
                         ) {
-                            Text(
-                                text = parts.getOrNull(0) ?: "",
-                                fontSize = 14.sp,
-                                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
-                                color = MaterialTheme.colorScheme.primary,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                textAlign = androidx.compose.ui.text.style.TextAlign.End
-                            )
+                            Row(verticalAlignment = androidx.compose.ui.Alignment.Top) {
+                                Text(
+                                    text = parts.getOrNull(0) ?: "",
+                                    fontSize = 14.sp,
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.End
+                                )
+                                // 换源标记：固定常驻（非 toast），如「bilibili」
+                                state.playingVia?.takeIf { it.isNotBlank() }?.let { via ->
+                                    Text(
+                                        text = via,
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.tertiary,
+                                        maxLines = 1,
+                                        modifier = Modifier.padding(start = 4.dp)
+                                    )
+                                }
+                            }
                             Text(
                                 text = parts.getOrNull(1) ?: "",
                                 fontSize = 12.sp,
@@ -238,6 +236,9 @@ fun PlayerScreen(onBack: () -> Unit) {
                         }
                         Spacer(Modifier.width(16.dp))
                     }
+                    // 歌词兜底/换源等提示：固定占位显示在收藏按钮左侧（无提示时留白，按钮不位移）
+                    MetaNoticeSlot(text = state.metaNotice)
+                    Spacer(Modifier.width(14.dp))
                     // 状态组
                     RoundCtrlButton(
                         if (state.isFavorite) "♥" else "♡",
@@ -352,6 +353,34 @@ fun PlayerScreen(onBack: () -> Unit) {
                         showFavDialog = true
                     }
                 }
+            )
+        }
+    }
+}
+
+/** 歌词兜底/换源等提示槽：固定尺寸占位（按钮不位移），提示常驻直到被替换或切歌。 */
+@Composable
+private fun MetaNoticeSlot(text: String?) {
+    Box(
+        modifier = Modifier.width(200.dp).height(52.dp),
+        contentAlignment = Alignment.CenterEnd
+    ) {
+        AnimatedVisibility(
+            visible = !text.isNullOrBlank(),
+            enter = fadeIn(),
+            exit = fadeOut()
+        ) {
+            Text(
+                text = text ?: "",
+                fontSize = 11.sp,
+                color = Color.White,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = androidx.compose.ui.text.style.TextAlign.End,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Color(0xB3000000))
+                    .padding(horizontal = 10.dp, vertical = 5.dp)
             )
         }
     }

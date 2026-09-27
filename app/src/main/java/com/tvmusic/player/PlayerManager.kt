@@ -79,10 +79,12 @@ data class PlayerUiState(
     val bassStrength: Int = 0,
     /** 均衡器预设序号：0 = 原声（平直），1..N = 系统预设。 */
     val eqPreset: Int = 0,
-    /** 瞬时提示（如 lrc.cx 兜底进度/结果），播放页短暂展示后自动清除。 */
+    /** 提示（如 lrc.cx 兜底进度/结果、换源），播放页固定显示在收藏按钮旁，直到被新提示或切歌替换。 */
     val metaNotice: String? = null,
     /** 来源标签（「插件名 · 歌单名」，如「wx · 华语热歌」），迷你播放器与播放页展示。 */
-    val sourceLabel: String? = null
+    val sourceLabel: String? = null,
+    /** 实际取流插件与队列条目来源插件不同（已换源）时显示，如「bilibili」；未换源为 null。 */
+    val playingVia: String? = null
 )
 
 /**
@@ -153,6 +155,25 @@ object PlayerManager {
     private var fallbackTriedFor: String? = null
 
     /**
+     * 版权短播连环换源状态：同一首（key）连续短播时逐个插件重试（上限 [SHORT_PLAY_MAX_RETRY]），
+     * 已实际取流过且仍受限的插件进 [shortPlayExclude] 不再复用；用户主动播放时整体重置。
+     */
+    @Volatile
+    private var shortPlayFor: String? = null
+    private var shortPlayCount = 0
+
+    /** 已受限插件排除集：主线程写、换源协程读，用并发集合。 */
+    private val shortPlayExclude: MutableSet<String> =
+        java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+
+    /** 当前实际取流的插件（可能与队列条目 plugin 不同——换源救场后为备选插件）。 */
+    @Volatile
+    private var playingVia: String? = null
+
+    /** 换源救场的搜索结果缓存（platform+query → 命中条目）：连环换源重试时省去重复搜索。 */
+    private val fallbackSearchCache = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
+
+    /**
      * 播放会话代数：每次 play() 自增。getMediaSource 是异步解析，快速连点两首歌时
      * 旧歌的解析结果可能后返回并 setMediaItem 覆盖新歌（表现为"点了新歌放的还是旧歌"）。
      * 过期的解析结果直接丢弃。
@@ -174,9 +195,22 @@ object PlayerManager {
     /** 预解析结果缓存有效期：10 分钟（音源签名 URL 通常存活更久）。 */
     private const val PRELOAD_TTL_MS = 10 * 60_000L
 
-    private data class PreloadedMedia(val media: JSONObject, val quality: String, val atMs: Long)
+    /** 版权短播连环换源的最大重试次数（每曲）：逐个插件试完即放弃，防死循环。 */
+    private const val SHORT_PLAY_MAX_RETRY = 4
 
-    /** 预加载缓存：entryKey -> 解析出的 media JSON。容量 4，按访问序淘汰最旧。 */
+    /**
+     * 预加载命中的取流结果：url/headers 已解析好；via=null 表示来自原插件，
+     * 非空表示预加载阶段换源成功的实际插件（播放时直接沿用，无感切换）。
+     */
+    private data class PreloadedMedia(
+        val url: String,
+        val headers: Map<String, String>,
+        val quality: String,
+        val atMs: Long,
+        val via: String? = null
+    )
+
+    /** 预加载缓存：entryKey -> 已解析的可播放取流结果（含换源）。容量 4，按访问序淘汰最旧。 */
     private val preloadCache = object : LinkedHashMap<String, PreloadedMedia>(8, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PreloadedMedia>?): Boolean =
             size > 4
@@ -221,21 +255,39 @@ object PlayerManager {
             if (preloadCache.containsKey(nk)) return
         }
         val rt = runtime ?: return
+        val my = playSession.get() // 预解析归属当前播放会话：切歌后结果作废
         scope.launch(Dispatchers.Default) {
             try {
                 // 与正式播放同走粘性 home 引擎；此时处于歌曲后半段，
-                // 引擎队列通常空闲，预解析不与用户操作抢资源
-                val result = rt.callParallel(
-                    next.plugin, "getMediaSource",
-                    listOf(next.raw.toString(), quality)
-                )
-                val media = when (result) {
-                    is JSONObject -> result
-                    else -> (result as? JSONArray)?.optJSONObject(0)
-                } ?: return@launch
-                if (media.optString("url").isBlank()) return@launch
+                // 引擎队列通常空闲，预解析不与用户操作抢资源。
+                var url = ""
+                var headers = emptyMap<String, String>()
+                var via: String? = null
+                val media = resolveMediaSource(rt, next.plugin, next.raw)
+                val u = media?.optString("url").orEmpty()
+                // FLV 直链 ExoPlayer 无解封装器，视为不可播放（N2：不再误缓存）
+                val flv = u.isNotBlank() &&
+                    u.substringBefore('?').substringBefore('#').endsWith(".flv", ignoreCase = true)
+                if (u.isNotBlank() && !flv) {
+                    url = u
+                    headers = parseMediaHeaders(media!!)
+                } else if (com.tvmusic.config.MetaSettings.fallbackOtherSource) {
+                    // N1：原插件不可播放（解析抛错/空地址/FLV）时，预加载阶段就换源，
+                    // 让切到该曲时无需再走慢路径，实现无感切换。
+                    val fb = tryFallbackSource(rt, next, my, silent = true)
+                    if (fb != null) {
+                        url = fb.url
+                        headers = fb.headers
+                        via = fb.plugin
+                    }
+                }
+                if (url.isBlank()) return@launch // 换源也没找到：留待正式播放时再处理
+                if (my != playSession.get()) return@launch // 切歌后作废
                 synchronized(preloadCache) {
-                    preloadCache[nk] = PreloadedMedia(media, quality, android.os.SystemClock.elapsedRealtime())
+                    preloadCache[nk] = PreloadedMedia(
+                        url, headers, quality,
+                        android.os.SystemClock.elapsedRealtime(), via
+                    )
                 }
             } catch (_: Exception) {
                 // 预加载失败静默：正式播放时还会重新解析
@@ -639,7 +691,15 @@ object PlayerManager {
         // ExoPlayer 只能在主线程访问，拿到地址后必须切回主线程。
         val my = playSession.incrementAndGet()
         lastLyricKey = null // 新会话重置：重播/切歌后重试同一首歌时不再因旧 key 被跳过
-        if (!forceFallback) fallbackTriedFor = null // 用户主动播放：重新给一次换源机会
+        if (!forceFallback) {
+            fallbackTriedFor = null // 用户主动播放：重新给一次换源机会
+            shortPlayFor = null     // 短播连环状态一并重置
+            shortPlayCount = 0
+            shortPlayExclude.clear()
+            playingVia = null       // 清掉上一首的实际取流插件，避免脏值误入新一首的排除集
+            // 提示常驻到切歌：新会话开始先清掉上一首残留的歌词/换源提示
+            _uiState.update { it.copy(metaNotice = null) }
+        }
         scope.launch(Dispatchers.Default) {
             try {
                 // 快速连点时本协程可能已过期（更新的切歌请求接管）：必须先校验再写状态。
@@ -661,62 +721,82 @@ object PlayerManager {
                         queueIndex = startIndex,
                         error = null,
                         // 来源标签随新会话更新：null=保留（切歌/续播），空串=清除
-                        sourceLabel = if (source == null) it.sourceLabel else source.ifBlank { null }
+                        sourceLabel = if (source == null) it.sourceLabel else source.ifBlank { null },
+                        // 新会话开始：换源标记复位，解析后再按实际取流插件回填
+                        playingVia = null
                     )
                 }
                 // 队列内容/索引已变化：调度防抖写入恢复快照
                 scheduleResumeSave()
                 val rt = runtime ?: error("PlayerManager runtime not attached")
-                // 预加载命中：本曲在上一首后半段已解析过，直接复用（音质一致且未过期）
+                // 预加载命中：本曲在上一首后半段已解析（含换源）过，直接复用可播放地址
+                // （音质一致、未过期、非 FLV）。forceFallback 时丢弃缓存（坏地址不复用）。
                 val key = entryKeyOf(item)
-                val cached = synchronized(preloadCache) { preloadCache.remove(key) }
-                    ?.takeIf {
-                        it.quality == quality &&
-                            android.os.SystemClock.elapsedRealtime() - it.atMs < PRELOAD_TTL_MS
-                    }
-                // 走粘性引擎路由（平台 home 引擎）：1) 不与 primary 上的首页/详情/
-                // 搜索分页等流量互相排队（引擎 invokeLock 全局串行，主引擎被慢源
-                // 占住时点击播放会延迟几十秒才出声）；2) 复用该平台搜索时在 home
-                // 引擎上建立的模块级状态（cookie/token），解析更快更稳。
-                // 预加载命中时直接复用缓存的 media，跳过 QuickJS 解析。
-                // forceFallback（取流失败重试）：跳过本插件解析，直接换其他音源。
-                val cachedMedia = if (forceFallback) null else cached?.media
-                val media = cachedMedia ?: if (forceFallback) null else resolveMediaSource(rt, plugin, item.raw)
-                // media == null 表示 getMediaSource 抛错（版权/会员/插件过期）。
-                val primaryFailed = media == null && !forceFallback
-                var url = media?.optString("url").orEmpty()
-                var headers = media?.let { parseMediaHeaders(it) } ?: emptyMap()
-                var viaPlugin = plugin
-                // FLV 直链 ExoPlayer 无对应解封装器，必然失败（换下一曲也一样）。
-                val flv = url.isNotBlank() &&
-                    url.substringBefore('?').substringBefore('#').endsWith(".flv", ignoreCase = true)
-                // 主音源不可播放（解析异常 / 空地址 / FLV / 取流失败重试）时，尝试用「其他插件」播放同一首歌：
-                // 只替换实际取流来源，队列条目 / mediaId / 历史 / 歌词 / 来源标签全部保持原样，
-                // 因此不改变歌单，也不与 playSession 切歌守卫、onMediaItemTransition 定位冲突。
-                if (url.isBlank() || flv || forceFallback) {
-                    if (com.tvmusic.config.MetaSettings.fallbackOtherSource) {
-                        tryFallbackSource(rt, item, my)?.let { fb ->
-                            url = fb.url
-                            headers = fb.headers
-                            viaPlugin = fb.plugin
+                val cached = if (forceFallback) null else
+                    synchronized(preloadCache) { preloadCache.remove(key) }
+                        ?.takeIf {
+                            it.quality == quality &&
+                                android.os.SystemClock.elapsedRealtime() - it.atMs < PRELOAD_TTL_MS
                         }
-                    }
-                    if (url.isBlank()) {
-                        // 兜底也没找到可播来源：按原始失败原因提示。FLV 属硬限制不自动跳曲。
-                        reportPlayError(
-                            when {
-                                flv -> "该音源为 FLV 直链，当前设备暂不支持播放"
-                                forceFallback -> "播放失败：其他音源也没有该歌曲的可播放地址"
-                                primaryFailed -> "音源解析失败：可能是该歌曲有版权/会员限制，或插件需要更新"
-                                else -> "该音源未返回可播放地址（可能需配置用户变量或 VIP）"
-                            },
-                            autoSkip = !flv
-                        )
-                        return@launch
+                var url: String
+                var headers: Map<String, String>
+                var viaPlugin: String
+                if (cached != null) {
+                    // 命中缓存：url 在预加载阶段已保证非空/非 FLV，via 为实际取流插件
+                    url = cached.url
+                    headers = cached.headers
+                    viaPlugin = cached.via ?: plugin
+                } else {
+                    // 走粘性引擎路由（平台 home 引擎）：1) 不与 primary 上的首页/详情/
+                    // 搜索分页等流量互相排队（引擎 invokeLock 全局串行，主引擎被慢源
+                    // 占住时点击播放会延迟几十秒才出声）；2) 复用该平台搜索时在 home
+                    // 引擎上建立的模块级状态（cookie/token），解析更快更稳。
+                    // forceFallback（取流失败重试）：跳过本插件解析，直接换其他音源。
+                    val media = if (forceFallback) null else resolveMediaSource(rt, plugin, item.raw)
+                    // media == null 表示 getMediaSource 抛错（版权/会员/插件过期）。
+                    val primaryFailed = media == null && !forceFallback
+                    url = media?.optString("url").orEmpty()
+                    headers = media?.let { parseMediaHeaders(it) } ?: emptyMap()
+                    viaPlugin = plugin
+                    // FLV 直链 ExoPlayer 无对应解封装器，必然失败（换下一曲也一样）。
+                    val flv = url.isNotBlank() &&
+                        url.substringBefore('?').substringBefore('#').endsWith(".flv", ignoreCase = true)
+                    // 主音源不可播放（解析异常 / 空地址 / FLV / 取流失败重试）时，尝试用「其他插件」播放同一首歌：
+                    // 只替换实际取流来源，队列条目 / mediaId / 历史 / 歌词 / 来源标签全部保持原样，
+                    // 因此不改变歌单，也不与 playSession 切歌守卫、onMediaItemTransition 定位冲突。
+                    if (url.isBlank() || flv || forceFallback) {
+                        if (com.tvmusic.config.MetaSettings.fallbackOtherSource) {
+                            // 短播连环链进行中：排除已实际取流过仍受限的插件
+                            val keyNow = entryKeyOf(item)
+                            val excl = if (shortPlayFor == keyNow) shortPlayExclude else emptySet()
+                            tryFallbackSource(rt, item, my, exclude = excl)?.let { fb ->
+                                url = fb.url
+                                headers = fb.headers
+                                viaPlugin = fb.plugin
+                            }
+                        }
+                        if (url.isBlank()) {
+                            // 兜底也没找到可播来源：按原始失败原因提示。FLV 属硬限制不自动跳曲。
+                            reportPlayError(
+                                when {
+                                    flv -> "该音源为 FLV 直链，当前设备暂不支持播放"
+                                    forceFallback -> "播放失败：其他音源也没有该歌曲的可播放地址"
+                                    primaryFailed -> "音源解析失败：可能是该歌曲有版权/会员限制，或插件需要更新"
+                                    else -> "该音源未返回可播放地址（可能需配置用户变量或 VIP）"
+                                },
+                                autoSkip = !flv
+                            )
+                            return@launch
+                        }
                     }
                 }
                 if (my != playSession.get()) return@launch
                 if (viaPlugin != plugin) showMetaNotice("已切换「$viaPlugin」音源播放本曲")
+                playingVia = viaPlugin // 记录实际取流插件：短播连环重试时加入排除集
+                // 供标题栏常驻提示：仅在实际取流插件 ≠ 队列条目来源插件（发生换源）时展示
+                _uiState.update {
+                    it.copy(playingVia = if (viaPlugin != item.plugin) viaPlugin else null)
+                }
                 // 记住本次请求头：通知栏封面（BitmapLoader）沿用同一套认证头
                 activeHeaders = headers
 
@@ -813,7 +893,9 @@ object PlayerManager {
      * 不改动队列条目本身——只借用其他插件的取流地址播放同一首歌。
      */
     private suspend fun tryFallbackSource(
-        rt: PluginRuntime, item: QueueEntry, my: Int
+        rt: PluginRuntime, item: QueueEntry, my: Int,
+        exclude: Set<String> = emptySet(),
+        silent: Boolean = false
     ): FallbackSource? {
         val repo = repository ?: return null
         if (item.title.isBlank()) return null
@@ -822,15 +904,28 @@ object PlayerManager {
             repo.listEnabled()
                 .filter { it.info != null && it.loadError == null }
                 .map { it.info!!.platform }
-                .filter { it != item.plugin },
+                .filter { it != item.plugin }
+                .filter { it !in exclude },
             order
         )
-        if (candidates.isEmpty()) return null
-        showMetaNotice("正在尝试其他音源播放「${item.title}」…")
+        // 远程后台指定的优先换源插件排到最前（每次使用时读取，后台改动即时生效）
+        val prefer = com.tvmusic.config.MetaSettings.fallbackPreferPlugin
+        val orderedCandidates = if (prefer.isNotBlank() && prefer != item.plugin && prefer !in exclude) {
+            if (prefer in candidates) listOf(prefer) + (candidates - prefer) else candidates
+        } else candidates
+        if (orderedCandidates.isEmpty()) return null
+        if (!silent) showMetaNotice("正在尝试其他音源播放「${item.title}」…")
         val artist = item.artist
-        for (platform in candidates) {
+        val cacheKeyPrefix = normalizeName(item.title) + "|" + normalizeName(artist) + "|"
+        for (platform in orderedCandidates) {
             if (my != playSession.get()) return null
-            val matched = searchMusicOn(rt, platform, item.title, artist) ?: continue
+            // 连环换源重试时复用同一轮的搜索命中，省去 2-5 秒的重复搜索
+            val matched = fallbackSearchCache[cacheKeyPrefix + platform]
+                ?: searchMusicOn(rt, platform, item.title, artist)?.also {
+                    if (fallbackSearchCache.size > 32) fallbackSearchCache.clear()
+                    fallbackSearchCache[cacheKeyPrefix + platform] = it
+                }
+                ?: continue
             if (my != playSession.get()) return null
             val media = resolveMediaSource(rt, platform, matched) ?: continue
             val url = media.optString("url")
@@ -933,6 +1028,50 @@ object PlayerManager {
     private fun handleMediaEnded() {
         val st = _uiState.value
         if (st.queue.isEmpty()) return
+        // 版权短播检测：走到 ENDED 说明不是用户主动切歌（切歌走 skipTo/playAt）。
+        // 播放远低于「最低播放时长」就自然结束，多为版权试听掐断 → 逐个换其他插件
+        // 重播同一首（只换取流地址，队列/歌单不变）。已受限插件进排除集不复用，
+        // 连续 [SHORT_PLAY_MAX_RETRY] 次仍短播则放弃（防死循环），按原逻辑推进队列。
+        val minMs = com.tvmusic.config.MetaSettings.minPlaySeconds * 1000L
+        val pos = player?.currentPosition ?: 0L
+        val entry = st.current
+        val key = entry?.let { entryKeyOf(it) }
+        // 歌曲真实时长只能取插件元数据 raw.duration（秒）：版权截断流的 ExoPlayer
+        // duration≈截断点（如 30s），用它比较会永远不满足"歌曲本身比阈值长"而漏检
+        val realDurMs = (entry?.raw?.optLong("duration", 0L) ?: 0L).takeIf { it > 0 }?.times(1000L) ?: 0L
+        if (entry != null && key != null &&
+            com.tvmusic.config.MetaSettings.fallbackOtherSource && minMs > 0 &&
+            pos in 1 until minMs && (realDurMs <= 0 || realDurMs > minMs + 1000)
+        ) {
+            if (shortPlayFor != key) {
+                shortPlayFor = key
+                shortPlayCount = 0
+                shortPlayExclude.clear()
+            }
+            // 本次实际取流的插件（可能=原插件，也可能=已换过的备选）已证明受限
+            playingVia?.let { shortPlayExclude.add(it) }
+            if (shortPlayCount < SHORT_PLAY_MAX_RETRY) {
+                shortPlayCount++
+                fallbackTriedFor = null // 连环链内取流再出错允许继续救场（换下一个插件）
+                android.util.Log.i(
+                    "PlayerManager",
+                    "short play ended [$key] pos=${pos}ms < ${minMs}ms, " +
+                        "retry #${shortPlayCount} via other source (excluded=$shortPlayExclude)"
+                )
+                showMetaNotice("「${entry.title}」疑似版权受限，正在尝试其他音源…")
+                play(entry.plugin, entry, st.queue, st.queueIndex, forceFallback = true)
+                return
+            }
+            showMetaNotice("「${entry.title}」各音源均受限，已跳过")
+            // 重试耗尽：强制推进到下一曲，绝不能走 LOOP_ONE/单曲的 replayCurrent——
+            // 否则会重播同一首受限曲 → 又短播 → 又重播，无限循环刷通知。
+            // 队列只剩一首时无处可跳，直接停在 ENDED（不重播）。
+            if (st.queue.size <= 1) return
+            val nxt = if (st.playMode == PlayMode.SHUFFLE) shuffleTarget(st)
+                else (st.queueIndex + 1).let { if (it in st.queue.indices) it else 0 }
+            if (nxt >= 0 && nxt != st.queueIndex) skipTo(nxt) else next()
+            return
+        }
         when (st.playMode) {
             PlayMode.LOOP_ONE -> replayCurrent()
             PlayMode.SHUFFLE -> {
@@ -1041,6 +1180,8 @@ object PlayerManager {
             .put("queue", arr)
             .put("index", st.queueIndex)
             .put("positionMs", player?.currentPosition ?: 0L)
+        // 来源标签一并落盘：退出重启恢复播放后，迷你播放器/播放页仍显示「插件 · 歌单」
+        if (!st.sourceLabel.isNullOrBlank()) json.put("sourceLabel", st.sourceLabel)
         store.saveResume(json)
     }
 
@@ -1079,7 +1220,8 @@ object PlayerManager {
             _resumeAvailable.value = false
             playbackStore?.clearResume()
             val target = entries[index]
-            play(target.plugin, target, entries, index, positionMs)
+            val label = snap.optString("sourceLabel", "").ifBlank { null }
+            play(target.plugin, target, entries, index, positionMs, source = label)
         } catch (e: Exception) {
             android.util.Log.w("PlayerManager", "resume failed: ${e.message}")
         }
@@ -1100,6 +1242,8 @@ object PlayerManager {
         bassBoost = null
         synchronized(preloadCache) { preloadCache.clear() }
         preloadTriggeredFor = null
+        fallbackSearchCache.clear()
+        shortPlayExclude.clear()
         _uiState.value = PlayerUiState()
     }
 
@@ -1112,17 +1256,12 @@ object PlayerManager {
     /** 当前歌词解析协程：切歌时取消，避免旧解析堵在引擎串行队列里拖慢新歌。 */
     private var lyricJob: kotlinx.coroutines.Job? = null
 
-    /** metaNotice 自动清除协程：同一条提示只保留一次，5 秒后清空。 */
-    private var metaNoticeJob: kotlinx.coroutines.Job? = null
-
-    /** 播放页瞬时提示：lrc.cx 兜底进行中/成功/失败时的可见反馈。 */
+    /**
+     * 播放页提示：lrc.cx 兜底进行中/成功/失败、换源等的可见反馈。
+     * 常驻显示（收藏按钮旁固定位），直到被下一条提示替换或新播放会话开始清除。
+     */
     private fun showMetaNotice(text: String) {
-        metaNoticeJob?.cancel()
         _uiState.update { it.copy(metaNotice = text) }
-        metaNoticeJob = scope.launch {
-            kotlinx.coroutines.delay(5_000)
-            _uiState.update { it.copy(metaNotice = null) }
-        }
     }
 
     /** 最近一次已发起歌词请求的条目：onMediaItemTransition 与 play() 末尾都会触发，按条目去重。 */

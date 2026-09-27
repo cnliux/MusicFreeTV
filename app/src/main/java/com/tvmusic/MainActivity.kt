@@ -12,6 +12,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -382,7 +384,14 @@ private fun MiniPlayerBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 24.dp, vertical = 10.dp),
+                .padding(horizontal = 24.dp, vertical = 10.dp)
+                // 整行点击进入播放器页（pointerInput 不注册焦点，不干扰遥控 OK 键在
+                // 操控按钮间的移动）；⏮/⏯/⏭ 按钮自身的 clickable 会消费各自点击，
+                // 不会冒泡触发本 tap——只有按钮以外的区域（来源标签/封面/歌名/歌词行）
+                // 点击才进入播放页。
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { onClick() })
+                },
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {

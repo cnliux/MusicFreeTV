@@ -14,12 +14,17 @@ object MetaSettings {
     private const val PREFS = "meta_prefs"
     private const val KEY_ENABLED = "enabled"
     private const val KEY_FALLBACK_SRC = "fallbackOtherSource"
+    private const val KEY_MIN_PLAY = "minPlaySeconds"
+    private const val KEY_PREFER_PLUGIN = "fallbackPreferPlugin"
 
     /** LrcApi 服务根地址（只读常量，响应内容由 api.lrc.cx 决定）。 */
     const val BASE = "https://api.lrc.cx"
 
     private val enabled = java.util.concurrent.atomic.AtomicBoolean(true)
     private val fallbackSrc = java.util.concurrent.atomic.AtomicBoolean(true)
+    private val minPlay = java.util.concurrent.atomic.AtomicInteger(90)
+    @Volatile
+    private var preferPlugin: String = ""
     private var appContext: Context? = null
 
     val isEnabled: Boolean get() = enabled.get()
@@ -30,11 +35,22 @@ object MetaSettings {
      */
     val fallbackOtherSource: Boolean get() = fallbackSrc.get()
 
+    /**
+     * 最低播放时长（秒）：歌曲播放不足该时长就自然结束（非用户切歌），视为版权
+     * 掐断，自动换其他插件重播同一首。0 = 关闭检测；默认 90；范围 0-300。
+     */
+    val minPlaySeconds: Int get() = minPlay.get()
+
+    /** 优先换源插件：换源时把该插件排到候选最前（空 = 不指定）。后台可改，每次使用时读取。 */
+    val fallbackPreferPlugin: String get() = preferPlugin
+
     fun init(context: Context) {
         appContext = context.applicationContext
         val sp = appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         enabled.set(sp?.getBoolean(KEY_ENABLED, true) ?: true)
         fallbackSrc.set(sp?.getBoolean(KEY_FALLBACK_SRC, true) ?: true)
+        minPlay.set((sp?.getInt(KEY_MIN_PLAY, 90) ?: 90).coerceIn(0, 300))
+        preferPlugin = sp?.getString(KEY_PREFER_PLUGIN, "") ?: ""
     }
 
     fun setEnabled(on: Boolean) {
@@ -47,6 +63,20 @@ object MetaSettings {
         fallbackSrc.set(on)
         appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             ?.edit()?.putBoolean(KEY_FALLBACK_SRC, on)?.apply()
+    }
+
+    fun setMinPlaySeconds(sec: Int) {
+        val v = sec.coerceIn(0, 300)
+        minPlay.set(v)
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.edit()?.putInt(KEY_MIN_PLAY, v)?.apply()
+    }
+
+    fun setFallbackPreferPlugin(name: String) {
+        val v = name.trim()
+        preferPlugin = v
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.edit()?.putString(KEY_PREFER_PLUGIN, v)?.apply()
     }
 
     private fun enc(s: String): String =

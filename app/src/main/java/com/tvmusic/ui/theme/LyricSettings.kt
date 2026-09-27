@@ -6,9 +6,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-/** 播放页歌词显示配置：字号/颜色。 */
+/** 播放页歌词显示配置：字号/颜色。字号上限 40，默认即最大（用户要求初始最大）。 */
 data class LyricConfig(
-    val fontSizeSp: Int = 16,
+    val fontSizeSp: Int = 40,
     val colorHex: String = "FFFFFF"
 )
 
@@ -27,7 +27,7 @@ object LyricSettings {
         appContext = context.applicationContext
         val p = prefs() ?: return
         _config.value = LyricConfig(
-            fontSizeSp = p.getInt(KEY_SIZE, 16),
+            fontSizeSp = p.getInt(KEY_SIZE, 40),
             colorHex = p.getString(KEY_COLOR, "FFFFFF") ?: "FFFFFF"
         )
     }

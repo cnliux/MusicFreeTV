@@ -664,22 +664,39 @@ class RemoteConfigService : Service() {
                     .put("ok", true)
                     .put("enabled", com.tvmusic.config.MetaSettings.isEnabled)
                     .put("fallbackOtherSource", com.tvmusic.config.MetaSettings.fallbackOtherSource)
+                    .put("minPlaySeconds", com.tvmusic.config.MetaSettings.minPlaySeconds)
+                    .put("preferPlugin", com.tvmusic.config.MetaSettings.fallbackPreferPlugin)
                     .toString())
             }
             method == "POST" && path == "/api/meta" -> {
                 val body = readBody(input, headers)
                 val json = runCatching { JSONObject(body) }.getOrNull()
-                val on = json?.optBoolean("enabled", com.tvmusic.config.MetaSettings.isEnabled)
-                com.tvmusic.config.MetaSettings.setEnabled(on == true)
-                // 缺省字段保持原值（optBoolean 默认值传当前值）
-                val fb = json?.optBoolean(
-                    "fallbackOtherSource", com.tvmusic.config.MetaSettings.fallbackOtherSource
-                ) ?: com.tvmusic.config.MetaSettings.fallbackOtherSource
-                com.tvmusic.config.MetaSettings.setFallbackOtherSource(fb)
+                // 仅在请求显式携带字段时才写入：body 非法/字段缺省一律保持原值。
+                // 旧实现 json?.optBoolean(...) 在 json==null 时把 enabled 误置 false。
+                if (json != null) {
+                    if (json.has("enabled")) {
+                        com.tvmusic.config.MetaSettings.setEnabled(json.optBoolean("enabled"))
+                    }
+                    if (json.has("fallbackOtherSource")) {
+                        com.tvmusic.config.MetaSettings.setFallbackOtherSource(
+                            json.optBoolean("fallbackOtherSource")
+                        )
+                    }
+                    if (json.has("minPlaySeconds")) {
+                        com.tvmusic.config.MetaSettings.setMinPlaySeconds(json.optInt("minPlaySeconds"))
+                    }
+                    if (json.has("preferPlugin")) {
+                        com.tvmusic.config.MetaSettings.setFallbackPreferPlugin(
+                            json.optString("preferPlugin")
+                        )
+                    }
+                }
                 respond(socket, 200, JSONObject()
                     .put("ok", true)
                     .put("enabled", com.tvmusic.config.MetaSettings.isEnabled)
                     .put("fallbackOtherSource", com.tvmusic.config.MetaSettings.fallbackOtherSource)
+                    .put("minPlaySeconds", com.tvmusic.config.MetaSettings.minPlaySeconds)
+                    .put("preferPlugin", com.tvmusic.config.MetaSettings.fallbackPreferPlugin)
                     .toString())
             }
             // 无操作自动进入播放器页（电视待机显示）：开关 + 时长（分钟）
@@ -1767,6 +1784,15 @@ private val PAGE_HTML = """<!DOCTYPE html>
         <span class="muted" style="flex:1;">当前音源无法播放时，自动尝试其他插件播放同一首歌（不改变歌单）</span>
         <button class="small" id="metaFallbackToggle" onclick="toggleMetaFallback()">开</button>
       </div>
+      <div class="row" style="border:none;padding:6px 0 0;">
+        <span class="muted" style="flex:1;">最低播放时长（秒，0=关闭）：播放不足该时长就自动结束视为版权受限，换其他插件重播同一首</span>
+        <input type="number" id="minPlaySeconds" min="0" max="300" style="width:78px;flex:none;">
+        <button class="small" onclick="saveMinPlay()">保存</button>
+      </div>
+      <div class="row" style="border:none;padding:6px 0 0;">
+        <span class="muted" style="flex:1;">优先换源插件：无法播放/受限时最先尝试该插件（可选，留空按音源顺序）</span>
+        <select id="preferPlugin" onchange="savePrefer()" style="max-width:150px;flex:none;"></select>
+      </div>
     </div>
     <div class="card">
       <h2>待机显示</h2>
@@ -2740,7 +2766,7 @@ function loadThemes() {
 }
 
 /* ---------------- 播放页歌词设置 ---------------- */
-var lyricCfg = { fontSizeSp: 16, colorHex: 'FFFFFF' };
+var lyricCfg = { fontSizeSp: 40, colorHex: 'FFFFFF' };
 var LRC_COLORS = [
   { hex: 'FFFFFF', name: '白' },
   { hex: 'FF6B9D', name: '粉' },
@@ -2784,23 +2810,57 @@ function loadLyric() {
   }).catch(function () {});
 }
 
-/* ---------------- 歌词/封面补全（lrc.cx） ---------------- */
-var metaCfg = { enabled: true, fallbackOtherSource: true };
+/* ---------------- 歌词/封面补全（lrc.cx）+ 播放兜底 ---------------- */
+var metaCfg = { enabled: true, fallbackOtherSource: true, minPlaySeconds: 90, preferPlugin: '' };
 function renderMeta() {
   el('metaToggle').textContent = metaCfg.enabled ? '开' : '关';
   el('metaToggle').className = 'small' + (metaCfg.enabled ? '' : ' ghost');
   el('metaFallbackToggle').textContent = metaCfg.fallbackOtherSource ? '开' : '关';
   el('metaFallbackToggle').className = 'small' + (metaCfg.fallbackOtherSource ? '' : ' ghost');
+  if (document.activeElement !== el('minPlaySeconds')) el('minPlaySeconds').value = metaCfg.minPlaySeconds;
+  var sel = el('preferPlugin');
+  if (document.activeElement !== sel && sel.options.length > 0) sel.value = metaCfg.preferPlugin || '';
+}
+function fillPreferOptions() {
+  // 选项来自已启用插件列表（/api/plugins）；换源候选按 platform 匹配，故 value 用 platform
+  api('/api/plugins').then(function (d) {
+    var sel = el('preferPlugin');
+    var cur = metaCfg.preferPlugin || '';
+    var html = '<option value="">（按音源顺序）</option>';
+    ((d && d.plugins) || []).forEach(function (p) {
+      if (p.enabled === false) return;
+      var val = p.platform || p.name || '';
+      var label = p.name || p.platform || '';
+      if (!val) return;
+      html += '<option value="' + val.replace(/"/g, '&quot;') + '">' + label + '</option>';
+    });
+    sel.innerHTML = html;
+    sel.value = cur;
+    if (sel.value !== cur) { sel.value = ''; }
+  }).catch(function () {});
+}
+function savePrefer() {
+  var v = el('preferPlugin').value || '';
+  post('/api/meta', { preferPlugin: v }).then(function (d) {
+    if (d.ok) { metaCfg.preferPlugin = d.preferPlugin || ''; toast(v ? '优先换源插件：' + v : '已清除优先插件，按音源顺序'); }
+  }).catch(function () { toast('保存失败'); });
 }
 function toggleMeta() {
-  // 只改 enabled；fallbackOtherSource 由服务端保持原值（缺省字段不覆盖）
+  // 只改 enabled；其余字段由服务端保持原值（缺省字段不覆盖）
   post('/api/meta', { enabled: !metaCfg.enabled }).then(function (d) {
-    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource }; renderMeta(); }
+    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin }; renderMeta(); }
   }).catch(function () { toast('保存失败'); });
 }
 function toggleMetaFallback() {
-  post('/api/meta', { enabled: metaCfg.enabled, fallbackOtherSource: !metaCfg.fallbackOtherSource }).then(function (d) {
-    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource }; renderMeta(); toast(d.fallbackOtherSource ? '已开启换插件救场' : '已关闭换插件救场'); }
+  post('/api/meta', { fallbackOtherSource: !metaCfg.fallbackOtherSource }).then(function (d) {
+    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin }; renderMeta(); toast(d.fallbackOtherSource ? '已开启换插件救场' : '已关闭换插件救场'); }
+  }).catch(function () { toast('保存失败'); });
+}
+function saveMinPlay() {
+  var v = parseInt(el('minPlaySeconds').value || '90', 10);
+  if (isNaN(v) || v < 0) v = 0; if (v > 300) v = 300;
+  post('/api/meta', { minPlaySeconds: v }).then(function (d) {
+    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin }; renderMeta(); toast(v > 0 ? '已保存：播放不足 ' + d.minPlaySeconds + ' 秒自动换源重播' : '已关闭短播换源'); }
   }).catch(function () { toast('保存失败'); });
 }
 function loadMeta() {
@@ -2808,9 +2868,12 @@ function loadMeta() {
     if (d.ok) {
       metaCfg = {
         enabled: d.enabled != null ? d.enabled : true,
-        fallbackOtherSource: d.fallbackOtherSource != null ? d.fallbackOtherSource : true
+        fallbackOtherSource: d.fallbackOtherSource != null ? d.fallbackOtherSource : true,
+        minPlaySeconds: d.minPlaySeconds != null ? d.minPlaySeconds : 90,
+        preferPlugin: d.preferPlugin || ''
       };
       renderMeta();
+      fillPreferOptions();
     }
   }).catch(function () {});
 }

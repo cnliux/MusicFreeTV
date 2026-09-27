@@ -1,6 +1,5 @@
 package com.tvmusic.ui.recommend
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -16,15 +15,12 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import com.tvmusic.ui.components.BackTopBar
 import com.tvmusic.ui.components.EmptyState
@@ -152,14 +148,13 @@ fun RecommendScreen(
             }
 
             // 底部加载更多：自动翻页在铺满一屏前不触发时，用户可手动加载下一页。
-            // 悬浮于网格之上，包一层半透明圆角底，避免与卡片文案叠在一起不可读。
+            // 悬浮于网格之上。不再包全宽深色底座（LoadMoreFooter 根是 fillMaxWidth，
+            // 会把底座撑成整屏宽黑带盖住最后一行卡片）；按钮自带胶囊底色，足够可读。
             if (loadingMore || (error != null && sheets.isNotEmpty()) || (!isEnd && sheets.isNotEmpty())) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 14.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(MaterialTheme.colorScheme.background.copy(alpha = 0.9f))
                 ) {
                     LoadMoreFooter(
                         loading = loadingMore,
