@@ -252,12 +252,23 @@ class QuickJsEngine(
     ): String {
         // QuickJS 引擎单线程执行脚本；多线程同时 invoke 会导致 drainJobs/事件循环互相阻塞而挂死，
         // 因此整个调用流程全局串行化（与 JS 线程本身的执行天然一致）。
-        synchronized(invokeLock) {
-            return doInvoke(platform, method, argsJson, timeoutMs)
+        // timeoutMs 预算覆盖「排队等待 + 执行」两段：拿不到锁就按超时抛错，调用方
+        // （如换源扫描）可快速跳过被慢调用占住的引擎。旧逻辑超时从拿到锁后才起算，
+        // 排队时长无限，一个 60s 慢调用能把整条换源链无声拖死。
+        val deadline = System.currentTimeMillis() + timeoutMs
+        if (!invokeLock.tryLock(deadline - System.currentTimeMillis(), TimeUnit.MILLISECONDS)) {
+            Log.w(TAG, "invoke busy (queue timeout) $platform.$method")
+            throw PluginCallException("plugin engine busy: $platform.$method")
+        }
+        try {
+            val remaining = deadline - System.currentTimeMillis()
+            return doInvoke(platform, method, argsJson, remaining.coerceAtLeast(2_000L))
+        } finally {
+            invokeLock.unlock()
         }
     }
 
-    private val invokeLock = Any()
+    private val invokeLock = java.util.concurrent.locks.ReentrantLock()
 
     private fun doInvoke(
         platform: String,

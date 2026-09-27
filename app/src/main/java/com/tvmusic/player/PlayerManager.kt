@@ -152,9 +152,13 @@ object PlayerManager {
     /** 连续播放失败计数：达到阈值则停止自动跳下一曲，避免整队列快速空转。 */
     private var errorStreak = 0
 
-    /** 已尝试过「换插件救场」重试的条目 key（取流失败每条目只自动换源一次，防死循环）。 */
+    /** 已尝试过「换插件救场」重试的条目 key（防死循环）。 */
     @Volatile
     private var fallbackTriedFor: String? = null
+
+    /** 该条目已用过的取流失败换源次数：允许 2 次，一次网络抖动不该烧光整首的救场机会。 */
+    @Volatile
+    private var fallbackTriedCount = 0
 
     /**
      * 版权短播连环换源状态：同一首（key）连续短播时逐个插件重试（上限 [SHORT_PLAY_MAX_RETRY]），
@@ -172,8 +176,11 @@ object PlayerManager {
     @Volatile
     private var playingVia: String? = null
 
-    /** 换源救场的搜索结果缓存（platform+query → 命中条目）：连环换源重试时省去重复搜索。 */
-    private val fallbackSearchCache = java.util.concurrent.ConcurrentHashMap<String, JSONObject>()
+    /**
+     * 换源救场的搜索结果缓存（platform+曲名 → 命中的候选条目列表）：连环换源重试时省去重复搜索。
+     * 空列表=确认无匹配（负缓存）；调用失败不缓存，下次可重试。
+     */
+    private val fallbackSearchCache = java.util.concurrent.ConcurrentHashMap<String, List<JSONObject>>()
 
     /**
      * 播放会话代数：每次 play() 自增。getMediaSource 是异步解析，快速连点两首歌时
@@ -199,6 +206,12 @@ object PlayerManager {
 
     /** 版权短播连环换源的最大重试次数（每曲）：逐个插件试完即放弃，防死循环。 */
     private const val SHORT_PLAY_MAX_RETRY = 4
+
+    /** 换源扫描中单个候选插件单次调用（search/getMediaSource）的超时：慢平台快速跳过。 */
+    private const val FALLBACK_CALL_TIMEOUT_MS = 12_000L
+
+    /** 换源扫描每平台最多尝试的搜索命中条数：第一条可能是翻唱/伴奏，解析不可播时继续试后面的。 */
+    private const val FALLBACK_MAX_MATCHES = 3
 
     /**
      * 预加载命中的取流结果：url/headers 已解析好；via=null 表示来自原插件，
@@ -557,17 +570,19 @@ object PlayerManager {
         }
 
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
-            // 解析成功但取流失败（链接过期/404 等）：给「换插件救场」一次机会。
-            // 每条目只试一次（fallbackTriedFor 按条目 key 去重），换源后仍失败则照常报错跳曲。
+            // 解析成功但取流失败（链接过期/404 等）：给「换插件救场」机会。
+            // 每条目最多 2 次（fallbackTriedCount 计数）：换源链里一次网络抖动/引擎排队失败
+            // 不该直接烧光这首歌的救场机会；仍失败则照常报错跳曲。
             val st = _uiState.value
             val entry = st.current
             val key = entry?.let { entryKeyOf(it) }
             if (com.tvmusic.config.MetaSettings.fallbackOtherSource &&
-                entry != null && key != null && key != fallbackTriedFor &&
-                st.queue.isNotEmpty()
+                entry != null && key != null && st.queue.isNotEmpty() &&
+                (key != fallbackTriedFor || fallbackTriedCount < 2)
             ) {
+                fallbackTriedCount = if (key != fallbackTriedFor) 1 else fallbackTriedCount + 1
                 fallbackTriedFor = key
-                android.util.Log.i("PlayerManager", "player error [$key], retry via other source")
+                android.util.Log.i("PlayerManager", "player error [$key], retry via other source #${fallbackTriedCount}")
                 play(entry.plugin, entry, st.queue, st.queueIndex, forceFallback = true)
                 return
             }
@@ -694,7 +709,8 @@ object PlayerManager {
         val my = playSession.incrementAndGet()
         lastLyricKey = null // 新会话重置：重播/切歌后重试同一首歌时不再因旧 key 被跳过
         if (!forceFallback) {
-            fallbackTriedFor = null // 用户主动播放：重新给一次换源机会
+            fallbackTriedFor = null // 用户主动播放：重新给换源机会
+            fallbackTriedCount = 0
             shortPlayFor = null     // 短播连环状态一并重置
             shortPlayCount = 0
             shortPlayExclude.clear()
@@ -870,9 +886,10 @@ object PlayerManager {
      * 返回 null 表示调用抛错（版权/会员限制或插件过期）。
      */
     private suspend fun resolveMediaSource(
-        rt: PluginRuntime, plugin: String, raw: JSONObject
+        rt: PluginRuntime, plugin: String, raw: JSONObject,
+        timeoutMs: Long = 60_000L
     ): JSONObject? = try {
-        when (val result = rt.callParallel(plugin, "getMediaSource", listOf(raw.toString(), quality))) {
+        when (val result = rt.callParallel(plugin, "getMediaSource", listOf(raw.toString(), quality), timeoutMs = timeoutMs)) {
             is JSONObject -> result
             is NotImplementedError -> JSONObject()
             else -> (result as? JSONArray)?.optJSONObject(0) ?: JSONObject()
@@ -921,45 +938,66 @@ object PlayerManager {
         val cacheKeyPrefix = normalizeName(item.title) + "|" + normalizeName(artist) + "|"
         for (platform in orderedCandidates) {
             if (my != playSession.get()) return null
-            // 连环换源重试时复用同一轮的搜索命中，省去 2-5 秒的重复搜索
-            val matched = fallbackSearchCache[cacheKeyPrefix + platform]
+            // 连环换源重试时复用同一轮的搜索命中，省去 2-5 秒的重复搜索；
+            // 候选调用统一 12s 超时（含引擎排队），慢/卡平台快速跳过，不拖整条链
+            val matches = fallbackSearchCache[cacheKeyPrefix + platform]
                 ?: searchMusicOn(rt, platform, item.title, artist)?.also {
                     if (fallbackSearchCache.size > 32) fallbackSearchCache.clear()
                     fallbackSearchCache[cacheKeyPrefix + platform] = it
                 }
                 ?: continue
+            if (matches.isEmpty()) continue
             if (my != playSession.get()) return null
-            val media = resolveMediaSource(rt, platform, matched) ?: continue
-            val url = media.optString("url")
-            if (url.isBlank()) continue
-            if (url.substringBefore('?').substringBefore('#').endsWith(".flv", ignoreCase = true)) continue
-            return FallbackSource(platform, url, parseMediaHeaders(media))
+            // 同平台按命中顺序逐条试：第一条可能是翻唱/伴奏版且不可播，不能整平台放弃
+            for (matched in matches) {
+                if (my != playSession.get()) return null
+                val media = resolveMediaSource(rt, platform, matched, timeoutMs = FALLBACK_CALL_TIMEOUT_MS)
+                    ?: continue
+                val url = media.optString("url")
+                if (url.isBlank()) continue
+                if (url.substringBefore('?').substringBefore('#').endsWith(".flv", ignoreCase = true)) continue
+                return FallbackSource(platform, url, parseMediaHeaders(media))
+            }
         }
         return null
     }
 
-    /** 在 [platform] 上搜「title artist」，返回标题（近似）匹配的第一条 music 条目 raw；无则 null。 */
+    /**
+     * 在 [platform] 上搜「title artist」，返回标题（近似）匹配的前 [FALLBACK_MAX_MATCHES] 条 music 条目 raw。
+     * 多词无结果时降级为纯歌名再搜一次（部分插件按 AND 匹配，「歌名 歌手」会搜空）。
+     * 返回 null = 调用失败（网络/超时，可重试，不做负缓存）；空列表 = 确认无匹配。
+     */
     private suspend fun searchMusicOn(
         rt: PluginRuntime, platform: String, title: String, artist: String
-    ): JSONObject? {
+    ): List<JSONObject>? {
+        val want = normalizeName(title)
+        val primary = searchOnce(rt, platform, if (artist.isBlank()) title else "$title $artist", want)
+        if (!primary.isNullOrEmpty() || primary == null || artist.isBlank()) return primary
+        return searchOnce(rt, platform, title, want)
+    }
+
+    private suspend fun searchOnce(
+        rt: PluginRuntime, platform: String, query: String, want: String
+    ): List<JSONObject>? {
         val res = try {
-            val query = if (artist.isBlank()) title else "$title $artist"
-            rt.callParallel(platform, "search", listOf(query, "1", "music"), timeoutMs = 12_000)
+            rt.callParallel(platform, "search", listOf(query, "1", "music"), timeoutMs = FALLBACK_CALL_TIMEOUT_MS)
         } catch (e: Exception) {
+            android.util.Log.w("PlayerManager", "fallback search failed on $platform ($query): ${e.message}")
             return null
         }
-        if (res is NotImplementedError) return null
-        val arr = (res as? JSONObject)?.optJSONArray("data") ?: (res as? JSONArray) ?: return null
-        val want = normalizeName(title)
+        if (res is NotImplementedError) return emptyList()
+        val arr = (res as? JSONObject)?.optJSONArray("data") ?: (res as? JSONArray) ?: return emptyList()
+        val out = ArrayList<JSONObject>(FALLBACK_MAX_MATCHES)
         for (i in 0 until arr.length()) {
             val o = arr.optJSONObject(i) ?: continue
             val t = normalizeName(o.optString("title", ""))
             if (t.isNotEmpty() && (t == want || t.contains(want) || want.contains(t))) {
                 if (o.optString("platform").isBlank()) o.put("platform", platform)
-                return o
+                out.add(o)
+                if (out.size >= FALLBACK_MAX_MATCHES) break
             }
         }
-        return null
+        return out
     }
 
     /** 歌名归一化：转小写、去掉空格与常见标点，便于跨插件标题比对。 */
@@ -1041,9 +1079,10 @@ object PlayerManager {
         // 歌曲真实时长只能取插件元数据 raw.duration（秒）：版权截断流的 ExoPlayer
         // duration≈截断点（如 30s），用它比较会永远不满足"歌曲本身比阈值长"而漏检
         val realDurMs = (entry?.raw?.optLong("duration", 0L) ?: 0L).takeIf { it > 0 }?.times(1000L) ?: 0L
+        // pos 从 0 起算：0 字节/秒掐断流也属受限形态，旧写法 pos>=1 会漏检
         if (entry != null && key != null &&
             com.tvmusic.config.MetaSettings.fallbackOtherSource && minMs > 0 &&
-            pos in 1 until minMs && (realDurMs <= 0 || realDurMs > minMs + 1000)
+            pos in 0 until minMs && (realDurMs <= 0 || realDurMs > minMs + 1000)
         ) {
             if (shortPlayFor != key) {
                 shortPlayFor = key
@@ -1055,6 +1094,7 @@ object PlayerManager {
             if (shortPlayCount < SHORT_PLAY_MAX_RETRY) {
                 shortPlayCount++
                 fallbackTriedFor = null // 连环链内取流再出错允许继续救场（换下一个插件）
+                fallbackTriedCount = 0
                 android.util.Log.i(
                     "PlayerManager",
                     "short play ended [$key] pos=${pos}ms < ${minMs}ms, " +
