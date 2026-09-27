@@ -194,7 +194,7 @@ fun PlayerScreen(onBack: () -> Unit) {
                 // 组内紧凑、组间留大间距，d-pad 焦点沿行序自然移动。
                 // 提示区（歌词兜底/音源切换）叠加在 Box 左侧，不占按钮组空间、不影响其居中位置。
                 Box(
-                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 6.dp)
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp)
                 ) {
                     Column(
                         modifier = Modifier.align(Alignment.CenterStart).width(130.dp),
