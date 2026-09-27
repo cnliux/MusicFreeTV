@@ -21,6 +21,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -56,6 +57,12 @@ fun SettingsScreen(
     val health by viewModel.health.collectAsState()
     val syncReport by viewModel.syncReport.collectAsState()
     val healthByPlatform = remember(health) { health.associateBy { it.platform } }
+
+    // 进入/离开设置页时切换健康度轮询可见性标志：页面不可见时暂停轮询，避免后台空转
+    DisposableEffect(Unit) {
+        viewModel.setPageVisible(true)
+        onDispose { viewModel.setPageVisible(false) }
+    }
 
     LaunchedEffect(message) {
         if (message != null) {
