@@ -215,7 +215,7 @@ fun HomeScreen(
  *  拆到 NowPlayingLive 局部订阅，ticker 不再驱动整块面板重组。 */
 @Composable
 private fun NowPlayingPanel(onOpenPlayer: () -> Unit) {
-    val state by PlayerManager.screenState.collectAsState(initial = PlayerManager.uiState.value)
+    val state by PlayerManager.screenState.collectAsState()
     val entry = state.current
     Column(
         modifier = Modifier

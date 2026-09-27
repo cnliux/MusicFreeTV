@@ -74,11 +74,12 @@ import com.tvmusic.ui.components.tvFocus
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
 fun PlayerScreen(onBack: () -> Unit) {
     // 订阅结构性状态（不含每秒刷新的进度/歌词），ticker 不再触发整屏重组；
     // 进度条与歌词各自内部再订阅 uiState，重组范围被限定在各自子树。
-    val state by PlayerManager.screenState.collectAsState(initial = PlayerManager.uiState.value)
+    val state by PlayerManager.screenState.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
     val playback = com.tvmusic.core.TvMusicApp.from(context).playback
     val lists by playback.lists.collectAsState()

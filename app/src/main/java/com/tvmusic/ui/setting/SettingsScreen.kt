@@ -115,7 +115,7 @@ fun SettingsScreen(
             SettingsCard {
                 // 预设列表来自播放器音效实例：进入设置页即确保播放器已创建（否则列表只有"原声"）
                 androidx.compose.runtime.LaunchedEffect(Unit) { com.tvmusic.player.PlayerManager.ensurePlayer() }
-                val pmState by com.tvmusic.player.PlayerManager.screenState.collectAsState(initial = com.tvmusic.player.PlayerManager.uiState.value)
+                val pmState by com.tvmusic.player.PlayerManager.screenState.collectAsState()
                 val presets by com.tvmusic.player.PlayerManager.eqPresets.collectAsState()
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 6.dp),

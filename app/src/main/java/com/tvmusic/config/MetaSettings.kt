@@ -41,8 +41,16 @@ object MetaSettings {
      */
     val minPlaySeconds: Int get() = minPlay.get()
 
-    /** 优先换源插件：换源时把该插件排到候选最前（空 = 不指定）。后台可改，每次使用时读取。 */
+    /**
+     * 优先换源插件：换源时把该插件排到候选最前（空 = 不指定）。
+     * 特殊值 [PREFER_AGGREGATE] = 聚合搜索：全候选并行竞速，先到先得。
+     */
     val fallbackPreferPlugin: String get() = preferPlugin
+
+    /** 远程下拉「聚合搜索」：不置顶单一插件，按最快命中播放。 */
+    const val PREFER_AGGREGATE = "*"
+
+    val preferAggregate: Boolean get() = preferPlugin == PREFER_AGGREGATE
 
     fun init(context: Context) {
         appContext = context.applicationContext

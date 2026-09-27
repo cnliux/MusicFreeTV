@@ -62,11 +62,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // 优先生产签名（keystore.properties 存在且 keystore 文件有效）；
-            // CI 未注入签名密钥时退化为 debug 签名，保证 release 产物可安装。
-            signingConfig = if (
-                signingConfigs.getByName("release").storeFile?.exists() == true
-            ) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+            // 有生产密钥时签名；没有时生成未签名 Release，避免把 Debug 证书产物误当正式包发布。
+            if (signingConfigs.getByName("release").storeFile?.exists() == true) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -89,7 +88,19 @@ android {
     }
 
     lint {
-        abortOnError = false
+        abortOnError = true
+        checkReleaseBuilds = true
+        disable += setOf(
+            // TV 播放器固定横屏；第三方音源与局域网控制台需要兼容 HTTP。
+            "DiscouragedApi",
+            "InsecureBaseConfiguration",
+            // compile/target SDK 35 是当前项目已验证基线；升级需单独做 TV 兼容回归。
+            "OldTargetApi",
+            // 保留启动图标源素材，供后续生成自适应图标；当前 APK 使用 mipmap 位图。
+            "UnusedResources",
+            "IconLauncherShape",
+            "IconLocation"
+        )
     }
 }
 

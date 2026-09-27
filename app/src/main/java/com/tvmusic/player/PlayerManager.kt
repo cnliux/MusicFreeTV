@@ -1,5 +1,6 @@
 package com.tvmusic.player
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
@@ -24,8 +25,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -99,6 +101,8 @@ data class PlayerUiState(
  * 统一播放控制器：负责调用插件 getMediaSource 取播放地址、管理媒体队列、透传请求头。
  * 全部状态通过 [uiState] 暴露给 Compose UI。
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@SuppressLint("StaticFieldLeak")
 object PlayerManager {
 
     private const val KEY_QUALITY = "quality"
@@ -119,7 +123,7 @@ object PlayerManager {
      * 结构性 UI 状态：拷贝自 uiState 但屏蔽每秒刷新的进度/缓冲/歌词字段，
      * 供播放页外壳订阅——ticker 刷新时该流不发射，避免整屏随之秒级重组。
      */
-    val screenState: Flow<PlayerUiState> = _uiState
+    val screenState: StateFlow<PlayerUiState> = _uiState
         .map {
             it.copy(
                 positionMs = 0, durationMs = 0, bufferedPositionMs = 0,
@@ -127,6 +131,7 @@ object PlayerManager {
             )
         }
         .distinctUntilChanged()
+        .stateIn(scope, SharingStarted.Eagerly, PlayerUiState())
 
     var player: ExoPlayer? = null
         private set
@@ -214,13 +219,17 @@ object PlayerManager {
     private const val SHORT_PLAY_MAX_RETRY = 4
 
     /** 换源扫描中单个候选插件单次调用（search/getMediaSource）的超时：慢平台快速跳过。 */
-    private const val FALLBACK_CALL_TIMEOUT_MS = 12_000L
+    private const val FALLBACK_CALL_TIMEOUT_MS = 8_000L
 
     /** 换源竞速整链硬上限：到点仍无人产出可播 URL 即放弃本轮。 */
-    private const val FALLBACK_RACE_MS = 25_000L
+    private const val FALLBACK_RACE_MS = 18_000L
 
     /** 换源扫描每平台最多尝试的搜索命中条数：第一条可能是翻唱/伴奏，解析不可播时继续试后面的。 */
     private const val FALLBACK_MAX_MATCHES = 3
+
+    /** 分批竞速：首批覆盖三条 QuickJS lane，其余候选错峰启动，避免低配 TV 瞬时争抢。 */
+    private const val FALLBACK_FAST_BATCH = 3
+    private const val FALLBACK_STAGGER_MS = 350L
 
     /**
      * 预加载命中的取流结果：url/headers 已解析好；via=null 表示来自原插件，
@@ -770,12 +779,14 @@ object PlayerManager {
                             it.quality == quality &&
                                 android.os.SystemClock.elapsedRealtime() - it.atMs < PRELOAD_TTL_MS
                         }
+                val tooShortMeta = !meetsMinPlayDuration(item.raw)
+                val aggregate = com.tvmusic.config.MetaSettings.preferAggregate
                 // C 投机换源：主源解析的同时并行竞速探备选（未命中缓存且非换源重试时才需要）。
                 // 主源成功 → 结果进 preloadCache 备用；主源失败 → 换源近乎零额外等待。
                 if (!forceFallback && cached == null &&
                     com.tvmusic.config.MetaSettings.fallbackOtherSource
                 ) {
-                    specFallback(rt, item, my)
+                    specFallback(rt, item, my, includeSelf = aggregate || tooShortMeta)
                 }
                 var url: String
                 var headers: Map<String, String>
@@ -791,7 +802,9 @@ object PlayerManager {
                     // 占住时点击播放会延迟几十秒才出声）；2) 复用该平台搜索时在 home
                     // 引擎上建立的模块级状态（cookie/token），解析更快更稳。
                     // forceFallback（取流失败重试）：跳过本插件解析，直接换其他音源。
-                    val media = if (forceFallback) null else resolveMediaSource(rt, plugin, item.raw)
+                    val skipPrimary = forceFallback || tooShortMeta ||
+                        (aggregate && com.tvmusic.config.MetaSettings.fallbackOtherSource)
+                    val media = if (skipPrimary) null else resolveMediaSource(rt, plugin, item.raw)
                     // media == null 表示 getMediaSource 抛错（版权/会员/插件过期）。
                     val primaryFailed = media == null && !forceFallback
                     url = media?.optString("url").orEmpty()
@@ -803,12 +816,16 @@ object PlayerManager {
                     // 主音源不可播放（解析异常 / 空地址 / FLV / 取流失败重试）时，尝试用「其他插件」播放同一首歌：
                     // 只替换实际取流来源，队列条目 / mediaId / 历史 / 歌词 / 来源标签全部保持原样，
                     // 因此不改变歌单，也不与 playSession 切歌守卫、onMediaItemTransition 定位冲突。
-                    if (url.isBlank() || flv || forceFallback) {
+                    if (url.isBlank() || flv || forceFallback || tooShortMeta || skipPrimary) {
                         if (com.tvmusic.config.MetaSettings.fallbackOtherSource) {
                             // 短播连环链进行中：排除已实际取流过仍受限的插件
                             val keyNow = entryKeyOf(item)
                             val excl = if (shortPlayFor == keyNow) shortPlayExclude else emptySet()
-                            consumeSpecFallback(rt, item, my, excl)?.let { fb ->
+                            if (tooShortMeta) showSourceNotice("时长不足设定，换源中…")
+                            consumeSpecFallback(
+                                rt, item, my, excl,
+                                includeSelf = aggregate || tooShortMeta
+                            )?.let { fb ->
                                 url = fb.url
                                 headers = fb.headers
                                 viaPlugin = fb.plugin
@@ -935,7 +952,8 @@ object PlayerManager {
     private suspend fun tryFallbackSource(
         rt: PluginRuntime, item: QueueEntry, my: Int,
         exclude: Set<String> = emptySet(),
-        silent: Boolean = false
+        silent: Boolean = false,
+        includeSelf: Boolean = false
     ): FallbackSource? {
         val repo = repository ?: return null
         if (item.title.isBlank()) return null
@@ -944,7 +962,7 @@ object PlayerManager {
             repo.listEnabled()
                 .filter { it.info != null && it.loadError == null }
                 .map { it.info!!.platform }
-                .filter { it != item.plugin }
+                .filter { includeSelf || it != item.plugin }
                 .filter { it !in exclude },
             order
         )
@@ -953,25 +971,37 @@ object PlayerManager {
         val prefer = com.tvmusic.config.MetaSettings.fallbackPreferPlugin
         val ranked = if (candidates.isEmpty()) candidates else
             candidates
-                .map { it to (if (prefer.isNotBlank() && it == prefer) 1000 else rt.fallbackScore(it)) }
+                .map { it to (if (!com.tvmusic.config.MetaSettings.preferAggregate && prefer.isNotBlank() && it == prefer) 1000 else rt.fallbackScore(it)) }
                 .sortedByDescending { it.second }
                 .map { it.first }
         if (ranked.isEmpty()) return null
         if (!silent) showSourceNotice("正在尝试其他音源…")
         val artist = item.artist
         val cacheKeyPrefix = normalizeName(item.title) + "|" + normalizeName(artist) + "|"
-        // A 聚合竞速：所有候选并行「搜索→解析」，第一个产出可播 URL 的平台胜出。
-        // 总耗时 ≈ 最快活源，而不是所有候选之和；败者继续跑完仅作缓存预热，不影响结果。
+        // 分批聚合竞速：健康度最高的 3 个源立即启动，其余错峰 350ms。
+        // 相比全候选同刻启动，减少低配 TV 的 CPU/引擎锁争抢；若首批均慢，后批仍会完整参与。
+        val raceStarted = android.os.SystemClock.elapsedRealtime()
         return coroutineScope {
             val winner = CompletableDeferred<FallbackSource>()
-            val racers = ranked.map { platform ->
+            val racers = ranked.mapIndexed { index, platform ->
                 launch(Dispatchers.Default) {
-                    probeFallbackPlatform(rt, item, platform, cacheKeyPrefix, artist, my)
-                        ?.let { winner.complete(it) }
+                    if (index >= FALLBACK_FAST_BATCH) kotlinx.coroutines.delay(FALLBACK_STAGGER_MS)
+                    val started = android.os.SystemClock.elapsedRealtime()
+                    probeFallbackPlatform(rt, item, platform, cacheKeyPrefix, artist, my)?.let {
+                        android.util.Log.i(
+                            "PerfFallback",
+                            "candidate=$platform elapsed=${android.os.SystemClock.elapsedRealtime() - started}ms total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms"
+                        )
+                        winner.complete(it)
+                    }
                 }
             }
             // 整链硬上限：即便全部候选都在排队/慢 HTTP，到点即弃，不再分钟级空等
             val first = withTimeoutOrNull(FALLBACK_RACE_MS) { winner.await() }
+            android.util.Log.i(
+                "PerfFallback",
+                "strategy=staggered3 winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${ranked.size}"
+            )
             racers.forEach { it.cancel() }
             first
         }
@@ -995,6 +1025,7 @@ object PlayerManager {
         // 同平台按命中顺序逐条试：第一条可能是翻唱/伴奏版且不可播，不能整平台放弃
         for (matched in matches) {
             if (my != playSession.get()) return null
+            if (!meetsMinPlayDuration(matched)) continue
             val media = resolveMediaSource(rt, platform, matched, timeoutMs = FALLBACK_CALL_TIMEOUT_MS)
                 ?: continue
             val url = media.optString("url")
@@ -1015,12 +1046,15 @@ object PlayerManager {
     @Volatile
     private var specKey: String? = null
 
-    private fun specFallback(rt: PluginRuntime, item: QueueEntry, my: Int) {
+    private fun specFallback(
+        rt: PluginRuntime, item: QueueEntry, my: Int,
+        includeSelf: Boolean = false
+    ) {
         specDeferred?.cancel()
         val key = entryKeyOf(item)
         specKey = key
         specDeferred = scope.async(Dispatchers.Default) {
-            val fb = tryFallbackSource(rt, item, my, silent = true)
+            val fb = tryFallbackSource(rt, item, my, silent = true, includeSelf = includeSelf)
             if (fb != null && my == playSession.get() && key == specKey) {
                 synchronized(preloadCache) {
                     if (!preloadCache.containsKey(key)) {
@@ -1040,7 +1074,8 @@ object PlayerManager {
      * 否则作废投机、现场扫描（排除集/换歌后投机结果可能来自已证明受限的插件，不能要）。
      */
     private suspend fun consumeSpecFallback(
-        rt: PluginRuntime, item: QueueEntry, my: Int, exclude: Set<String>
+        rt: PluginRuntime, item: QueueEntry, my: Int, exclude: Set<String>,
+        includeSelf: Boolean = false
     ): FallbackSource? {
         val spec = specDeferred
         val key = entryKeyOf(item)
@@ -1050,7 +1085,7 @@ object PlayerManager {
         }
         specDeferred?.cancel()
         specDeferred = null
-        return tryFallbackSource(rt, item, my, exclude = exclude)
+        return tryFallbackSource(rt, item, my, exclude = exclude, includeSelf = includeSelf)
     }
 
     /**
@@ -1089,6 +1124,22 @@ object PlayerManager {
             }
         }
         return out
+    }
+
+    /** 插件 duration 可能是秒或毫秒；>10000 视为毫秒。 */
+    private fun rawDurationMs(raw: org.json.JSONObject): Long {
+        val d = raw.optLong("duration", 0L)
+        if (d <= 0L) return 0L
+        return if (d > 10_000L) d else d * 1000L
+    }
+
+    /** 已知时长低于最低播放设定则不合格；未知时长放行（等 READY 再判）。 */
+    private fun meetsMinPlayDuration(raw: org.json.JSONObject): Boolean {
+        val min = com.tvmusic.config.MetaSettings.minPlaySeconds
+        if (min <= 0) return true
+        val ms = rawDurationMs(raw)
+        if (ms <= 0L) return true
+        return ms >= min * 1000L - 1000L
     }
 
     /** 歌名归一化：转小写、去掉空格与常见标点，便于跨插件标题比对。 */
@@ -1175,7 +1226,9 @@ object PlayerManager {
     private fun maybeEarlyCutoffSwitch(streamDurMs: Long) {
         if (!com.tvmusic.config.MetaSettings.fallbackOtherSource) return
         if (com.tvmusic.config.MetaSettings.minPlaySeconds <= 0) return
-        if (!isCutoffDuration(streamDurMs)) return
+        val minMs = com.tvmusic.config.MetaSettings.minPlaySeconds * 1000L
+        val shortVsMin = minMs > 0 && streamDurMs > 0 && streamDurMs < minMs
+        if (!isCutoffDuration(streamDurMs) && !shortVsMin) return
         val st = _uiState.value
         val entry = st.current ?: return
         val key = entryKeyOf(entry)
@@ -1183,9 +1236,11 @@ object PlayerManager {
         // 只处理刚提交的媒体：换源/切歌瞬间 params 可能还属于上一首
         val p = player ?: return
         if (p.currentMediaItem?.mediaId != pendingMediaId) return
-        // 元数据时长本就 ≈ 流时长：是真短歌不是截断
-        val rawDurMs = entry.raw.optLong("duration", 0L) * 1000L
-        if (rawDurMs > 0 && rawDurMs <= streamDurMs + 15_000) return
+        // 元数据时长本就 ≈ 流时长且本身已达最低时长：是真短歌不是截断
+        val rawDurMs = rawDurationMs(entry.raw)
+        if (rawDurMs > 0 && rawDurMs <= streamDurMs + 15_000 && rawDurMs >= minMs) return
+        if (rawDurMs > 0 && rawDurMs < minMs) { /* 元数据已不足设定，必须换源 */ }
+        else if (!shortVsMin && rawDurMs > 0 && rawDurMs <= streamDurMs + 15_000) return
         earlyCutoffFired.add(key)
         if (earlyCutoffFired.size > 64) { earlyCutoffFired.clear(); earlyCutoffFired.add(key) }
         if (shortPlayFor != key) {

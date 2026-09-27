@@ -121,7 +121,7 @@ fun RecommendScreen(
                 }
                 else -> LazyVerticalGrid(
                     state = gridState,
-                    columns = GridCells.Adaptive(164.dp),
+                    columns = GridCells.Adaptive(148.dp),
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(start = 28.dp, end = 28.dp, top = 8.dp, bottom = 64.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),

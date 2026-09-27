@@ -7,7 +7,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -29,12 +32,13 @@ import java.util.Hashtable
 @Composable
 fun QrImage(
     text: String,
-    sizePx: Int = 512,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    sizePx: Int = 512
 ) {
     // 512×512 逐像素填充耗时，放后台线程生成，避免卡 UI 线程
-    val bitmap by produceState<Bitmap?>(null, text, sizePx) {
-        value = withContext(Dispatchers.Default) {
+    var bitmap by remember(text, sizePx) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(text, sizePx) {
+        bitmap = withContext(Dispatchers.Default) {
             runCatching { generateQr(text, sizePx) }.getOrNull()
         }
     }

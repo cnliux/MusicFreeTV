@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -86,6 +87,7 @@ fun TopListScreen(
                                 title = board.title,
                                 subtitle = selectedPlatform,
                                 artwork = board.artwork,
+                                modifier = Modifier.width(148.dp),
                                 onClick = {
                                     onOpenDetail(
                                         DetailTarget.stamped(

@@ -91,7 +91,7 @@
 
 ### 4. 远程 Web 控制台（端口 9527）
 
-TV 端启动后会在局域网内开启 HTTP 服务，**手机 / PC 浏览器访问电视设置页展示的地址（`http://<电视盒子IP>:9527`）即可远程使用**——搜歌、点播、控制电视端播放、管理插件与订阅、调歌词/主题/搜索偏好，无需遥控器逐键操作。
+TV 端启动后会在局域网内开启 HTTP 服务，**手机 / PC 浏览器扫描电视设置页二维码或访问其展示的地址（`http://<电视盒子IP>:9527`）**即可远程使用——搜歌、点播、控制电视端播放、管理插件与订阅、调歌词/主题/搜索偏好，无需遥控器逐键操作。请仅在可信局域网内启用。
 
 > 未找到地址时，先回到电视端设置页查看接收地址，确认手机与电视在同一 Wi-Fi/LAN。手机端建议把页面“添加到主屏幕”。
 
@@ -183,8 +183,8 @@ tvmusic://config?sub=<订阅地址>               # 添加订阅
 2. 连接 Android TV 设备或使用 Android TV Emulator（API 30+）。
 3. 点击 ▶ Run 安装运行。
 
-> 注：仅构建 `arm64-v8a` 与 `x86_64` 两种 ABI（见 `app/build.gradle.kts`），覆盖绝大多数电视盒与模拟器。  
-> 注：`lint { abortOnError = false }` 与 `buildFeatures { buildConfig = true }` 已开启，命令行可正常构建。
+> 注：构建 `arm64-v8a`、`armeabi-v7a` 与 `x86_64` 三种 ABI（见 `app/build.gradle.kts`），覆盖主流电视盒、32 位旧设备与模拟器。
+> 注：Release 构建启用严格 Lint（错误会阻断构建）与 `buildFeatures { buildConfig = true }`。
 
 ## JDK 17 配置
 
@@ -218,7 +218,7 @@ JAVA_HOME=C:\Program Files\Eclipse Adoptium\jdk-17.0.x
 ```
 
 > 发布版（GitHub Release）附带 **已签名的 Release APK**（R8 混淆 + release 证书，可直接安装）。
-> Release 签名配置：本机存在 `keystore.properties`（含 `storeFile/storePassword/keyAlias/keyPassword`）与 `keystore/release.jks`，二者均已加入 `.gitignore` 不随仓库分发；克隆者如无该文件，`assembleRelease` 将生成未签名 APK。
+> Release 签名配置：本机存在 `keystore.properties`（含 `storeFile/storePassword/keyAlias/keyPassword`）与 `keystore/release.jks`，二者均已加入 `.gitignore` 不随仓库分发；克隆者如无该文件，`assembleRelease` 将生成未签名 APK，CI 发布流程则会直接失败，避免误发 Debug 证书产物。
 
 ---
 

@@ -14,6 +14,7 @@ import java.util.concurrent.TimeUnit
  * 前台媒体服务：系统播放控制 / 状态栏通知。
  * Media3 的 MediaSessionService 在播放开始后自动以前台服务方式运行并展示通知。
  */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null

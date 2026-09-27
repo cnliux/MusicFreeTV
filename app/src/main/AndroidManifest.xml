@@ -33,7 +33,6 @@
             android:banner="@drawable/banner"
             android:exported="true"
             android:icon="@mipmap/ic_launcher"
-            android:label="@string/app_name"
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
             android:configChanges="orientation|screenSize|keyboardHidden|navigation"
@@ -51,7 +50,7 @@
 
         <service
             android:name=".player.PlaybackService"
-            android:exported="true"
+            android:exported="false"
             android:foregroundServiceType="mediaPlayback">
             <intent-filter>
                 <action android:name="androidx.media3.session.MediaSessionService" />

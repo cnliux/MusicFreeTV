@@ -47,6 +47,11 @@ class RemoteConfigService : Service() {
 
         /** 图片代理重定向上限（手动逐跳跟随，每跳都做内网地址校验）。 */
         private const val MAX_IMAGE_HOPS = 5
+        private const val MAX_REQUEST_LINE_BYTES = 8 * 1024
+        private const val MAX_HEADER_LINE_BYTES = 8 * 1024
+        private const val MAX_HEADER_BYTES = 32 * 1024
+        private const val MAX_HEADER_COUNT = 100
+        private const val MAX_BODY_BYTES = 4 * 1024 * 1024
 
         /** 图片代理专用共享 OkHttpClient：自身不自动跟随重定向，由代码逐跳校验后跟随。 */
         private val imageHttpClient by lazy {
@@ -175,7 +180,7 @@ class RemoteConfigService : Service() {
 
     private fun handle(socket: Socket) {
         val input = socket.getInputStream()
-        val requestLine = readLine(input) ?: return
+        val requestLine = readLine(input, MAX_REQUEST_LINE_BYTES) ?: return
         val parts = requestLine.split(" ")
         if (parts.size < 2) return
         val method = parts[0].uppercase()
@@ -183,14 +188,27 @@ class RemoteConfigService : Service() {
         val path = parts[1].substringBefore('?')
         val query = parts[1].substringAfter('?', "")
 
-        // 读头
+        // 读头，并限制数量与总大小，避免慢连接或超长头消耗服务内存。
         val headers = mutableMapOf<String, String>()
+        var headerBytes = 0
+        var headerCount = 0
         while (true) {
-            val line = readLine(input) ?: break
+            val line = readLine(input, MAX_HEADER_LINE_BYTES) ?: break
             if (line.isBlank()) break
+            headerCount++
+            if (headerCount > MAX_HEADER_COUNT) throw IllegalArgumentException("too many headers")
+            headerBytes += line.toByteArray(Charsets.UTF_8).size
+            if (headerBytes > MAX_HEADER_BYTES) throw IllegalArgumentException("headers too large")
             val idx = line.indexOf(':')
             if (idx > 0) headers[line.substring(0, idx).trim().lowercase()] =
                 line.substring(idx + 1).trim()
+        }
+
+        val origin = headers["origin"]
+        val host = headers["host"].orEmpty()
+        if (!origin.isNullOrBlank() && runCatching { java.net.URI(origin).authority }.getOrNull() != host) {
+            respond(socket, 403, JSONObject().put("ok", false).put("error", "cross-origin request denied").toString())
+            return
         }
 
         when {
@@ -316,11 +334,18 @@ class RemoteConfigService : Service() {
                     return
                 }
                 val varsObj = json?.optJSONObject("vars") ?: JSONObject()
+                val existing = app().store.loadVariables(platform)
+                val secretKeys = app().store.loadPluginMetas()
+                    .firstOrNull { (it.info?.platform ?: it.name) == platform }
+                    ?.info?.userVariables.orEmpty()
+                    .filter { it.type.equals("password", ignoreCase = true) }
+                    .map { it.key }.toSet()
                 val map = HashMap<String, String>()
                 val keys = varsObj.keys()
                 while (keys.hasNext()) {
                     val k = keys.next()
-                    map[k] = varsObj.optString(k)
+                    val submitted = varsObj.optString(k)
+                    map[k] = if (k in secretKeys && submitted.isEmpty()) existing[k].orEmpty() else submitted
                 }
                 app().store.replaceVariables(platform, map)
                 respond(socket, 200, JSONObject().put("ok", true).put("message", "已保存 $platform 的变量").toString())
@@ -833,9 +858,8 @@ class RemoteConfigService : Service() {
     private fun readBody(input: InputStream, headers: Map<String, String>): String {
         val len = headers["content-length"]?.toIntOrNull() ?: 0
         if (len <= 0) return ""
-        // 上限 4MB：导入配置/批量收藏足够；超过直接拒绝，
-        // 旧实现按 4MB 分配缓冲却用原始 len 作读取长度，超大请求必数组越界
-        if (len > 4 * 1024 * 1024) throw IllegalArgumentException("payload too large")
+        // 上限 4MB：导入配置/批量收藏足够；超过直接拒绝。
+        if (len > MAX_BODY_BYTES) throw IllegalArgumentException("payload too large")
         val buf = ByteArray(len)
         var read = 0
         while (read < len) {
@@ -985,7 +1009,10 @@ class RemoteConfigService : Service() {
                 )
             }
             val values = JSONObject()
-            app().store.loadVariables(pk).forEach { (k, v) -> values.put(k, v) }
+            val secretKeys = defs.filter { it.type.equals("password", ignoreCase = true) }.map { it.key }.toSet()
+            app().store.loadVariables(pk).forEach { (k, v) ->
+                values.put(k, if (k in secretKeys && v.isNotEmpty()) "" else v)
+            }
             arr.put(
                 JSONObject()
                     .put("platform", pk)
@@ -1110,9 +1137,12 @@ class RemoteConfigService : Service() {
                             }
                         }
                     }
+                    val searchStarted = android.os.SystemClock.elapsedRealtime()
                     coroutineScope {
                         enabled.forEachIndexed { idx, platform ->
                             launch(Dispatchers.IO) {
+                                if (idx >= 3) kotlinx.coroutines.delay(350L)
+                                val sourceStarted = android.os.SystemClock.elapsedRealtime()
                                 val arr = try {
                                     // 粘性引擎路由下，同引擎多平台会排队；外层预算放宽到 60s 给足排队余量，
                                     // 单个 invoke 45s（略低于 TV 端默认 60s），宁慢勿丢源（超时即整源无结果）
@@ -1127,6 +1157,8 @@ class RemoteConfigService : Service() {
                                 } catch (e: Exception) {
                                     JSONArray()
                                 }
+                                val elapsed = android.os.SystemClock.elapsedRealtime() - sourceStarted
+                                Log.i("PerfSearch", "remote source=$platform elapsed=${elapsed}ms results=${arr.length()} strategy=staggered3")
                                 synchronized(collected) {
                                     collected[idx] = arr
                                     session.done = completed.incrementAndGet()
@@ -1136,6 +1168,7 @@ class RemoteConfigService : Service() {
                         }
                     }
                     reaggregate()
+                    Log.i("PerfSearch", "remote done=${android.os.SystemClock.elapsedRealtime() - searchStarted}ms sources=${enabled.size} strategy=staggered3")
                     if (sortBy != com.tvmusic.config.SearchSettings.SORT_DEFAULT) {
                         synchronized(session.results) {
                             session.results.sortWith(
@@ -1278,7 +1311,7 @@ class RemoteConfigService : Service() {
                 "Content-Type: $ctype\r\n" +
                 "Content-Length: ${bytes.size}\r\n" +
                 "Cache-Control: public, max-age=86400\r\n" +
-                "Access-Control-Allow-Origin: *\r\n" +
+                "X-Content-Type-Options: nosniff\r\n" +
                 "Connection: close\r\n\r\n"
             socket.getOutputStream().use { out ->
                 out.write(head.toByteArray(Charsets.UTF_8))
@@ -1297,9 +1330,13 @@ class RemoteConfigService : Service() {
         if (h == "localhost" || h.isBlank()) return true
         return try {
             java.net.InetAddress.getAllByName(h).any { addr ->
+                val bytes = addr.address
+                val ipv4Shared = bytes.size == 4 && (bytes[0].toInt() and 0xff) == 100 &&
+                    (bytes[1].toInt() and 0xc0) == 64 // 100.64.0.0/10 CGNAT
+                val ipv6UniqueLocal = bytes.size == 16 && (bytes[0].toInt() and 0xfe) == 0xfc
                 addr.isLoopbackAddress || addr.isAnyLocalAddress ||
                     addr.isLinkLocalAddress || addr.isSiteLocalAddress ||
-                    addr.isMulticastAddress
+                    addr.isMulticastAddress || ipv4Shared || ipv6UniqueLocal
             }
         } catch (_: Exception) {
             true // 解析失败不代理
@@ -1310,13 +1347,19 @@ class RemoteConfigService : Service() {
         val status = when (code) {
             200 -> "OK"
             400 -> "Bad Request"
+            401 -> "Unauthorized"
+            403 -> "Forbidden"
+            404 -> "Not Found"
+            413 -> "Payload Too Large"
+            431 -> "Request Header Fields Too Large"
             503 -> "Service Unavailable"
-            else -> "Not Found"
+            else -> "Error"
         }
         val head = "HTTP/1.1 $code $status\r\n" +
             "Content-Type: application/json; charset=utf-8\r\n" +
             "Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n" +
-            "Access-Control-Allow-Origin: *\r\n" +
+            "Cache-Control: no-store\r\n" +
+            "X-Content-Type-Options: nosniff\r\n" +
             "Connection: close\r\n\r\n"
         try {
             socket.getOutputStream().use { out ->
@@ -1330,11 +1373,19 @@ class RemoteConfigService : Service() {
     }
 
     private fun respondHtml(socket: Socket, code: Int, body: String) {
-        val status = if (code == 200) "OK" else "Bad Request"
+        val status = when (code) {
+            200 -> "OK"
+            401 -> "Unauthorized"
+            403 -> "Forbidden"
+            else -> "Bad Request"
+        }
         val head = "HTTP/1.1 $code $status\r\n" +
             "Content-Type: text/html; charset=utf-8\r\n" +
             "Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n" +
-            "Cache-Control: no-store\r\n\r\n"
+            "Cache-Control: no-store\r\n" +
+            "Content-Security-Policy: default-src 'self' data: blob:; img-src 'self' data: blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'\r\n" +
+            "X-Content-Type-Options: nosniff\r\n" +
+            "X-Frame-Options: DENY\r\n\r\n"
         try {
             socket.getOutputStream().use { out ->
                 out.write(head.toByteArray(Charsets.UTF_8))
@@ -1352,7 +1403,8 @@ class RemoteConfigService : Service() {
             "Content-Type: application/json; charset=utf-8\r\n" +
             "Content-Disposition: attachment; filename=\"$filename\"\r\n" +
             "Content-Length: ${bytes.size}\r\n" +
-            "Access-Control-Allow-Origin: *\r\n" +
+            "Cache-Control: no-store\r\n" +
+            "X-Content-Type-Options: nosniff\r\n" +
             "Connection: close\r\n\r\n"
         try {
             socket.getOutputStream().use { out ->
@@ -1380,7 +1432,7 @@ class RemoteConfigService : Service() {
             val head = "HTTP/1.1 200 OK\r\n" +
                 "Content-Type: text/event-stream; charset=utf-8\r\n" +
                 "Cache-Control: no-cache\r\n" +
-                "Access-Control-Allow-Origin: *\r\n" +
+                "X-Content-Type-Options: nosniff\r\n" +
                 "Connection: keep-alive\r\n\r\n"
             writeFrame(socket, out, head.toByteArray(Charsets.UTF_8))
             while (true) {
@@ -1411,12 +1463,14 @@ class RemoteConfigService : Service() {
         }
     }
 
-    private fun readLine(input: InputStream): String? {
+    private fun readLine(input: InputStream, maxBytes: Int): String? {
         val sb = StringBuilder()
         var prev = -1
+        var count = 0
         while (true) {
             val b = input.read()
             if (b < 0) return if (sb.isEmpty()) null else sb.toString()
+            if (++count > maxBytes) throw IllegalArgumentException("HTTP line too long")
             if (prev == '\r'.code && b == '\n'.code) {
                 return sb.dropLast(1).toString()
             }
@@ -1790,8 +1844,8 @@ private val PAGE_HTML = """<!DOCTYPE html>
         <button class="small" onclick="saveMinPlay()">保存</button>
       </div>
       <div class="row" style="border:none;padding:6px 0 0;">
-        <span class="muted" style="flex:1;">优先换源插件：无法播放/受限时最先尝试该插件（可选，留空按音源顺序）</span>
-        <select id="preferPlugin" onchange="savePrefer()" style="max-width:150px;flex:none;"></select>
+        <span class="muted" style="flex:1;">优先换源插件：无法播放/受限时最先尝试该插件；「聚合搜索」= 全源并行，最快符合时长的先播</span>
+        <select id="preferPlugin" onchange="savePrefer()" style="max-width:220px;flex:none;"></select>
       </div>
     </div>
     <div class="card">
@@ -2827,6 +2881,7 @@ function fillPreferOptions() {
     var sel = el('preferPlugin');
     var cur = metaCfg.preferPlugin || '';
     var html = '<option value="">（按音源顺序）</option>';
+    html += '<option value="*">聚合搜索（最快命中）</option>';
     ((d && d.plugins) || []).forEach(function (p) {
       if (p.enabled === false) return;
       var val = p.platform || p.name || '';
@@ -2842,7 +2897,7 @@ function fillPreferOptions() {
 function savePrefer() {
   var v = el('preferPlugin').value || '';
   post('/api/meta', { preferPlugin: v }).then(function (d) {
-    if (d.ok) { metaCfg.preferPlugin = d.preferPlugin || ''; toast(v ? '优先换源插件：' + v : '已清除优先插件，按音源顺序'); }
+    if (d.ok) { metaCfg.preferPlugin = d.preferPlugin || ''; toast(v === '*' ? '优先换源：聚合搜索（最快命中）' : (v ? '优先换源插件：' + v : '已清除优先插件，按音源顺序')); }
   }).catch(function () { toast('保存失败'); });
 }
 function toggleMeta() {

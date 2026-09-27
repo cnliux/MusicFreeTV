@@ -68,7 +68,7 @@ fun MyListScreen(
 ) {
     val history by playback.history.collectAsState()
     val lists by playback.lists.collectAsState()
-    val playerState by PlayerManager.screenState.collectAsState(initial = PlayerManager.uiState.value)
+    val playerState by PlayerManager.screenState.collectAsState()
 
     // null = 播放历史；QUEUE_ID = 当前播放队列；其他 = 所选收藏专辑 id
     var selectedListId by rememberSaveable { mutableStateOf<String?>(null) }

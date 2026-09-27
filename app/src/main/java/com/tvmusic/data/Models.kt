@@ -97,6 +97,9 @@ data class SheetEntry(
     val title: String get() = raw.optString("title", "")
     val artwork: String get() = raw.optString("artwork", "")
         .ifBlank { raw.optString("coverImg", "") }
+        .ifBlank { raw.optString("cover", "") }
+        .ifBlank { raw.optString("pic", "") }
+        .ifBlank { raw.optString("image", "") }
     val description: String get() = raw.optString("description", "")
     val musicList: List<SearchEntry> get() {
         val arr = raw.optJSONArray("musicList") ?: return emptyList()
@@ -111,6 +114,11 @@ data class TopListEntry(
     val title: String get() = raw.optString("title", "")
     val artwork: String get() = raw.optString("artwork", "")
         .ifBlank { raw.optString("coverImg", "") }
+        .ifBlank { raw.optString("cover", "") }
+        .ifBlank { raw.optString("pic", "") }
+        .ifBlank { raw.optString("image", "") }
+        .ifBlank { raw.optString("img", "") }
+        .ifBlank { raw.optString("logo", "") }
 }
 
 /**

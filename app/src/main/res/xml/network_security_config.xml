@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
+    <!-- 第三方音源插件和局域网控制台可能使用 HTTP；网络请求层另行实施鉴权与主机校验。 -->
     <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

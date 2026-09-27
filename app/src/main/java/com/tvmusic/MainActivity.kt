@@ -105,17 +105,6 @@ class MainActivity : ComponentActivity() {
         idleHandler.removeCallbacks(idleRunnable)
     }
 
-    /** 调试：确认遥控器按键是否到达 Activity（logcat -s DpadDebug）。仅 debug 构建启用。 */
-    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
-        if (BuildConfig.DEBUG && event.action == android.view.KeyEvent.ACTION_DOWN) {
-            android.util.Log.d(
-                "DpadDebug",
-                "key=${event.keyCode} (${android.view.KeyEvent.keyCodeToString(event.keyCode)}) repeat=${event.repeatCount}"
-            )
-        }
-        return super.dispatchKeyEvent(event)
-    }
-
     @Composable
     fun App() {
         val navController = rememberNavController()

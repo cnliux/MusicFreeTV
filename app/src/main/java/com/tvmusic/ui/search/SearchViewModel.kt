@@ -51,9 +51,9 @@ sealed interface SearchPhase {
 
 class SearchViewModel(app: TvMusicApp) : ViewModel() {
 
+    private val application = app
     private val runtime = app.runtime
     private val repository = app.repository
-    private val context = app.applicationContext
 
     private val prefs = app.getSharedPreferences("search_prefs", android.content.Context.MODE_PRIVATE)
 
@@ -201,7 +201,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
         viewModelScope.launch(Dispatchers.Default) {
             // 全局串行：QuickJS 单线程引擎并发 invoke 会死锁，搜索内部本身也是逐插件调用。
             // 每次重读后台配置，保证 web 管理台改的优先级/默认排序实时生效。
-            val cfg = SearchSettings.load(context)
+            val cfg = SearchSettings.load(application)
             if (!sortManuallyTouched) {
                 _sortBy.value = cfg.sortBy
                 _sortAsc.value = cfg.asc
@@ -225,10 +225,14 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             val groupsArr = arrayOfNulls<SearchGroup>(ordered.size)
             val completed = java.util.concurrent.atomic.AtomicInteger(0)
             val pubLock = Any()
+            val searchStarted = android.os.SystemClock.elapsedRealtime()
+            val firstResultLogged = java.util.concurrent.atomic.AtomicBoolean(false)
             coroutineScope {
                 ordered.forEachIndexed { idx, platform ->
                     launch(Dispatchers.IO) {
+                        if (idx >= SEARCH_FAST_BATCH) kotlinx.coroutines.delay(SEARCH_STAGGER_MS)
                         if (my != session) return@launch
+                        val sourceStarted = android.os.SystemClock.elapsedRealtime()
                         val plugin = byPlatform.getValue(platform)
                         // 对齐 RN getSearchablePlugins(type)：插件声明了 supportedSearchType 时必须包含该类型
                         val supported = plugin.info!!.supportedSearchType
@@ -263,8 +267,19 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
                             completed.incrementAndGet()
                             if (my == session) visible = groupsArr.filterNotNull()
                         }
+                        val sourceElapsed = android.os.SystemClock.elapsedRealtime() - sourceStarted
+                        android.util.Log.i(
+                            "PerfSearch",
+                            "source=$platform elapsed=${sourceElapsed}ms results=${group?.entries?.size ?: 0} strategy=staggered3"
+                        )
                         if (my != session) return@launch
                         if (visible != null && visible.isNotEmpty()) {
+                            if (firstResultLogged.compareAndSet(false, true)) {
+                                android.util.Log.i(
+                                    "PerfSearch",
+                                    "first=${android.os.SystemClock.elapsedRealtime() - searchStarted}ms source=$platform"
+                                )
+                            }
                             _phase.value = SearchPhase.Searching(completed.get(), ordered.size)
                             _groups.value = visible
                         }
@@ -272,6 +287,10 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
                 }
             }
             if (my != session) return@launch
+            android.util.Log.i(
+                "PerfSearch",
+                "done=${android.os.SystemClock.elapsedRealtime() - searchStarted}ms sources=${ordered.size} strategy=staggered3"
+            )
             _searchingDone(groupsArr.none { it?.hasContent == true })
             addHistory(q)
         }
@@ -456,5 +475,8 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
 
         private const val KEY_HISTORY = "history"
         private const val MAX_HISTORY = 15
+        /** 首批立即搜索的音源数；其余源短暂错峰，降低低配 TV 瞬时争抢。 */
+        private const val SEARCH_FAST_BATCH = 3
+        private const val SEARCH_STAGGER_MS = 350L
     }
 }

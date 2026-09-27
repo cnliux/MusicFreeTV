@@ -379,8 +379,8 @@ fun MusicRow(
 }
 
 @Composable
-fun LoadingBox(modifier: Modifier = Modifier.fillMaxSize()) {
-    Box(modifier, contentAlignment = Alignment.Center) {
+fun LoadingBox(modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
     }
 }
