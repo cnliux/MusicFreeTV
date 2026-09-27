@@ -191,12 +191,23 @@ fun PlayerScreen(onBack: () -> Unit) {
                 // 下：控制条（进度 + 时间 + 全部控制按钮）；进度每秒刷新只在卡片内部重组
                 ProgressSection(onSeek = { PlayerManager.seek(it) })
                 // 按键分三组：状态（收藏/循环）· 主控（快退/上下首/播放/快进）· 功能（倍速/定时/音效/返回），
-                // 组内紧凑、组间留大间距，d-pad 焦点沿行序自然移动
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 6.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
+                // 组内紧凑、组间留大间距，d-pad 焦点沿行序自然移动。
+                // 提示区（歌词兜底/音源切换）叠加在 Box 左侧，不占按钮组空间、不影响其居中位置。
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 6.dp)
                 ) {
+                    Column(
+                        modifier = Modifier.align(Alignment.CenterStart).width(130.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        NoticePill(state.sourceNotice)
+                        NoticePill(state.lyricNotice)
+                    }
+                    Row(
+                        modifier = Modifier.align(Alignment.Center),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                     // 来源标签（收藏按钮左侧）：插件名 · 歌单名；已换源时右上角固定显示实际取流插件
                     state.sourceLabel?.takeIf { it.isNotBlank() }?.let { src ->
                         val parts = src.split(" · ", limit = 2)
@@ -236,9 +247,6 @@ fun PlayerScreen(onBack: () -> Unit) {
                         }
                         Spacer(Modifier.width(16.dp))
                     }
-                    // 歌词兜底/换源等提示：固定占位显示在收藏按钮左侧（无提示时留白，按钮不位移）
-                    MetaNoticeSlot(text = state.metaNotice)
-                    Spacer(Modifier.width(14.dp))
                     // 状态组
                     RoundCtrlButton(
                         if (state.isFavorite) "♥" else "♡",
@@ -294,6 +302,7 @@ fun PlayerScreen(onBack: () -> Unit) {
                         desc = "音效设置"
                     ) { showEqDialog = true }
                     RoundCtrlButton("↩", size = 52.dp, iconSize = 22.sp, filled = false, desc = "返回", onClick = onBack)
+                    }
                 }
             }
         }
@@ -358,31 +367,25 @@ fun PlayerScreen(onBack: () -> Unit) {
     }
 }
 
-/** 歌词兜底/换源等提示槽：固定尺寸占位（按钮不位移），提示常驻直到被替换或切歌。 */
+/** 控制条左侧提示胶囊：歌词兜底与换源各占一行、互不覆盖；空文本不渲染不占位。 */
 @Composable
-private fun MetaNoticeSlot(text: String?) {
-    Box(
-        modifier = Modifier.width(200.dp).height(52.dp),
-        contentAlignment = Alignment.CenterEnd
+private fun NoticePill(text: String?) {
+    AnimatedVisibility(
+        visible = !text.isNullOrBlank(),
+        enter = fadeIn(),
+        exit = fadeOut()
     ) {
-        AnimatedVisibility(
-            visible = !text.isNullOrBlank(),
-            enter = fadeIn(),
-            exit = fadeOut()
-        ) {
-            Text(
-                text = text ?: "",
-                fontSize = 11.sp,
-                color = Color.White,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                textAlign = androidx.compose.ui.text.style.TextAlign.End,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xB3000000))
-                    .padding(horizontal = 10.dp, vertical = 5.dp)
-            )
-        }
+        Text(
+            text = text ?: "",
+            fontSize = 10.sp,
+            color = Color.White,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xB3000000))
+                .padding(horizontal = 8.dp, vertical = 3.dp)
+        )
     }
 }
 

@@ -79,8 +79,10 @@ data class PlayerUiState(
     val bassStrength: Int = 0,
     /** 均衡器预设序号：0 = 原声（平直），1..N = 系统预设。 */
     val eqPreset: Int = 0,
-    /** 提示（如 lrc.cx 兜底进度/结果、换源），播放页固定显示在收藏按钮旁，直到被新提示或切歌替换。 */
-    val metaNotice: String? = null,
+    /** 歌词/封面兜底提示（lrc.cx），播放页控制条左侧常驻，直到被替换或切歌。 */
+    val lyricNotice: String? = null,
+    /** 音源切换提示（尝试/已换源/受限跳过），与歌词提示分行常驻，互不覆盖。 */
+    val sourceNotice: String? = null,
     /** 来源标签（「插件名 · 歌单名」，如「wx · 华语热歌」），迷你播放器与播放页展示。 */
     val sourceLabel: String? = null,
     /** 实际取流插件与队列条目来源插件不同（已换源）时显示，如「bilibili」；未换源为 null。 */
@@ -698,7 +700,7 @@ object PlayerManager {
             shortPlayExclude.clear()
             playingVia = null       // 清掉上一首的实际取流插件，避免脏值误入新一首的排除集
             // 提示常驻到切歌：新会话开始先清掉上一首残留的歌词/换源提示
-            _uiState.update { it.copy(metaNotice = null) }
+            _uiState.update { it.copy(lyricNotice = null, sourceNotice = null) }
         }
         scope.launch(Dispatchers.Default) {
             try {
@@ -713,7 +715,7 @@ object PlayerManager {
                 val provided = queue ?: listOf(item)
                 val effectiveQueue = provided.map { withFallbackArtwork(it) }
                 val shown = effectiveQueue[startIndex.coerceIn(0, effectiveQueue.lastIndex)]
-                if (shown !== item) showMetaNotice("已用 lrc.cx 补充封面")
+                if (shown !== item) showLyricNotice("封面已用 lrc.cx 补充")
                 _uiState.update {
                     it.copy(
                         current = shown,
@@ -791,7 +793,7 @@ object PlayerManager {
                     }
                 }
                 if (my != playSession.get()) return@launch
-                if (viaPlugin != plugin) showMetaNotice("已切换「$viaPlugin」音源播放本曲")
+                if (viaPlugin != plugin) showSourceNotice("已换源「$viaPlugin」播放")
                 playingVia = viaPlugin // 记录实际取流插件：短播连环重试时加入排除集
                 // 供标题栏常驻提示：仅在实际取流插件 ≠ 队列条目来源插件（发生换源）时展示
                 _uiState.update {
@@ -914,7 +916,7 @@ object PlayerManager {
             if (prefer in candidates) listOf(prefer) + (candidates - prefer) else candidates
         } else candidates
         if (orderedCandidates.isEmpty()) return null
-        if (!silent) showMetaNotice("正在尝试其他音源播放「${item.title}」…")
+        if (!silent) showSourceNotice("正在尝试其他音源…")
         val artist = item.artist
         val cacheKeyPrefix = normalizeName(item.title) + "|" + normalizeName(artist) + "|"
         for (platform in orderedCandidates) {
@@ -1058,11 +1060,11 @@ object PlayerManager {
                     "short play ended [$key] pos=${pos}ms < ${minMs}ms, " +
                         "retry #${shortPlayCount} via other source (excluded=$shortPlayExclude)"
                 )
-                showMetaNotice("「${entry.title}」疑似版权受限，正在尝试其他音源…")
+                showSourceNotice("疑似版权受限，换源中…")
                 play(entry.plugin, entry, st.queue, st.queueIndex, forceFallback = true)
                 return
             }
-            showMetaNotice("「${entry.title}」各音源均受限，已跳过")
+            showSourceNotice("各音源均受限，已跳过")
             // 重试耗尽：强制推进到下一曲，绝不能走 LOOP_ONE/单曲的 replayCurrent——
             // 否则会重播同一首受限曲 → 又短播 → 又重播，无限循环刷通知。
             // 队列只剩一首时无处可跳，直接停在 ENDED（不重播）。
@@ -1257,11 +1259,16 @@ object PlayerManager {
     private var lyricJob: kotlinx.coroutines.Job? = null
 
     /**
-     * 播放页提示：lrc.cx 兜底进行中/成功/失败、换源等的可见反馈。
-     * 常驻显示（收藏按钮旁固定位），直到被下一条提示替换或新播放会话开始清除。
+     * 歌词/封面兜底提示：lrc.cx 兜底进行中/成功/失败的可见反馈。
+     * 常驻显示（控制条左侧），直到被下一条同类提示替换或新播放会话开始清除。
      */
-    private fun showMetaNotice(text: String) {
-        _uiState.update { it.copy(metaNotice = text) }
+    private fun showLyricNotice(text: String) {
+        _uiState.update { it.copy(lyricNotice = text) }
+    }
+
+    /** 音源切换提示：与歌词提示分行常驻、互不覆盖，清除时机同上。 */
+    private fun showSourceNotice(text: String) {
+        _uiState.update { it.copy(sourceNotice = text) }
     }
 
     /** 最近一次已发起歌词请求的条目：onMediaItemTransition 与 play() 末尾都会触发，按条目去重。 */
@@ -1291,7 +1298,7 @@ object PlayerManager {
                 var lines = result?.let { parseLyricResult(it) } ?: emptyList()
                 // 插件没返回歌词且开启兜底时，按 曲名/歌手/专辑 从 lrc.cx 补齐
                 if (lines.isEmpty() && com.tvmusic.config.MetaSettings.isEnabled) {
-                    showMetaNotice("正在从 lrc.cx 搜索「${entry.title}」歌词…")
+                    showLyricNotice("正在搜索歌词…")
                     val fallback = try {
                         fetchFallbackLyric(entry) // null = 网络失败（已重试），空列表 = 确实没有
                     } catch (_: Exception) {
@@ -1299,9 +1306,9 @@ object PlayerManager {
                     }
                     lines = fallback ?: emptyList()
                     when {
-                        fallback == null -> showMetaNotice("lrc.cx 请求失败（网络不稳定，已重试）")
-                        lines.isNotEmpty() -> showMetaNotice("已从 lrc.cx 补充歌词")
-                        else -> showMetaNotice("lrc.cx 未找到该歌曲歌词")
+                        fallback == null -> showLyricNotice("lrc.cx 请求失败")
+                        lines.isNotEmpty() -> showLyricNotice("歌词已用 lrc.cx 补充")
+                        else -> showLyricNotice("未找到该歌曲歌词")
                     }
                 }
                 _uiState.update { it.copy(lrcLines = lines.sortedBy { it.timeMs }, lrcIndex = -1) }
