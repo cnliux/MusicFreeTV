@@ -98,7 +98,8 @@ fun SheetScreen(
                         count = entries.size
                     )
                 }
-                itemsIndexed(entries, key = { _, item -> playback.primaryKey(item) }) { index, item ->
+                // key 拼 index 兜底：翻页边界同曲会导致 primaryKey 重复，违反 Lazy 列表唯一 key 规则（R1）
+                itemsIndexed(entries, key = { i, item -> "${i}_${playback.primaryKey(item)}" }) { index, item ->
                     val key = playback.primaryKey(item)
                     MusicRow(
                         index = index,

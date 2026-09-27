@@ -363,9 +363,13 @@ object PlayerManager {
         }
     }
 
-    /** 音质档位：插件 getMediaSource 的第二个参数。standard/high/low/super 等。 */
-    var quality: String = "standard"
-        private set
+    /** 音质档位：插件 getMediaSource 的第二个参数。standard/high/low/super 等。
+     * 用 StateFlow 使设置页选中态即时重组（原普通 var 点击后不刷新，违反 R20）。 */
+    private val _quality = MutableStateFlow("standard")
+    val quality: String
+        get() = _quality.value
+    /** Compose 订阅用 StateFlow。 */
+    val qualityFlow: StateFlow<String> = _quality
 
     private val qualityPrefs by lazy {
         context?.getSharedPreferences("player_prefs", Context.MODE_PRIVATE)
@@ -374,7 +378,7 @@ object PlayerManager {
     fun init(appContext: Context) {
         if (context != null) return
         context = appContext.applicationContext
-        quality = qualityPrefs?.getString(KEY_QUALITY, "standard") ?: "standard"
+        _quality.value = qualityPrefs?.getString(KEY_QUALITY, "standard") ?: "standard"
         val savedMode = runCatching {
             PlayMode.valueOf(qualityPrefs?.getString(KEY_PLAY_MODE, PlayMode.ORDER.name) ?: PlayMode.ORDER.name)
         }.getOrDefault(PlayMode.ORDER)
@@ -391,7 +395,7 @@ object PlayerManager {
     }
 
     fun setQuality(q: String) {
-        quality = q
+        _quality.value = q
         qualityPrefs?.edit()?.putString(KEY_QUALITY, q)?.apply()
     }
 
@@ -1426,7 +1430,8 @@ object PlayerManager {
         val key = entry?.let { entryKeyOf(it) }
         // 歌曲真实时长只能取插件元数据 raw.duration（秒）：版权截断流的 ExoPlayer
         // duration≈截断点（如 30s），用它比较会永远不满足"歌曲本身比阈值长"而漏检
-        val realDurMs = (entry?.raw?.optLong("duration", 0L) ?: 0L).takeIf { it > 0 }?.times(1000L) ?: 0L
+        // 与 rawDurationMs 保持同一启发式：插件 duration 可能是秒或毫秒（>10000 视为毫秒）
+        val realDurMs = entry?.let { rawDurationMs(it.raw) } ?: 0L
         val streamDurMs = player?.duration?.takeIf { it > 0 } ?: 0L
         // 受限判定：元数据时长可用时以元数据为准；缺失时要求掐断点/流总时长
         // 命中典型试听截断长度才算受限——真短歌（如 40s 单曲播完全程）不再触发
@@ -1628,6 +1633,10 @@ object PlayerManager {
         ticker.removeCallbacksAndMessages(null)
         lyricJob?.cancel()
         lyricJob = null
+        lyricNoticeJob?.cancel()
+        lyricNoticeJob = null
+        sourceNoticeJob?.cancel()
+        sourceNoticeJob = null
         player?.removeListener(playerListener)
         player?.release()
         player = null

@@ -311,7 +311,8 @@ class PlaybackStore(context: Context) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return null
         _lists.value.firstOrNull { it.name == trimmed }?.let { return it.id }
-        val id = "fav_" + System.currentTimeMillis().toString(36)
+        // 毫秒时间戳同毫秒内可撞 id，追加随机后缀保证唯一
+        val id = "fav_" + System.currentTimeMillis().toString(36) + "_" + java.util.UUID.randomUUID().toString().take(6)
         _lists.value = _lists.value + FavList(id, trimmed, emptyList())
         saveListsDebounced()
         publishMerged()

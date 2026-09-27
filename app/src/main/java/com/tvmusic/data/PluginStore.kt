@@ -267,6 +267,7 @@ class PluginStore(context: Context) {
     }
 
     /** @return 是否命中并更新了行（未命中返回 false，由调用方回 404，不再静默成功）。 */
+    @Synchronized
     fun setPluginEnabled(nameOrPlatform: String, enabled: Boolean): Boolean {
         val name = resolvePluginName(nameOrPlatform) ?: return false
         val cv = ContentValues().apply { put("enabled", if (enabled) 1 else 0) }

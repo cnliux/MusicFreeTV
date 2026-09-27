@@ -419,7 +419,9 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             .flatMap { g -> g.entries }
             .filter { it.type == TYPE_MUSIC }
             .map { QueueEntry(it.plugin, it.raw) }
-        val idx = queue.indexOfFirst { it.raw == entry.raw }.coerceAtLeast(0)
+        // JSONObject == 是引用相等，跨 session 重建队列后永远 -1 会静默播第 0 首（R6 记录的事故形态）
+        val targetKey = com.tvmusic.data.PlaybackStore.favKeyOf(entry.raw)
+        val idx = queue.indexOfFirst { com.tvmusic.data.PlaybackStore.favKeyOf(it.raw) == targetKey }.coerceAtLeast(0)
         if (queue.isNotEmpty()) {
             PlayerManager.play(entry.plugin, queue[idx], queue, idx, source = "${entry.plugin} · 搜索结果")
         }
