@@ -79,9 +79,9 @@ data class PlayerUiState(
     val bassStrength: Int = 0,
     /** 均衡器预设序号：0 = 原声（平直），1..N = 系统预设。 */
     val eqPreset: Int = 0,
-    /** 歌词/封面兜底提示（lrc.cx），播放页控制条左侧常驻，直到被替换或切歌。 */
+    /** 歌词/封面兜底提示（lrc.cx），播放页控制条左侧显示 20 秒后自动消失。 */
     val lyricNotice: String? = null,
-    /** 音源切换提示（尝试/已换源/受限跳过），与歌词提示分行常驻，互不覆盖。 */
+    /** 音源切换提示（尝试/已换源/受限跳过），与歌词提示分行显示互不覆盖，同样 20 秒消失。 */
     val sourceNotice: String? = null,
     /** 来源标签（「插件名 · 歌单名」，如「wx · 华语热歌」），迷你播放器与播放页展示。 */
     val sourceLabel: String? = null,
@@ -1258,17 +1258,28 @@ object PlayerManager {
     /** 当前歌词解析协程：切歌时取消，避免旧解析堵在引擎串行队列里拖慢新歌。 */
     private var lyricJob: kotlinx.coroutines.Job? = null
 
-    /**
-     * 歌词/封面兜底提示：lrc.cx 兜底进行中/成功/失败的可见反馈。
-     * 常驻显示（控制条左侧），直到被下一条同类提示替换或新播放会话开始清除。
-     */
+    /** 提示自动清除协程：各自计时，同类新提示替换旧提示并重新计时。 */
+    private var lyricNoticeJob: kotlinx.coroutines.Job? = null
+    private var sourceNoticeJob: kotlinx.coroutines.Job? = null
+
+    /** 歌词/封面兜底提示：lrc.cx 兜底进行中/成功/失败的可见反馈，显示 20 秒后自动消失。 */
     private fun showLyricNotice(text: String) {
+        lyricNoticeJob?.cancel()
         _uiState.update { it.copy(lyricNotice = text) }
+        lyricNoticeJob = scope.launch {
+            kotlinx.coroutines.delay(20_000)
+            _uiState.update { it.copy(lyricNotice = null) }
+        }
     }
 
-    /** 音源切换提示：与歌词提示分行常驻、互不覆盖，清除时机同上。 */
+    /** 音源切换提示：与歌词提示分行显示、互不覆盖，同样 20 秒后自动消失。 */
     private fun showSourceNotice(text: String) {
+        sourceNoticeJob?.cancel()
         _uiState.update { it.copy(sourceNotice = text) }
+        sourceNoticeJob = scope.launch {
+            kotlinx.coroutines.delay(20_000)
+            _uiState.update { it.copy(sourceNotice = null) }
+        }
     }
 
     /** 最近一次已发起歌词请求的条目：onMediaItemTransition 与 play() 末尾都会触发，按条目去重。 */
