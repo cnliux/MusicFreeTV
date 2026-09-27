@@ -410,7 +410,6 @@ private fun KtvResultList(
                     val entry = row.e
                     val favRaw = remember(entry) { withPlatform(entry.raw, entry.plugin) }
                     val favKey = remember(favRaw) { com.tvmusic.data.PlaybackStore.favKeyOf(favRaw) }
-                    val num = remember(entry, groups) { 0 } // KTV 编号可后续接全局序号，先留空
                     KtvSongRow(
                         title = entry.title,
                         artist = entry.artist,
@@ -484,9 +483,21 @@ private fun KtvSongRow(
     onClick: () -> Unit,
     trailing: @Composable () -> Unit = {}
 ) {
-    // 背景色：主题 primary 的深色变体（透明度 25%），默认深青；不同音源用不同透明度区分
+    // 背景色：主题 primary 的深色变体（透明度 25%），默认深青；不同音源用不同透明度区分。
+    // 原方案用 plugin.hashCode().mod(3) 选档：String.hashCode 虽内容相关，但不同 JVM/ART
+    // 版本及不同平台名的分布不可控，同一音源底色可能漂移；改为按平台名显式映射固定档位，
+    // 未知平台用长度取模兜底，保证同一平台跨版本颜色稳定。
     val primary = MaterialTheme.colorScheme.primary
-    val baseAlpha = if (plugin.isNotBlank()) 0.22f + (plugin.hashCode().mod(3) * 0.08f) else 0.25f
+    val alphaTier = when (plugin) {
+        "kugou" -> 0
+        "kuwo" -> 1
+        "qq" -> 2
+        "netease" -> 0
+        "migu" -> 1
+        "bilibili" -> 2
+        else -> plugin.length % 3 // 未知平台：确定性兜底
+    }
+    val baseAlpha = if (plugin.isNotBlank()) 0.22f + (alphaTier * 0.08f) else 0.25f
     val bgColor = primary.copy(alpha = baseAlpha.coerceIn(0.15f, 0.4f))
     Row(
         modifier = Modifier
@@ -604,17 +615,6 @@ private fun KtvSecondaryButton(label: String, modifier: Modifier = Modifier, onC
     ) {
         Text(label, color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 15.sp)
     }
-}
-
-/** 横向筛选条中的分隔竖条。 */
-@Composable
-private fun KtvDivider() {
-    Box(
-        Modifier
-            .padding(horizontal = 2.dp)
-            .size(width = 1.dp, height = 22.dp)
-            .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f))
-    )
 }
 
 @Composable

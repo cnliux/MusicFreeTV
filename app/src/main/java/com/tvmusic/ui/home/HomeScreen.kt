@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tvmusic.data.HomeSection
 import com.tvmusic.data.PluginRecord
+import com.tvmusic.ui.common.fmtDuration
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.ui.components.Artwork
 import com.tvmusic.ui.components.EmptyState
@@ -320,15 +321,9 @@ private fun NowPlayingLive() {
         modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(fmtTime(ps.positionMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(fmtTime(ps.durationMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(fmtDuration(ps.positionMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(fmtDuration(ps.durationMs), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-}
-
-private fun fmtTime(ms: Long): String {
-    if (ms <= 0) return "0:00"
-    val s = ms / 1000
-    return "${s / 60}:${"%02d".format(s % 60)}"
 }
 
 @Composable

@@ -71,6 +71,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.ui.PlayerView
 import com.tvmusic.player.PlayMode
+import com.tvmusic.ui.common.fmtDuration
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.player.PlayerUiState
 import com.tvmusic.ui.components.Artwork
@@ -679,8 +680,8 @@ private fun ProgressSection(onSeek: (Long) -> Unit) {
         modifier = Modifier.fillMaxWidth().padding(top = 0.dp, bottom = 0.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(format(st.positionMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(format(st.durationMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(fmtDuration(st.positionMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(fmtDuration(st.durationMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -804,9 +805,4 @@ private fun playModeIcon(mode: PlayMode): String = when (mode) {
     PlayMode.ORDER -> "🔁"
     PlayMode.LOOP_ONE -> "🔂"
     PlayMode.SHUFFLE -> "🔀"
-}
-
-private fun format(ms: Long): String {
-    val total = (ms / 1000).coerceAtLeast(0)
-    return "%02d:%02d".format(total / 60, total % 60)
 }

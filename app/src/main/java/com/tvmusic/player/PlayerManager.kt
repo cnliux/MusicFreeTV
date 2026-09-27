@@ -347,7 +347,10 @@ object PlayerManager {
         }
         errorStreak++
         // 延迟一点再跳，避免错误风暴；期间用户可手动操作
+        val mySession = playSession.get() // 捕获当前播放会话代际
         ticker.postDelayed({
+            // 代际校验：延迟期间用户切歌则放弃本次恢复动作，避免打到新歌（R4）
+            if (mySession != playSession.get()) return@postDelayed
             if (_uiState.value.error != null) next()
         }, 1200)
     }
@@ -1018,7 +1021,7 @@ object PlayerManager {
         val candidates = com.tvmusic.config.SearchSettings.ordered(
             repo.listEnabled()
                 .filter { it.info != null && it.loadError == null }
-                .map { it.info!!.platform }
+                .map { it.info?.platform ?: it.name }
                 .filter { includeSelf || it != item.plugin }
                 .filter { it !in exclude },
             order
@@ -1145,7 +1148,14 @@ object PlayerManager {
         // 空列表=确认无匹配（负缓存）；调用失败(null)不缓存，下一轮可重试。
         val matches = fallbackSearchCache[cacheKeyPrefix + platform]
             ?: searchMusicOn(rt, platform, item.title, artist)?.also {
-                if (fallbackSearchCache.size > 32) fallbackSearchCache.clear()
+                // 超限时只清约一半旧条目，而非全清：保留近期热点，避免命中率骤降。
+                // ConcurrentHashMap 迭代顺序不稳定，"一半"是近似值，此处可接受。
+                if (fallbackSearchCache.size > 32) {
+                    val it0 = fallbackSearchCache.keys.iterator()
+                    repeat(fallbackSearchCache.size / 2) {
+                        if (it0.hasNext()) { it0.next(); it0.remove() }
+                    }
+                }
                 fallbackSearchCache[cacheKeyPrefix + platform] = it
             }
             ?: return null
@@ -1400,7 +1410,13 @@ object PlayerManager {
         if (rawDurMs > 0 && rawDurMs < minMs) { /* 元数据已不足设定，必须换源 */ }
         else if (!shortVsMin && rawDurMs > 0 && rawDurMs <= streamDurMs + 15_000) return
         earlyCutoffFired.add(key)
-        if (earlyCutoffFired.size > 64) { earlyCutoffFired.clear(); earlyCutoffFired.add(key) }
+        // 超限时只清约一半旧条目而非全清：保留近期触发记录，防止刚播过的截断曲被重复识别。
+        if (earlyCutoffFired.size > 64) {
+            val it0 = earlyCutoffFired.iterator()
+            repeat(earlyCutoffFired.size / 2) {
+                if (it0.hasNext()) { it0.next(); it0.remove() }
+            }
+        }
         if (shortPlayFor != key) {
             shortPlayFor = key
             shortPlayCount = 0
@@ -1827,6 +1843,7 @@ object PlayerManager {
     ): List<LrcLine> {
         if (lines.isEmpty() || (textTrans.isEmpty() && listTrans.isEmpty())) return lines
         val pool = (textTrans + listTrans).sortedBy { it.timeMs }
+        // 注：逐行 minByOrNull 为 O(n·m)；歌词行数有限（通常几百行），暂不重写为双指针，改动风险大于收益。
         return lines.map { line ->
             if (line.translation != null) line
             else pool.minByOrNull { kotlin.math.abs(it.timeMs - line.timeMs) }
@@ -1834,11 +1851,14 @@ object PlayerManager {
         }
     }
 
+    /** LRC 时间戳正则：提升为 object 级预编译常量，避免 parseLrc 逐行重复编译。 */
+    private val LRC_TIME_REGEX = Regex("\\[(\\d{1,2}):(\\d{1,2})(?:\\.(\\d{1,3}))?]")
+
     fun parseLrc(raw: String): List<LrcLine> {
         val lines = mutableListOf<LrcLine>()
         for (line in raw.lineSequence()) {
             // 形如：[mm:ss.xx][mm:ss.xx]歌词
-            val m = Regex("\\[(\\d{1,2}):(\\d{1,2})(?:\\.(\\d{1,3}))?]").findAll(line).toList()
+            val m = LRC_TIME_REGEX.findAll(line).toList()
             var lastEnd = 0
             val times = mutableListOf<Long>()
             for (mm in m) {

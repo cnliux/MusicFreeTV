@@ -79,7 +79,7 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
 
     private fun pickFirst() {
         val first = _availablePlugins.value.firstOrNull() ?: return
-        _currentPlatform.value = first.info!!.platform
+        _currentPlatform.value = first.info?.platform ?: return
         load()
     }
 
@@ -101,7 +101,7 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
             _loading.value = true
             _sections.value = emptyList()
             val fresh = mutableListOf<HomeSection>()
-            val pf = plugin.info!!.platform
+            val pf = plugin.info?.platform ?: return@launch
 
             // getTopLists：走并行引擎池（与搜索同路由），不被播放/搜索独占主引擎而挤成 busy
             try {

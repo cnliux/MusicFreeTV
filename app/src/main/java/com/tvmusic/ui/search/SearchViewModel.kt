@@ -10,6 +10,7 @@ import com.tvmusic.player.QueueEntry
 import com.tvmusic.ui.sheet.DetailKind
 import com.tvmusic.ui.sheet.DetailTarget
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -106,6 +107,9 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
     private var session = 0
     private var currentQuery = ""
 
+    /** 当前聚合搜索 Job：新一次 submit 先取消旧任务，避免旧请求继续占用引擎/网络。 */
+    private var searchJob: Job? = null
+
     init {
         loadHistory()
         val cfg = SearchSettings.load(app)
@@ -198,8 +202,10 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
     fun submit(phrase: String = _query.value, type: String = _selectedType.value) {
         val q = phrase.trim()
         if (q.isEmpty()) return
-        viewModelScope.launch(Dispatchers.Default) {
-            // 全局串行：QuickJS 单线程引擎并发 invoke 会死锁，搜索内部本身也是逐插件调用。
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch(Dispatchers.Default) {
+            // 并发发起各音源搜索请求；QuickJS 引擎内部路由串行消化，不会真并发执行 JS。
+            // session 计数仍保留：与 Job 取消配合，双重防止旧结果覆盖新结果。
             // 每次重读后台配置，保证 web 管理台改的优先级/默认排序实时生效。
             val cfg = SearchSettings.load(application)
             if (!sortManuallyTouched) {
@@ -215,9 +221,9 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             val filter = _selectedSources.value
             val records = repository.listEnabled()
                 .filter { it.info != null && it.loadError == null }
-            val byPlatform = records.associateBy { it.info!!.platform }
+            val byPlatform = records.associateBy { it.info?.platform ?: it.name }
             val ordered = SearchSettings.ordered(
-                records.map { it.info!!.platform }
+                records.map { it.info?.platform ?: it.name }
                     .filter { filter.isEmpty() || it in filter },
                 cfg.sourceOrder
             )
@@ -235,7 +241,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
                         val sourceStarted = android.os.SystemClock.elapsedRealtime()
                         val plugin = byPlatform.getValue(platform)
                         // 对齐 RN getSearchablePlugins(type)：插件声明了 supportedSearchType 时必须包含该类型
-                        val supported = plugin.info!!.supportedSearchType
+                        val supported = plugin.info?.supportedSearchType ?: emptyList()
                         val group: SearchGroup?
                         if (supported.isNotEmpty() && type !in supported) {
                             group = null
@@ -368,7 +374,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
     /** 插件启停变化后，过滤掉已禁用插件的分组。 */
     private fun rebuildFromCache() {
         val enabled = repository.listEnabled().filter { it.info != null && it.loadError == null }
-            .map { it.info!!.platform }.toSet()
+            .map { it.info?.platform ?: it.name }.toSet()
         _groups.value = _groups.value.filter { it.plugin in enabled }
     }
 

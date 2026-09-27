@@ -32,7 +32,7 @@
 │       │   ├─ bootstrap.js                     # env.getUserVariables + __registerPlugin + __invoke RPC + 全局库暴露
 │       │   └─ libs/                            # crypto-js / qs / dayjs / he / big-integer / cheerio / webdav / axios
 │       ├─ java/com/tvmusic/
-│       │   ├─ MainActivity.kt                  # Compose NavHost + 迷你播放条 + 待机显示(无操作自动进播放器页) + 深链处理
+│       │   ├─ MainActivity.kt                  # Compose NavHost + 迷你播放条 + 待机显示(无操作自动进播放器页)
 │       │   ├─ core/TvMusicApp.kt               # Application：初始化 Store/Runtime/Repository/Player
 │       │   ├─ data/                            # Models.kt + PluginStore.kt（SQLite）
 │       │   ├─ runtime/                         # JsEngine 接口 + QuickJsEngine（taoweiji quickjs-android 1.4.6 + native job pump + 防御性原生桥）
@@ -48,9 +48,8 @@
 │       │       ├─ search/SearchScreen+ViewModel# 搜索：多音源并行 + 边搜边出 + 音源/时长/封面/排序过滤
 │       │       ├─ sheet/SheetScreen+ViewModel  # 歌单详情（musicList / getTopListDetail / importMusicSheet）
 │       │       ├─ player/PlayerScreen          # 全屏播放：封面 + 逐行歌词 + 进度 + 控制
-│       │       ├─ setting/SettingsScreen+ViewModel # 插件/订阅/用户变量/歌词/远程（地址 + 扫码 + 口令）
-│       │       ├─ qr/QrScreen                 # CameraX + zxing 扫码接收
-│       │       └─ common/                      # Vms 工厂 + ConfigPending 深链暂存
+│       │       ├─ setting/SettingsScreen+ViewModel # 插件/订阅/用户变量/歌词/远程（地址）
+│       │       └─ common/                      # Vms 工厂
 │       └─ res/                                 # banner / 启动图标(mipmap-*) / colors / themes / network_security_config
 ├─ gradle/
 │   ├─ libs.versions.toml                       # 所有依赖版本（含 quickjs 1.4.6 / media3 1.5.1 / camerax 1.3.4）
@@ -157,15 +156,6 @@ GET  /api/img?url=...     → 图片代理（绕过图床防盗链，控制台�
 ```
 
 搜索说明：`sources`（音源多选，逗号分隔）、`minD`/`maxD`（时长秒）、`art=1`（必须有封面）、`sort/asc`（全局排序）。搜索结果实时刷新，全部音源完成后封顶展示前 `maxTotal` 条。
-
-#### 4.6 深链口令与扫码接收（无需浏览器的配置下发）
-
-```
-tvmusic://config?data=<base64url(json)>     # 单条配置
-tvmusic://config?sub=<订阅地址>               # 添加订阅
-```
-
-深链口令支持 URL-safe Base64 编码；也可在设置页打开「扫码接收」，用 CameraX + zxing 扫描二维码获取配置。
 
 ---
 

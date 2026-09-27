@@ -101,30 +101,38 @@ fun SheetScreen(
                 // key 拼 index 兜底：翻页边界同曲会导致 primaryKey 重复，违反 Lazy 列表唯一 key 规则（R1）
                 itemsIndexed(entries, key = { i, item -> "${i}_${playback.primaryKey(item)}" }) { index, item ->
                     val key = playback.primaryKey(item)
-                    MusicRow(
-                        index = index,
-                        title = item.optString("title"),
-                        artist = item.optString("artist"),
-                        album = item.optString("album"),
-                        onClick = { viewModel.play(index) },
-                        trailing = {
-                            // 单曲收藏：弹出收藏夹选择（可加入任意自定义收藏夹）
-                            val fav = key in favKeys
-                            Box(
-                                modifier = Modifier
-                                    .tvFocus()
-                                    .clickable { pickFavItem = savableEntries[index] }
-                                    .padding(horizontal = 10.dp, vertical = 4.dp)
-                            ) {
-                                Text(
-                                    if (fav) "♥" else "♡",
-                                    fontSize = 18.sp,
-                                    color = if (fav) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                    val fav = key in favKeys
+                    // 收藏按钮与 MusicRow 并列为兄弟焦点节点，避免整行 clickable 内部再嵌套独立焦点（D-pad 可达性）
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // MusicRow 无 modifier 参数且内部 fillMaxWidth，外层用 Box(weight) 约束宽度给收藏按钮留位
+                        Box(Modifier.weight(1f)) {
+                            MusicRow(
+                                index = index,
+                                title = item.optString("title"),
+                                artist = item.optString("artist"),
+                                album = item.optString("album"),
+                                onClick = { viewModel.play(index) }
+                            )
                         }
-                    )
+                        // 单曲收藏：弹出收藏夹选择（可加入任意自定义收藏夹）
+                        Box(
+                            modifier = Modifier
+                                .padding(end = 28.dp)
+                                .tvFocus()
+                                .clickable { pickFavItem = savableEntries[index] }
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text(
+                                if (fav) "♥" else "♡",
+                                fontSize = 18.sp,
+                                color = if (fav) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
                 item(key = "footer") {
                     LoadMoreFooter(

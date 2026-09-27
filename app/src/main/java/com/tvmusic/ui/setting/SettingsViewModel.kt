@@ -45,12 +45,26 @@ class SettingsViewModel(app: TvMusicApp) : ViewModel() {
     private val _health = MutableStateFlow<List<PlatformHealth>>(emptyList())
     val health: StateFlow<List<PlatformHealth>> = _health.asStateFlow()
 
+    /** 页面可见性标志：设置页不可见时暂停健康度轮询（由 Screen 侧进出页面时更新）。 */
+    @Volatile
+    var pageVisible = true
+        private set
+
+    /** 更新设置页可见性；Screen 侧 DisposableEffect 接入（待后续接线）。 */
+    fun setPageVisible(visible: Boolean) {
+        pageVisible = visible
+    }
+
     init {
-        // 进入设置页立即取一次快照，之后定时刷新（健康度是内存态，随时变化）
+        // 进入设置页立即取一次快照，之后定时刷新（健康度是内存态，随时变化）。
+        // 轮询收敛：页面不可见时跳过刷新并空转等待，避免后台无谓轮询；
+        // 同时把间隔从 3s 放宽到 10s，健康度只是展示型统计，无需高频刷新。
         viewModelScope.launch {
             while (isActive) {
-                refreshHealth()
-                delay(3_000L)
+                if (pageVisible) {
+                    refreshHealth()
+                }
+                delay(10_000L)
             }
         }
     }

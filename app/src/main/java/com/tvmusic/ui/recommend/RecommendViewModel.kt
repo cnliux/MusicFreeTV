@@ -84,7 +84,7 @@ class RecommendViewModel(
                         .getOrDefault(false)
             },
             cfg.sourceOrder
-        ) { it.info!!.platform }
+        ) { it.info?.platform ?: it.name }
         _plugins.value = able
         if (able.isEmpty()) {
             _loading.value = false
@@ -93,9 +93,9 @@ class RecommendViewModel(
         }
         val current = _selectedPlatform.value
         val target = when {
-            keepSelection && able.any { it.info!!.platform == current } -> current
-            initialPlatform != null && able.any { it.info!!.platform == initialPlatform } -> initialPlatform
-            else -> able.first().info!!.platform
+            keepSelection && able.any { it.info?.platform == current } -> current
+            initialPlatform != null && able.any { it.info?.platform == initialPlatform } -> initialPlatform
+            else -> able.first().info?.platform ?: return
         }
         if (!keepSelection || target != current) selectPlugin(target)
     }

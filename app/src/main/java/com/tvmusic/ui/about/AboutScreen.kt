@@ -39,6 +39,7 @@ import com.tvmusic.BuildConfig
 import com.tvmusic.ui.components.DialogTextButton
 import com.tvmusic.ui.components.ModalCard
 import com.tvmusic.ui.components.tvFocus
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -169,7 +170,7 @@ fun AboutScreen() {
                             dialogVisible = false
                             found?.let {
                                 update = UpdateState.Downloading(it.version, 0)
-                                UpdateChecker.downloadApkAsync(context, it.version, onState = { update = it })
+                                UpdateChecker.downloadApkAsync(scope, context, it.version, onState = { s -> update = s })
                             }
                         },
                         background = MaterialTheme.colorScheme.primary,
@@ -211,7 +212,7 @@ fun AboutScreen() {
                             dialogVisible = false
                             dlFailed?.let {
                                 update = UpdateState.Downloading(it.version, 0)
-                                UpdateChecker.downloadApkAsync(context, it.version, onState = { update = it })
+                                UpdateChecker.downloadApkAsync(scope, context, it.version, onState = { s -> update = s })
                             }
                         },
                         background = MaterialTheme.colorScheme.primary,
@@ -291,21 +292,28 @@ private fun isNewerVersion(latest: String, current: String): Boolean {
     return false
 }
 
-/** 后台线程下载，完成后自动调起安装器；进度/结果经 onState 回写 UI 状态。 */
+/** 协程下载（IO 调度），完成后自动调起安装器；进度/结果经 onState 回写 UI 状态。 */
 private fun UpdateChecker.downloadApkAsync(
+    scope: CoroutineScope,
     context: Context,
     version: String,
     onState: (UpdateState) -> Unit
 ) {
-    Thread {
-        val file = downloadApk(context, version) { p -> onState(UpdateState.Downloading(version, p)) }
-        if (file != null) {
-            onState(UpdateState.Ready(version))
-            launchInstaller(context, version)
-        } else {
-            onState(UpdateState.DownloadFailed(version, "网络异常或下载中断，请重试"))
+    // 原裸 Thread 改为协程：统一调度/异常/取消，避免跨线程写 Compose 状态
+    scope.launch(Dispatchers.IO) {
+        try {
+            val file = downloadApk(context, version) { p -> onState(UpdateState.Downloading(version, p)) }
+            if (file != null) {
+                onState(UpdateState.Ready(version))
+                launchInstaller(context, version)
+            } else {
+                onState(UpdateState.DownloadFailed(version, "网络异常或下载中断，请重试"))
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("AboutScreen", "downloadApkAsync failed", e)
+            onState(UpdateState.DownloadFailed(version, "下载失败，请稍后重试"))
         }
-    }.start()
+    }
 }
 
 private fun launchInstaller(context: Context, version: String) {

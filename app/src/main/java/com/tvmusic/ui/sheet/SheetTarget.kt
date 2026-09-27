@@ -41,6 +41,12 @@ data class DetailTarget(
 object SheetTarget {
     private val _target = MutableStateFlow<DetailTarget?>(null)
 
+    // 注意（进程恢复场景）：target 只存内存，不做持久化。
+    // 进程被杀后由系统恢复页面栈直接回到 SheetScreen 时，consume() 会返回 null，
+    // SheetScreen 据此显示"缺少详情数据"空态——这是该中转站只驻留内存的已知限制。
+    // 若后续要在 SheetTarget 层兜底，可加 hasPending() 判断或持久化 DetailTarget，
+    // 当前保持现状：空态由 SheetScreen 负责提示并允许返回。
+
     fun set(value: DetailTarget?) {
         _target.value = value
     }

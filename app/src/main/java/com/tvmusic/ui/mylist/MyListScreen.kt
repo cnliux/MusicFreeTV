@@ -70,7 +70,9 @@ fun MyListScreen(
     val lists by playback.lists.collectAsState()
     val playerState by PlayerManager.screenState.collectAsState()
 
-    // null = 播放历史；QUEUE_ID = 当前播放队列；其他 = 所选收藏专辑 id
+    // null = 播放历史；QUEUE_ID = 当前播放队列；其他 = 所选收藏专辑 id。
+    // 注意：rememberSaveable 恢复后 id 可能指向已删除的专辑（进程重建期间用户/清理逻辑删过），
+    // 单独删除专辑处有重置，这里再兜底：专辑被清除（批量/外部写入）时回到播放历史页签。
     var selectedListId by rememberSaveable { mutableStateOf<String?>(null) }
     var showNameDialog by rememberSaveable { mutableStateOf<String?>(null) } // null=不显示；""=新建；其他=重命名的当前名称
     // 批量管理模式：勾选条目后一次性删除（历史 / 收藏专辑通用）
@@ -79,20 +81,20 @@ fun MyListScreen(
 
     val queue = playerState.queue
     val isQueue = selectedListId == QUEUE_ID
+    // 进程重建/转屏恢复的 selectedListId 可能指向已不存在的收藏专辑，悬空时重置为 null（播放历史）
     val currentList = lists.firstOrNull { it.id == selectedListId }
+    if (!isQueue && selectedListId != null && currentList == null) {
+        selectedListId = null
+    }
     val list = when {
         isQueue -> emptyList()
         selectedListId == null -> history
         else -> currentList?.items ?: emptyList()
     }
 
-    // 条目稳定 key：与 PlaybackStore 主键同规则（platform+id，缺失时回退 标题+歌手）
-    fun itemKey(item: JSONObject): String {
-        val platform = item.optString("platform", "")
-        val id = item.optString("id", "")
-        return if (id.isNotBlank()) "$platform::$id"
-        else "$platform::${item.optString("title", "")}::${item.optString("artist", "")}"
-    }
+    // 条目稳定 key：与 PlaybackStore 主键同规则（platform+id，缺失时回退 标题+歌手）。
+    // 直接复用 PlaybackStore.favKeyOf，避免本地再写一份重复实现导致规则漂移。
+    fun itemKey(item: JSONObject): String = PlaybackStore.favKeyOf(item)
 
     Column(Modifier.fillMaxSize()) {
         BackTopBar(title = "我的歌单", onBack = onBack)

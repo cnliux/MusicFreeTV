@@ -1105,7 +1105,7 @@ class RemoteConfigService : Service() {
                     // 并行搜索：多引擎池（callParallel）按最闲引擎分发，多个音源真正同时搜。
                     val enabled = app.repository.listEnabled()
                         .filter { it.info != null && it.loadError == null }
-                        .map { it.info!!.platform }
+                        .map { it.info?.platform ?: it.name }
                         .filter { it.isNotBlank() }
                         .distinct()
                         .filter { req.sources.isEmpty() || it in req.sources }

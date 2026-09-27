@@ -65,6 +65,9 @@ class PlaybackStore(context: Context) {
     }
 
     private fun saveListsDebounced() {
+        // 风险提示：debounceHandler 绑定主线程 Looper，若从远程/后台线程调用，
+        // removeCallbacks/postDelayed 虽线程安全，但防抖窗口依赖主线程消息泵，
+        // 主线程繁忙时延时不确定；彻底修复需引入专属防抖线程，当前仅标记。
         debounceHandler.removeCallbacks(saveListsRunnable)
         debounceHandler.postDelayed(saveListsRunnable, 400)
     }
@@ -81,10 +84,23 @@ class PlaybackStore(context: Context) {
 
     init {
         dir.mkdirs()
-        _history.value = readList(historyFile)
-        _lists.value = loadLists()
-        backfillPlatforms()
-        publishMerged()
+        // 改为异步 IO 线程加载，避免冷启动时在主线程做磁盘 IO（STABILITY R9）
+        writeExecutor.execute {
+            try {
+                val h = readList(historyFile)
+                val l = loadLists()
+                backfillPlatforms()
+                publishMerged()
+                // 回主线程发布，避免 StateFlow 并发赋值顺序错乱
+                Handler(Looper.getMainLooper()).post {
+                    _history.value = h
+                    _lists.value = l
+                    publishMerged()
+                }
+            } catch (e: Exception) {
+                Log.e("PlaybackStore", "init load failed", e)
+            }
+        }
     }
 
     /**
@@ -142,6 +158,7 @@ class PlaybackStore(context: Context) {
     }
 
     /** 记录一首播放：去重后置顶。 */
+    @Synchronized
     fun addHistory(item: JSONObject, max: Int = 200) {
         val key = primaryKey(item)
         val list = _history.value.toMutableList()
@@ -158,6 +175,7 @@ class PlaybackStore(context: Context) {
     }
 
     /** 批量删除历史记录（我的歌单批量管理模式用）。 */
+    @Synchronized
     fun removeHistory(items: List<JSONObject>) {
         if (items.isEmpty()) return
         val keys = items.map { primaryKey(it) }.toSet()
@@ -168,6 +186,7 @@ class PlaybackStore(context: Context) {
     }
 
     /** 从指定收藏专辑批量移除条目。 */
+    @Synchronized
     fun removeFromList(listId: String, items: List<JSONObject>) {
         if (items.isEmpty()) return
         val keys = items.map { primaryKey(it) }.toSet()
@@ -184,6 +203,7 @@ class PlaybackStore(context: Context) {
      * 已存在于专辑中的条目自动跳过；目标专辑不存在时落到默认专辑。
      * @return 实际新增的条目数
      */
+    @Synchronized
     fun addAllToList(listId: String, items: List<JSONObject>): Int {
         if (items.isEmpty()) return 0
         val lists = _lists.value.toMutableList()
@@ -272,6 +292,7 @@ class PlaybackStore(context: Context) {
      * 在指定专辑中收藏/取消收藏该曲目。
      * 返回操作后该曲目在此专辑中的收藏状态。
      */
+    @Synchronized
     fun toggleFavorite(item: JSONObject, listId: String = DEFAULT_FAV_ID): Boolean {
         val key = primaryKey(item)
         val lists = _lists.value.toMutableList()
@@ -299,6 +320,7 @@ class PlaybackStore(context: Context) {
     }
 
     /** 从所有专辑移除该曲目。 */
+    @Synchronized
     fun removeFavorite(item: JSONObject) {
         val key = primaryKey(item)
         _lists.value = _lists.value.map { l -> l.copy(items = l.items.filterNot { primaryKey(it) == key }) }
@@ -307,6 +329,7 @@ class PlaybackStore(context: Context) {
     }
 
     /** 新建收藏专辑，返回新专辑 id；名称重复时返回已有专辑 id。 */
+    @Synchronized
     fun addList(name: String): String? {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return null
@@ -320,6 +343,7 @@ class PlaybackStore(context: Context) {
     }
 
     /** 删除专辑（默认专辑不可删）。 */
+    @Synchronized
     fun removeList(id: String) {
         if (id == DEFAULT_FAV_ID) return
         _lists.value = _lists.value.filterNot { it.id == id }
@@ -328,6 +352,7 @@ class PlaybackStore(context: Context) {
     }
 
     /** 重命名专辑（默认专辑不可改名）。 */
+    @Synchronized
     fun renameList(id: String, name: String) {
         if (id == DEFAULT_FAV_ID) return
         val trimmed = name.trim()
@@ -338,6 +363,7 @@ class PlaybackStore(context: Context) {
     }
 
     /** 整体替换收藏专辑（导入配置用）。 */
+    @Synchronized
     fun replaceAllLists(lists: List<FavList>) {
         _lists.value = lists
         saveListsDebounced()

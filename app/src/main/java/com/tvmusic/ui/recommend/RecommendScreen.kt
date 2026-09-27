@@ -80,9 +80,9 @@ fun RecommendScreen(
             items(
                 items = plugins,
                 // key 拼插件名：不同插件可能声明同一 platform，裸 platform 会重复 key 闪退
-                key = { "${it.info!!.platform}_${it.name}" }
+                key = { "${it.info?.platform ?: "null"}_${it.name}" }
             ) { rec ->
-                val platform = rec.info!!.platform
+                val platform = rec.info?.platform ?: return@items
                 FilterChip(
                     label = rec.name,
                     selected = platform == selectedPlatform,
