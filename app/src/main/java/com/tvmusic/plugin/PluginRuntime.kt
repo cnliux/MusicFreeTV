@@ -135,6 +135,21 @@ class PluginRuntime private constructor(
         return s.take(200)
     }
 
+    /**
+     * 换源竞速用的健康分（0~100，越大越先试）：失败率高、最近延迟大、从未成功 → 降分；
+     * 无调用记录给中性 60（新平台值得一试）。
+     */
+    fun fallbackScore(platform: String): Int {
+        val s = healthStats[platform] ?: return 60
+        synchronized(s) {
+            if (s.calls == 0) return 60
+            val failRatio = s.fails.toFloat() / s.calls
+            var score = 60 - (failRatio * 50).toInt() - (s.lastLatencyMs / 2500).toInt()
+            if (s.fails > 0 && s.lastSuccessAtElapsed == null) score -= 20
+            return score.coerceIn(0, 100)
+        }
+    }
+
     /** 健康度快照（线程安全拷贝，按平台名排序）。 */
     fun healthSnapshot(): List<PlatformHealth> = healthStats.map { (p, s) ->
         synchronized(s) {
