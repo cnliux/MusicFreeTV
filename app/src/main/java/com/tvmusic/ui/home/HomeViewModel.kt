@@ -41,7 +41,7 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
     private val _availablePlugins = MutableStateFlow<List<PluginRecord>>(emptyList())
     val availablePlugins: StateFlow<List<PluginRecord>> = _availablePlugins.asStateFlow()
 
-    private val PLUGIN_CALL_TIMEOUT_MS = 8_000L
+    private val PLUGIN_CALL_TIMEOUT_MS = 15_000L
 
     /** 首页加载代数：切换音源时 +1，旧加载结果回写前比对，防止旧内容覆盖新音源。 */
     private var loadGeneration = 0
@@ -103,10 +103,10 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
             val fresh = mutableListOf<HomeSection>()
             val pf = plugin.info!!.platform
 
-            // getTopLists
+            // getTopLists：走并行引擎池（与搜索同路由），不被播放/搜索独占主引擎而挤成 busy
             try {
                 if (runtime.hasMethod(pf, "getTopLists")) {
-                    val top = runtime.callAsync(pf, "getTopLists", timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
+                    val top = runtime.callParallel(pf, "getTopLists", timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
                     if (top !is NotImplementedError) {
                         val arr = top as? JSONArray
                         if (arr != null) {
@@ -132,10 +132,10 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
                 fresh += HomeSection.Error(plugin.name, "排行榜失败: ${e.message}")
             }
 
-            // getRecommendSheetTags
+            // getRecommendSheetTags：同走并行引擎池，避免主引擎队列空闲等待
             try {
                 if (runtime.hasMethod(pf, "getRecommendSheetTags")) {
-                    val tags = runtime.callAsync(pf, "getRecommendSheetTags", timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
+                    val tags = runtime.callParallel(pf, "getRecommendSheetTags", timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
                     if (tags !is NotImplementedError) {
                         val groups: JSONArray? = (tags as? JSONObject)?.optJSONArray("data")
                             ?: (tags as? JSONArray)

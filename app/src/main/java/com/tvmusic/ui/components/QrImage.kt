@@ -1,26 +1,19 @@
 package com.tvmusic.ui.components
 
-import android.graphics.Bitmap
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
+import android.graphics.Color
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.unit.dp
 import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
-import com.google.zxing.common.BitMatrix
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Hashtable
@@ -28,45 +21,48 @@ import java.util.Hashtable
 /**
  * 将文本（如远程管理地址）渲染为二维码图片。
  * 手机相机/浏览器扫码即可直达该地址，无需 TV 端摄像头。
+ * 使用 Dispatchers.Default 生成，避免阻塞主线程。
  */
 @Composable
 fun QrImage(
     text: String,
     modifier: Modifier = Modifier,
-    sizePx: Int = 512
+    size: Int = 300
 ) {
-    // 512×512 逐像素填充耗时，放后台线程生成，避免卡 UI 线程
-    var bitmap by remember(text, sizePx) { mutableStateOf<Bitmap?>(null) }
-    LaunchedEffect(text, sizePx) {
-        bitmap = withContext(Dispatchers.Default) {
-            runCatching { generateQr(text, sizePx) }.getOrNull()
+    var qrBitmap by remember(text, size) { mutableStateOf<ImageBitmap?>(null) }
+    androidx.compose.runtime.LaunchedEffect(text, size) {
+        if (text.isBlank()) { qrBitmap = null; return@LaunchedEffect }
+        qrBitmap = withContext(Dispatchers.Default) {
+            runCatching {
+                val hints = Hashtable<EncodeHintType, Any>()
+                hints[EncodeHintType.CHARACTER_SET] = "UTF-8"
+                hints[EncodeHintType.ERROR_CORRECTION] = ErrorCorrectionLevel.M
+                hints[EncodeHintType.MARGIN] = 1
+                val matrix: com.google.zxing.common.BitMatrix =
+                    QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size, hints)
+                val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+                val canvas = android.graphics.Canvas(bmp)
+                for (x in 0 until size) {
+                    for (y in 0 until size) {
+                        canvas.drawPoint(
+                            x.toFloat(), y.toFloat(),
+                            android.graphics.Paint().apply {
+                                color = if (matrix.get(x, y)) Color.BLACK else Color.WHITE
+                                isAntiAlias = false
+                            }
+                        )
+                    }
+                }
+                bmp.asImageBitmap()
+            }.getOrNull()
         }
     }
-    val bmp = bitmap ?: return
-    Image(
-        bitmap = bmp.asImageBitmap(),
-        contentDescription = "二维码",
-        contentScale = ContentScale.Fit,
-        modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(Color.White)
-            .padding(8.dp)
-    )
-}
-
-private fun generateQr(text: String, size: Int): Bitmap {
-    val hints = Hashtable<com.google.zxing.EncodeHintType, Any>()
-    hints[com.google.zxing.EncodeHintType.CHARACTER_SET] = "UTF-8"
-    hints[com.google.zxing.EncodeHintType.ERROR_CORRECTION] = ErrorCorrectionLevel.M
-    hints[com.google.zxing.EncodeHintType.MARGIN] = 1
-    val matrix: BitMatrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size, hints)
-    val pixels = IntArray(size * size)
-    for (x in 0 until size) {
-        for (y in 0 until size) {
-            pixels[x + y * size] = if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE
-        }
+    qrBitmap?.let {
+        androidx.compose.foundation.Image(
+            bitmap = it,
+            contentDescription = null,
+            modifier = modifier,
+            filterQuality = androidx.compose.ui.graphics.FilterQuality.None
+        )
     }
-    val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-    bmp.setPixels(pixels, 0, size, 0, 0, size, size)
-    return bmp
 }

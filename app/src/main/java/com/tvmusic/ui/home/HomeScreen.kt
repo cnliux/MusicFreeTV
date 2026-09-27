@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -78,8 +79,6 @@ fun HomeScreen(
 
         // 右侧内容区
         Column(Modifier.weight(1f).fillMaxHeight()) {
-            HomeTopBar(loading = loading, count = sections.size, onRefresh = viewModel::load)
-
             // 音源切换器：只加载当前选中插件的首页数据
             if (availablePlugins.isNotEmpty()) {
                 PluginSwitcher(
@@ -94,7 +93,6 @@ fun HomeScreen(
             } else if (sections.isEmpty()) {
                 EmptyState(
                     message = "还没有可用的插件\n\n启动时已自动同步默认订阅源，请稍候或手动导入：\n" +
-                        "· 设置 → 扫码同步（TVBox 式导入配置）\n" +
                         "· 设置 → 粘贴订阅 URL / 插件 JS\n" +
                         "· 手机浏览器访问本机接收地址推送配置",
                     actionLabel = "重新加载",
@@ -107,6 +105,9 @@ fun HomeScreen(
                 ) {
                     item(key = "operations") {
                         OperationsRow(
+                            loading = loading,
+                            count = sections.size,
+                            onRefresh = viewModel::load,
                             onOpenRecommend = { onOpenRecommend(null) },
                             onOpenTopList = { onOpenTopList(null) },
                             onOpenMyList = onOpenMyList
@@ -333,7 +334,7 @@ private fun fmtTime(ms: Long): String {
 @Composable
 private fun HomeTopBar(loading: Boolean, count: Int, onRefresh: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 16.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
@@ -370,20 +371,30 @@ private fun HomeTopBar(loading: Boolean, count: Int, onRefresh: () -> Unit) {
     }
 }
 
-/** 对齐 RN homeBody/Operations：推荐歌单 / 排行榜 / 我的列表。 */
+/** 对齐 RN homeBody/Operations：推荐歌单 / 排行榜 / 我的列表，右侧附状态与刷新。 */
 @Composable
 private fun OperationsRow(
+    loading: Boolean,
+    count: Int,
+    onRefresh: () -> Unit,
     onOpenRecommend: () -> Unit,
     onOpenTopList: () -> Unit,
     onOpenMyList: () -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(20.dp)
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        ActionEntry("🔥", "推荐歌单", "按标签发现好歌单", Modifier.weight(1f), onOpenRecommend)
-        ActionEntry("🏆", "排行榜", "各平台权威榜单", Modifier.weight(1f), onOpenTopList)
-        ActionEntry("📻", "我的歌单", "历史 / 收藏", Modifier.weight(1f), onOpenMyList)
+        ActionEntry("🔥", "推荐歌单", "按标签发现好歌单", Modifier.weight(1f).heightIn(min = 64.dp), onOpenRecommend)
+        ActionEntry("🏆", "排行榜", "各平台权威榜单", Modifier.weight(1f).heightIn(min = 64.dp), onOpenTopList)
+        ActionEntry("📻", "我的歌单", "历史 / 收藏", Modifier.weight(1f).heightIn(min = 64.dp), onOpenMyList)
+        // 板块数（原「发现」标题行右移至此；刷新按钮已删）
+        Text(
+            if (loading) "加载中…" else "$count 个板块",
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -410,13 +421,13 @@ private fun ActionEntry(
             .border(1.dp, primary.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
             .tvFocus(1.03f)
             .clickable(onClick = onClick)
-            .padding(horizontal = 22.dp, vertical = 18.dp),
+            .padding(horizontal = 22.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Box(
             modifier = Modifier
-                .size(52.dp)
+                .size(44.dp)
                 .clip(CircleShape)
                 .background(
                     androidx.compose.ui.graphics.Brush.linearGradient(
@@ -425,7 +436,7 @@ private fun ActionEntry(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            Text(icon, fontSize = 26.sp)
+            Text(icon, fontSize = 22.sp)
         }
         Column {
             Text(title, fontSize = 17.sp, color = MaterialTheme.colorScheme.onSurface)
@@ -487,7 +498,7 @@ private fun PluginSwitcher(
     onSelect: (String) -> Unit
 ) {
     LazyRow(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 12.dp),
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // key 加插件名兜底：两个插件声明同一 platform 时裸 platform key 会冲突闪退

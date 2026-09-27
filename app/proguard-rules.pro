@@ -17,16 +17,13 @@
 -dontwarn okio.**
 -keep class okhttp3.** { *; }
 
-# CameraX + ZXing
--dontwarn androidx.camera.**
+# zxing
+-keep class com.google.zxing.** { *; }
 
 # Media3 播放会话：通知/元数据大量依赖反射，保留 MediaSession 相关类
 -keep class androidx.media3.session.** { *; }
 -keep class androidx.media3.exoplayer.** { *; }
 -keep class androidx.media3.common.** { *; }
-
-# zxing
--keep class com.google.zxing.** { *; }
 
 # Coil
 -dontwarn coil.**

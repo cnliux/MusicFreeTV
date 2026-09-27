@@ -16,6 +16,13 @@ object MetaSettings {
     private const val KEY_FALLBACK_SRC = "fallbackOtherSource"
     private const val KEY_MIN_PLAY = "minPlaySeconds"
     private const val KEY_PREFER_PLUGIN = "fallbackPreferPlugin"
+    private const val KEY_FALLBACK_MODE = "fallbackMode"
+    private const val KEY_FALLBACK_STRATEGY = "fallbackStrategy"
+    private const val KEY_FAST_BATCH = "fallbackFastBatch"
+    private const val KEY_COVER_SHAPE = "coverShape"
+    private const val KEY_COVER_SPIN_MS = "coverSpinMs"
+    private const val KEY_HEALTH_WEIGHT = "fallbackHealthWeight"
+    private const val KEY_SPEC_PRELOAD = "fallbackSpecPreload"
 
     /** LrcApi 服务根地址（只读常量，响应内容由 api.lrc.cx 决定）。 */
     const val BASE = "https://api.lrc.cx"
@@ -50,7 +57,64 @@ object MetaSettings {
     /** 远程下拉「聚合搜索」：不置顶单一插件，按最快命中播放。 */
     const val PREFER_AGGREGATE = "*"
 
+    const val MODE_AGGREGATE = "*"
+    const val MODE_FAST_FIRST = "fast_first"
+    const val MODE_MUSIC_FIRST = "music_first"
+    const val MODE_CURRENT = "current"
+
+    // 换源策略：决定候选插件的启动与竞速方式
+    const val STRATEGY_STAGGERED = "staggered"      // 分批错峰（默认，兼顾并发与资源）
+    const val STRATEGY_ALL_PARALLEL = "allParallel"  // 全候选同时启动（最快，吃资源）
+    const val STRATEGY_SEQUENTIAL = "sequential"     // 严格顺序，前一候选成功即返回
+    const val STRATEGY_PREFER_FIRST = "preferFirst"  // 只试健康度第 1 名，命中不了直接放弃
+
+    const val DEFAULT_FAST_BATCH = 3
+    const val DEFAULT_HEALTH_WEIGHT = 100
+    const val DEFAULT_SPEC_PRELOAD = false
+
     val preferAggregate: Boolean get() = preferPlugin == PREFER_AGGREGATE
+
+    /** 换源模式（内部字段）：默认 MODE_CURRENT，允许实验位覆盖批次与权重。 */
+    @Volatile
+    private var _fallbackMode: String = MODE_CURRENT
+
+    @Volatile
+    private var fastBatch: Int = DEFAULT_FAST_BATCH
+
+    @Volatile
+    private var healthWeight: Int = DEFAULT_HEALTH_WEIGHT
+
+    @Volatile
+    private var specPreload: Boolean = DEFAULT_SPEC_PRELOAD
+
+    @Volatile
+    private var _fallbackStrategy: String = STRATEGY_STAGGERED
+
+    /** 播放页封面形状：circle=圆形旋转，square=方形圆角。 */
+    const val COVER_SHAPE_CIRCLE = "circle"
+    const val COVER_SHAPE_SQUARE = "square"
+    const val DEFAULT_COVER_SHAPE = COVER_SHAPE_CIRCLE
+    const val DEFAULT_COVER_SPIN_MS = 10_000
+
+    @Volatile
+    private var coverShape: String = DEFAULT_COVER_SHAPE
+
+    /** 封面转一圈耗时（毫秒），0=不转。 */
+    private val coverSpinMs = java.util.concurrent.atomic.AtomicInteger(DEFAULT_COVER_SPIN_MS)
+
+    val fallbackMode: String get() = _fallbackMode
+
+    val fallbackFastBatch: Int get() = fastBatch.coerceIn(1, 6)
+
+    val fallbackHealthWeight: Int get() = healthWeight.coerceIn(0, 300)
+
+    val fallbackSpecPreload: Boolean get() = specPreload
+
+    /** 当前换源策略（4 选 1），见 STRATEGY_* 常量。 */
+    val fallbackStrategy: String get() = _fallbackStrategy
+
+    val playerCoverShape: String get() = coverShape
+    val playerCoverSpinMs: Int get() = coverSpinMs.get()
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -59,6 +123,68 @@ object MetaSettings {
         fallbackSrc.set(sp?.getBoolean(KEY_FALLBACK_SRC, true) ?: true)
         minPlay.set((sp?.getInt(KEY_MIN_PLAY, 90) ?: 90).coerceIn(0, 300))
         preferPlugin = sp?.getString(KEY_PREFER_PLUGIN, "") ?: ""
+        _fallbackMode = sp?.getString(KEY_FALLBACK_MODE, MODE_CURRENT) ?: MODE_CURRENT
+        fastBatch = (sp?.getInt(KEY_FAST_BATCH, DEFAULT_FAST_BATCH) ?: DEFAULT_FAST_BATCH).coerceIn(1, 6)
+        healthWeight = (sp?.getInt(KEY_HEALTH_WEIGHT, DEFAULT_HEALTH_WEIGHT) ?: DEFAULT_HEALTH_WEIGHT).coerceIn(0, 300)
+        specPreload = sp?.getBoolean(KEY_SPEC_PRELOAD, DEFAULT_SPEC_PRELOAD) ?: DEFAULT_SPEC_PRELOAD
+        _fallbackStrategy = sp?.getString(KEY_FALLBACK_STRATEGY, STRATEGY_STAGGERED) ?: STRATEGY_STAGGERED
+        coverShape = sp?.getString(KEY_COVER_SHAPE, DEFAULT_COVER_SHAPE) ?: DEFAULT_COVER_SHAPE
+        coverSpinMs.set((sp?.getInt(KEY_COVER_SPIN_MS, DEFAULT_COVER_SPIN_MS) ?: DEFAULT_COVER_SPIN_MS).coerceIn(0, 120_000))
+    }
+
+    fun setFallbackMode(mode: String) {
+        val v = mode.trim()
+        _fallbackMode = v
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.edit()?.putString(KEY_FALLBACK_MODE, v)?.apply()
+    }
+
+    fun setFallbackFastBatch(count: Int) {
+        val v = count.coerceIn(1, 6)
+        fastBatch = v
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.edit()?.putInt(KEY_FAST_BATCH, v)?.apply()
+    }
+
+    fun setFallbackHealthWeight(percent: Int) {
+        val v = percent.coerceIn(0, 300)
+        healthWeight = v
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.edit()?.putInt(KEY_HEALTH_WEIGHT, v)?.apply()
+    }
+
+    fun setFallbackSpecPreload(on: Boolean) {
+        specPreload = on
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.edit()?.putBoolean(KEY_SPEC_PRELOAD, on)?.apply()
+    }
+
+    /**
+     * 设置换源策略。传入未知值时保留旧值，避免误配置破坏换源流程。
+     * 合法值：STRATEGY_STAGGERED / ALL_PARALLEL / SEQUENTIAL / PREFER_FIRST。
+     */
+    fun setFallbackStrategy(strategy: String) {
+        val v = strategy.trim()
+        if (v != STRATEGY_STAGGERED && v != STRATEGY_ALL_PARALLEL &&
+            v != STRATEGY_SEQUENTIAL && v != STRATEGY_PREFER_FIRST
+        ) return
+        _fallbackStrategy = v
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.edit()?.putString(KEY_FALLBACK_STRATEGY, v)?.apply()
+    }
+
+    fun setCoverShape(shape: String) {
+        val v = if (shape == COVER_SHAPE_SQUARE) COVER_SHAPE_SQUARE else COVER_SHAPE_CIRCLE
+        coverShape = v
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.edit()?.putString(KEY_COVER_SHAPE, v)?.apply()
+    }
+
+    fun setCoverSpinMs(ms: Int) {
+        val v = ms.coerceIn(0, 120_000)
+        coverSpinMs.set(v)
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.edit()?.putInt(KEY_COVER_SPIN_MS, v)?.apply()
     }
 
     fun setEnabled(on: Boolean) {

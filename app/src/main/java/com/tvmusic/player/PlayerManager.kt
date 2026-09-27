@@ -230,6 +230,8 @@ object PlayerManager {
     /** 分批竞速：首批覆盖三条 QuickJS lane，其余候选错峰启动，避免低配 TV 瞬时争抢。 */
     private const val FALLBACK_FAST_BATCH = 3
     private const val FALLBACK_STAGGER_MS = 350L
+    private const val FALLBACK_FAST_BATCH_MIN = 1
+    private const val FALLBACK_FAST_BATCH_MAX = 6
 
     /**
      * 预加载命中的取流结果：url/headers 已解析好；via=null 表示来自原插件，
@@ -436,6 +438,49 @@ object PlayerManager {
     val eqPresets: StateFlow<List<String>> = _eqPresets.asStateFlow()
 
     /**
+     * 系统 Equalizer 预设名通常是英文（"Rock"/"Pop"/"Jazz"/"Classic" 等），
+     * 用户在电视端看到的是英文，体验不佳。这里做一次中文映射，未匹配到时回退原值。
+     */
+    private fun mapEqPresetToChinese(raw: String): String {
+        val key = raw.trim().lowercase()
+        return when {
+            key == "flat" || key == "original" || key == "off" -> "原声"
+            key == "rock" -> "摇滚"
+            key == "pop" -> "流行"
+            key == "jazz" -> "爵士"
+            key == "classic" || key == "classical" -> "古典"
+            key == "blues" -> "布鲁斯"
+            key == "bass boost" || key == "bass_boost" -> "低音增强"
+            key == "vocal" -> "人声"
+            key == "dance" -> "舞曲"
+            key == "country" -> "乡村"
+            key == "folk" -> "民谣"
+            key == "hiphop" || key == "hip-hop" || key == "rap" -> "嘻哈"
+            key == "metal" || key == "heavy metal" -> "金属"
+            key == "soul" -> "灵魂"
+            key == "reggae" -> "雷鬼"
+            key == "newage" || key == "new age" -> "新世纪"
+            key == "opera" -> "歌剧"
+            key == "chiptune" -> "芯片音"
+            key == "ambient" -> "环境音"
+            key == "cinema" || key == "movie" -> "电影"
+            key == "party" -> "派对"
+            key == "game" || key == "games" -> "游戏"
+            key == "sports" -> "体育"
+            key == "speech" || key == "voice" -> "语音"
+            key == "phone" -> "电话"
+            key == "podcast" -> "播客"
+            key == "audiobook" -> "有声书"
+            key == "night" -> "夜间"
+            key == "sleep" -> "睡眠"
+            key == "nature" || key == "relax" -> "自然"
+            key == "stereo" -> "立体声"
+            key == "surround" -> "环绕"
+            else -> raw
+        }
+    }
+
+    /**
      * 给播放器挂上系统音效（Equalizer + BassBoost）。
      * 必须显式生成并回设 audioSessionId：未显式设置时播放器起播才分配会话，
      * 设置页在首次播放前打开均衡器会拿不到会话 id。
@@ -451,7 +496,10 @@ object PlayerManager {
             equalizer = eq
             bassBoost = bb
             val names = mutableListOf("原声")
-            for (i in 0 until eq.numberOfPresets.toInt()) names.add(eq.getPresetName(i.toShort()))
+            for (i in 0 until eq.numberOfPresets.toInt()) {
+                // 系统返回的预设名通常是英文（Rock/Pop/Jazz...），用户希望看到中文
+                names.add(mapEqPresetToChinese(eq.getPresetName(i.toShort())))
+            }
             _eqPresets.value = names
             applyAudioEffects()
         } catch (e: Exception) {
@@ -801,22 +849,27 @@ object PlayerManager {
                     // 搜索分页等流量互相排队（引擎 invokeLock 全局串行，主引擎被慢源
                     // 占住时点击播放会延迟几十秒才出声）；2) 复用该平台搜索时在 home
                     // 引擎上建立的模块级状态（cookie/token），解析更快更稳。
-                    // forceFallback（取流失败重试）：跳过本插件解析，直接换其他音源。
-                    val skipPrimary = forceFallback || tooShortMeta ||
-                        (aggregate && com.tvmusic.config.MetaSettings.fallbackOtherSource)
-                    val media = if (skipPrimary) null else resolveMediaSource(rt, plugin, item.raw)
+                    // 只在明确知道主源有问题时才跳过解析：
+                    //   - forceFallback：取流失败重试，主源已知失败
+                    //   - tooShortMeta：元数据时长已低于最低播放设定，主源必然被掐断
+                    // aggregate（聚合搜索）**不影响**主源解析——它只是换源时的排序偏好。
+                    // 主源解析成功后若可播，就直接播主源，不再强行换源。
+                    // （历史 bug：aggregate 曾让 skipPrimary=true 导致主源被跳过解析，
+                    // 用户反馈 djcsj 等能正常播放的主源被强制换源而失去播放）
+                    val skipPrimaryResolve = forceFallback || tooShortMeta
+                    val media = if (skipPrimaryResolve) null else resolveMediaSource(rt, plugin, item.raw)
                     // media == null 表示 getMediaSource 抛错（版权/会员/插件过期）。
-                    val primaryFailed = media == null && !forceFallback
+                    val primaryFailed = media == null && !forceFallback && !tooShortMeta
                     url = media?.optString("url").orEmpty()
                     headers = media?.let { parseMediaHeaders(it) } ?: emptyMap()
                     viaPlugin = plugin
                     // FLV 直链 ExoPlayer 无对应解封装器，必然失败（换下一曲也一样）。
                     val flv = url.isNotBlank() &&
                         url.substringBefore('?').substringBefore('#').endsWith(".flv", ignoreCase = true)
-                    // 主音源不可播放（解析异常 / 空地址 / FLV / 取流失败重试）时，尝试用「其他插件」播放同一首歌：
-                    // 只替换实际取流来源，队列条目 / mediaId / 历史 / 歌词 / 来源标签全部保持原样，
-                    // 因此不改变歌单，也不与 playSession 切歌守卫、onMediaItemTransition 定位冲突。
-                    if (url.isBlank() || flv || forceFallback || tooShortMeta || skipPrimary) {
+                    // 主源**结果**不可用（解析为空 / FLV / 强制换源 / 主源失败）时才换取流地址。
+                    // 主源成功解析出可播 URL 就直接播主源，不再强行换源。
+                    val primaryUsable = url.isNotBlank() && !flv && !forceFallback && !tooShortMeta
+                    if (!primaryUsable) {
                         if (com.tvmusic.config.MetaSettings.fallbackOtherSource) {
                             // 短播连环链进行中：排除已实际取流过仍受限的插件
                             val keyNow = entryKeyOf(item)
@@ -971,36 +1024,106 @@ object PlayerManager {
         val prefer = com.tvmusic.config.MetaSettings.fallbackPreferPlugin
         val ranked = if (candidates.isEmpty()) candidates else
             candidates
-                .map { it to (if (!com.tvmusic.config.MetaSettings.preferAggregate && prefer.isNotBlank() && it == prefer) 1000 else rt.fallbackScore(it)) }
+                .map { it to (if (!com.tvmusic.config.MetaSettings.preferAggregate && prefer.isNotBlank() && it == prefer) 1000 else rt.fallbackScore(it, com.tvmusic.config.MetaSettings.fallbackHealthWeight)) }
                 .sortedByDescending { it.second }
                 .map { it.first }
         if (ranked.isEmpty()) return null
         if (!silent) showSourceNotice("正在尝试其他音源…")
         val artist = item.artist
         val cacheKeyPrefix = normalizeName(item.title) + "|" + normalizeName(artist) + "|"
-        // 分批聚合竞速：健康度最高的 3 个源立即启动，其余错峰 350ms。
-        // 相比全候选同刻启动，减少低配 TV 的 CPU/引擎锁争抢；若首批均慢，后批仍会完整参与。
+        // 按 fallbackStrategy 分发到 4 种竞速策略。所有策略共享整链硬上限 FALLBACK_RACE_MS，
+        // 到点仍未有 winner 就返回 null（不再分钟级空等）。
         val raceStarted = android.os.SystemClock.elapsedRealtime()
+        val fastBatch = com.tvmusic.config.MetaSettings.fallbackFastBatch
+        val strategy = com.tvmusic.config.MetaSettings.fallbackStrategy
         return coroutineScope {
             val winner = CompletableDeferred<FallbackSource>()
-            val racers = ranked.mapIndexed { index, platform ->
-                launch(Dispatchers.Default) {
-                    if (index >= FALLBACK_FAST_BATCH) kotlinx.coroutines.delay(FALLBACK_STAGGER_MS)
-                    val started = android.os.SystemClock.elapsedRealtime()
-                    probeFallbackPlatform(rt, item, platform, cacheKeyPrefix, artist, my)?.let {
+            var racers: List<kotlinx.coroutines.Job> = emptyList()
+            when (strategy) {
+                com.tvmusic.config.MetaSettings.STRATEGY_ALL_PARALLEL -> {
+                    // 全候选同时启动：候选数少时最快，多时可能瞬时占满 QuickJS lane
+                    racers = ranked.map { platform ->
+                        launch(Dispatchers.Default) {
+                            val started = android.os.SystemClock.elapsedRealtime()
+                            probeFallbackPlatform(rt, item, platform, cacheKeyPrefix, artist, my)?.let {
+                                android.util.Log.i(
+                                    "PerfFallback",
+                                    "candidate=$platform elapsed=${android.os.SystemClock.elapsedRealtime() - started}ms total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms"
+                                )
+                                winner.complete(it)
+                            }
+                        }
+                    }
+                }
+                com.tvmusic.config.MetaSettings.STRATEGY_SEQUENTIAL -> {
+                    // 严格顺序：按健康度排序依次尝试，前一候选成功即返回，节省引擎串行队列
+                    val sequential = async(Dispatchers.Default) {
+                        for (platform in ranked) {
+                            if (my != playSession.get()) return@async null
+                            val started = android.os.SystemClock.elapsedRealtime()
+                            probeFallbackPlatform(rt, item, platform, cacheKeyPrefix, artist, my)?.let {
+                                android.util.Log.i(
+                                    "PerfFallback",
+                                    "candidate=$platform elapsed=${android.os.SystemClock.elapsedRealtime() - started}ms total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms"
+                                )
+                                return@async it
+                            }
+                        }
+                        null
+                    }
+                    val first = withTimeoutOrNull(FALLBACK_RACE_MS) { sequential.await() }
+                    android.util.Log.i(
+                        "PerfFallback",
+                        "strategy=sequential winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${ranked.size}"
+                    )
+                    sequential.cancel()
+                    return@coroutineScope first
+                }
+                com.tvmusic.config.MetaSettings.STRATEGY_PREFER_FIRST -> {
+                    // 只跑健康度第 1 名：极致低延迟，容忍换源失败率升高
+                    if (ranked.isNotEmpty()) {
+                        val only = async(Dispatchers.Default) {
+                            val platform = ranked.first()
+                            val started = android.os.SystemClock.elapsedRealtime()
+                            probeFallbackPlatform(rt, item, platform, cacheKeyPrefix, artist, my)?.let {
+                                android.util.Log.i(
+                                    "PerfFallback",
+                                    "candidate=$platform elapsed=${android.os.SystemClock.elapsedRealtime() - started}ms total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms"
+                                )
+                                it
+                            }
+                        }
+                        val first = withTimeoutOrNull(FALLBACK_RACE_MS) { only.await() }
                         android.util.Log.i(
                             "PerfFallback",
-                            "candidate=$platform elapsed=${android.os.SystemClock.elapsedRealtime() - started}ms total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms"
+                            "strategy=preferFirst winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${ranked.size}"
                         )
-                        winner.complete(it)
+                        only.cancel()
+                        return@coroutineScope first
+                    }
+                }
+                else -> {
+                    // staggered（默认）：健康度前 fastBatch 名立即启动，其余错峰 350ms
+                    racers = ranked.mapIndexed { index, platform ->
+                        launch(Dispatchers.Default) {
+                            if (index >= fastBatch) kotlinx.coroutines.delay(FALLBACK_STAGGER_MS)
+                            val started = android.os.SystemClock.elapsedRealtime()
+                            probeFallbackPlatform(rt, item, platform, cacheKeyPrefix, artist, my)?.let {
+                                android.util.Log.i(
+                                    "PerfFallback",
+                                    "candidate=$platform elapsed=${android.os.SystemClock.elapsedRealtime() - started}ms total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms"
+                                )
+                                winner.complete(it)
+                            }
+                        }
                     }
                 }
             }
-            // 整链硬上限：即便全部候选都在排队/慢 HTTP，到点即弃，不再分钟级空等
+            // staggered / allParallel 走整链硬上限 + winner.await
             val first = withTimeoutOrNull(FALLBACK_RACE_MS) { winner.await() }
             android.util.Log.i(
                 "PerfFallback",
-                "strategy=staggered3 winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${ranked.size}"
+                "strategy=$strategy winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${ranked.size}"
             )
             racers.forEach { it.cancel() }
             first
@@ -1184,6 +1307,7 @@ object PlayerManager {
     /** 设置播放模式并持久化。 */
     fun setPlayMode(mode: PlayMode) {
         qualityPrefs?.edit()?.putString(KEY_PLAY_MODE, mode.name)?.apply()
+        if (mode == PlayMode.SHUFFLE) rebuildShuffle(_uiState.value.queue.size)
         _uiState.update { it.copy(playMode = mode) }
     }
 
@@ -1198,12 +1322,42 @@ object PlayerManager {
         return next
     }
 
-    /** 随机模式下选一个不同于当前的索引；其余模式返回 -1 表示用顺序逻辑。 */
+    // ---------------- 随机播放（洗牌模式）----------------
+
+    /**
+     * 随机播放采用「洗牌队列」而非逐曲随机：
+     * 旧实现每次 Random.nextInt(queue.size) 只排除当前一首，小队列（<20）时
+     * 重复率极高——5 首歌随机 10 次平均出现 2-3 次重复。
+     * 改为 Fisher-Yates 洗牌一次生成完整乱序队列，顺序消费；播完一轮重新洗牌。
+     */
+    private var shuffleOrder: IntArray = IntArray(0)
+    private var shufflePos = -1
+
+    /** 重新生成洗牌队列（切歌/队列变化/播完一轮时调用）。 */
+    private fun rebuildShuffle(queueSize: Int) {
+        if (queueSize <= 0) { shuffleOrder = IntArray(0); shufflePos = -1; return }
+        shuffleOrder = IntArray(queueSize) { it }
+        for (i in queueSize - 1 downTo 1) {
+            val j = Random.nextInt(i + 1)
+            shuffleOrder[i] = shuffleOrder[j].also { shuffleOrder[j] = shuffleOrder[i] }
+        }
+        shufflePos = -1 // 首曲尚未选定
+    }
+
+    /** 随机模式：从洗牌队列取下一曲；播完一轮重新洗牌。 */
     private fun shuffleTarget(st: PlayerUiState): Int {
         if (st.queue.size <= 1) return -1
-        var idx: Int
-        do { idx = Random.nextInt(st.queue.size) } while (idx == st.queueIndex)
-        return idx
+        if (shuffleOrder.size != st.queue.size) rebuildShuffle(st.queue.size)
+        if (shuffleOrder.isEmpty()) return -1
+        if (shufflePos < 0) {
+            // 首次启动：从洗牌队列首部开始
+            shufflePos = 0
+        } else {
+            shufflePos = (shufflePos + 1) % shuffleOrder.size
+            // 播完一轮：重新洗牌，避免下一轮回播顺序与本轮相同
+            if (shufflePos == 0) rebuildShuffle(st.queue.size)
+        }
+        return shuffleOrder[shufflePos]
     }
 
     // ---------------- 试听截断提前识别 ----------------

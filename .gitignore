@@ -23,3 +23,12 @@ local.properties
 STABILITY.md
 日记.md
 AGENTS.md
+# agent runtime / review artifacts
+.box-agent/
+.box-agent-scratch/
+.easyclaw/
+*.png
+*.jpg
+REVIEW_2026-09-27.md
+
+.REVIEW_*.md.artifact.json

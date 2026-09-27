@@ -10,14 +10,17 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -26,6 +29,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -34,11 +38,13 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tvmusic.config.SearchSettings
@@ -47,12 +53,17 @@ import com.tvmusic.ui.components.EmptyState
 import com.tvmusic.ui.components.FilterChip
 import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
-import com.tvmusic.ui.components.MusicRow
 import com.tvmusic.ui.components.SectionHeader
 import com.tvmusic.ui.components.tvFocus
 import com.tvmusic.ui.components.withPlatform
 import com.tvmusic.ui.sheet.DetailTarget
 
+/**
+ * KTV 点歌风格搜索页：
+ * - 顶部超大搜索框（遥控器输入友好）+ 大号「搜索」按钮
+ * - 类型 / 音源 / 筛选排序收进一行横向滚动条，不占竖向空间
+ * - 结果全宽：大字号歌单头 + 大号歌曲行（歌名 22sp），行内直接播放，右侧收藏
+ */
 @Composable
 fun SearchScreen(
     viewModel: SearchViewModel,
@@ -72,73 +83,81 @@ fun SearchScreen(
     val sortAsc by viewModel.sortAsc.collectAsState()
 
     Row(Modifier.fillMaxSize().padding(horizontal = 28.dp)) {
-        // 左半边：搜索控制区（输入 / 类型 / 音源 / 筛选排序）——窄栏，把空间留给结果
+        // ── 左栏：搜索框 + 简化筛选（窄栏，按钮缩小防溢出）──
         Column(
             modifier = Modifier
-                .weight(0.35f)
+                .weight(0.32f)
                 .fillMaxHeight()
-                .padding(end = 20.dp),
+                .padding(end = 20.dp, top = 20.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             OutlinedTextField(
                 value = query,
                 onValueChange = viewModel::setQuery,
-                placeholder = { Text("搜索音乐") },
+                placeholder = { Text("输入歌名 / 歌手", fontSize = 15.sp) },
                 singleLine = true,
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 24.dp)
+                    .height(50.dp)
                     .tvFocus(shapeOverride = RoundedCornerShape(10.dp)),
                 textStyle = MaterialTheme.typography.bodyLarge,
-                colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = MaterialTheme.colorScheme.primary,
                     cursorColor = MaterialTheme.colorScheme.primary
                 )
             )
-            SubmitButton(
-                "搜 索",
-                Modifier.fillMaxWidth()
-            ) { viewModel.submit() }
+            KtvPrimaryButton("搜 索", modifier = Modifier.fillMaxWidth().height(44.dp)) { viewModel.submit() }
 
             if (phase !is SearchPhase.Idle) {
-                ControlLabel("类型")
-                TypeTabs(selectedType = selectedType, onSelect = viewModel::setType)
-                ControlLabel("音源")
-                PlatformFilterRow(
-                    platforms = searchablePlatforms,
-                    selected = selectedSources,
-                    onToggle = viewModel::toggleSource,
-                    onAll = viewModel::selectAllSources
-                )
-                ControlLabel("筛选与排序")
-                FilterSortPanel(
-                    durFilter = durFilter,
-                    needArtwork = needArtwork,
-                    sortBy = sortBy,
-                    sortAsc = sortAsc,
-                    onDur = viewModel::setDurFilter,
-                    onArtwork = viewModel::setNeedArtwork,
-                    onSort = viewModel::setSortBy,
-                    onToggleAsc = viewModel::toggleSortAsc
-                )
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    item(key = "__types__") {
+                        KtvControlLabel("类型")
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(SearchViewModel.SEARCH_TYPES, key = { "t_${it.first}" }) { (key, label) ->
+                                FilterChip(label = label, selected = key == selectedType, onClick = { viewModel.setType(key) })
+                            }
+                        }
+                    }
+                    item(key = "__filter__") {
+                        KtvControlLabel("筛选")
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(DurationFilter.entries, key = { "d_${it.name}" }) { f ->
+                                FilterChip(label = f.label, selected = durFilter == f, onClick = { viewModel.setDurFilter(f) })
+                            }
+                        }
+                    }
+                    item(key = "__sort__") {
+                        KtvControlLabel("排序")
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            val sortLabels = linkedMapOf(
+                                SearchSettings.SORT_DEFAULT to "默认",
+                                SearchSettings.SORT_DURATION to "按时长",
+                                SearchSettings.SORT_TITLE to "按歌名"
+                            )
+                            sortLabels.forEach { (k, v) ->
+                                item(key = "o_$k") {
+                                    FilterChip(label = v, selected = sortBy == k, onClick = { viewModel.setSortBy(k) })
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // 右半边：结果区——占大头
+        // ── 右栏：结果区（占大头）──
         Column(
             modifier = Modifier
-                .weight(0.65f)
+                .weight(0.68f)
                 .fillMaxHeight()
                 .padding(start = 20.dp)
         ) {
-            when (phase) {
+            when (val p = phase) {
                 is SearchPhase.Idle -> HistoryPanel(viewModel, history, query)
-                is SearchPhase.NoResult -> EmptyState(message = (phase as SearchPhase.NoResult).message)
+                is SearchPhase.NoResult -> EmptyState(p.message)
                 else -> {
-                    // Searching（已有渐进结果）与 Ready 共用同一 ResultsPanel 插槽，
-                    // 避免搜索进行中→完成切换阶段时丢失列表滚动与分页状态
-                    val s = phase as? SearchPhase.Searching
+                    val s = p as? SearchPhase.Searching
                     if (s != null && groups.isEmpty()) {
                         LoadingBox(Modifier.weight(1f).fillMaxWidth())
                     } else {
@@ -149,9 +168,9 @@ fun SearchScreen(
                                         "正在搜索 ${s.done}/${s.total} 个音源…（结果边到边显示）"
                                     else
                                         "正在整理已返回的结果…",
-                                    fontSize = 12.sp,
+                                    fontSize = 13.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(top = 2.dp, bottom = 2.dp)
+                                    modifier = Modifier.padding(top = 8.dp)
                                 )
                             }
                             ResultsPanel(
@@ -173,18 +192,7 @@ fun SearchScreen(
     }
 }
 
-/** 左栏分组小标题。 */
-@Composable
-private fun ControlLabel(text: String) {
-    Text(
-        text,
-        fontSize = 12.sp,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 6.dp)
-    )
-}
-
-/** 结果面板：站点过滤条 + 全部收藏 + 结果列表（Ready 与渐进式 Searching 共用）。 */
+/** 结果面板：站点过滤条 + 全部收藏 + 大号结果列表。 */
 @Composable
 private fun ColumnScope.ResultsPanel(
     groups: List<SearchGroup>,
@@ -217,52 +225,45 @@ private fun ColumnScope.ResultsPanel(
     }
 
     Column(Modifier.weight(1f)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (plugins.size > 1) {
-                LazyRow(
-                    modifier = Modifier.weight(1f),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    item(key = "__res_all__") {
-                        FilterChip(
-                            label = "全部",
-                            selected = selectedPlugin == null,
-                            onClick = { selectedPlugin = null }
-                        )
-                    }
-                    items(plugins, key = { "res_$it" }) { p ->
-                        FilterChip(
-                            label = p,
-                            selected = p == selectedPlugin,
-                            onClick = { selectedPlugin = p }
-                        )
-                    }
+        if (plugins.size > 1) {
+            LazyRow(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                item(key = "__res_all__") {
+                    FilterChip(
+                        label = "全部结果",
+                        selected = selectedPlugin == null,
+                        onClick = { selectedPlugin = null }
+                    )
                 }
-            } else {
-                androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
-            }
-            if (visibleSongs.isNotEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .padding(start = 10.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                        .clickable { showCollectAll = true }
-                        .padding(horizontal = 14.dp, vertical = 7.dp)
-                ) {
-                    Text(
-                        "♡ 全部收藏（${visibleSongs.size}）",
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontSize = 13.sp
+                items(plugins, key = { "res_$it" }) { p ->
+                    FilterChip(
+                        label = p,
+                        selected = p == selectedPlugin,
+                        onClick = { selectedPlugin = p }
                     )
                 }
             }
         }
-        ResultList(
+        if (visibleSongs.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .padding(top = 6.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .tvFocus(shapeOverride = RoundedCornerShape(10.dp))
+                    .clickable { showCollectAll = true }
+                    .padding(horizontal = 18.dp, vertical = 9.dp)
+            ) {
+                Text(
+                    "♡ 全部收藏（${visibleSongs.size}）",
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 15.sp
+                )
+            }
+        }
+        KtvResultList(
             groups = if (selectedPlugin == null) groups else groups.filter { it.plugin == selectedPlugin },
             type = type,
             loadingMore = loadingMore,
@@ -301,109 +302,9 @@ private fun ColumnScope.ResultsPanel(
     }
 }
 
+/** KTV 大号结果列表：复用分页与行类型逻辑，行渲染换为大字号样式。 */
 @Composable
-private fun TypeTabs(selectedType: String, onSelect: (String) -> Unit) {
-    LazyRow(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        items(SearchViewModel.SEARCH_TYPES, key = { it.first }) { (key, label) ->
-            FilterChip(
-                label = label,
-                selected = key == selectedType,
-                onClick = { onSelect(key) }
-            )
-        }
-    }
-}
-
-/** 音源筛选条：全部 + 各平台名（多选）。 */
-@Composable
-private fun PlatformFilterRow(
-    platforms: List<String>,
-    selected: Set<String>,
-    onToggle: (String) -> Unit,
-    onAll: () -> Unit
-) {
-    LazyRow(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        item(key = "__all__") {
-            FilterChip(
-                label = "全部",
-                selected = selected.isEmpty(),
-                onClick = onAll
-            )
-        }
-        items(platforms, key = { it }) { p ->
-            FilterChip(
-                label = p,
-                selected = p in selected,
-                onClick = { onToggle(p) }
-            )
-        }
-    }
-}
-
-/** 结果过滤（时长/封面）与排序面板：左半栏内竖排两行（可横向滚动），避免溢出。 */
-@Composable
-private fun FilterSortPanel(
-    durFilter: DurationFilter,
-    needArtwork: Boolean,
-    sortBy: String,
-    sortAsc: Boolean,
-    onDur: (DurationFilter) -> Unit,
-    onArtwork: (Boolean) -> Unit,
-    onSort: (String) -> Unit,
-    onToggleAsc: () -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            item(key = "__dur_label__") {
-                Text("时长", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            items(DurationFilter.entries, key = { "d_${it.name}" }) { f ->
-                FilterChip(label = f.label, selected = durFilter == f, onClick = { onDur(f) })
-            }
-        }
-        LazyRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            item(key = "__art__") {
-                FilterChip(
-                    label = if (needArtwork) "有封面✓" else "有封面",
-                    selected = needArtwork,
-                    onClick = { onArtwork(!needArtwork) }
-                )
-            }
-            item(key = "__sort_label__") {
-                Text("排序", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            val sortLabels = mapOf(
-                SearchSettings.SORT_DEFAULT to "默认",
-                SearchSettings.SORT_DURATION to "时长",
-                SearchSettings.SORT_TITLE to "歌名",
-                SearchSettings.SORT_ARTIST to "歌手"
-            )
-            sortLabels.forEach { (k, v) ->
-                item(key = "s_$k") {
-                    FilterChip(label = v, selected = sortBy == k, onClick = { onSort(k) })
-                }
-            }
-            item(key = "__asc__") {
-                FilterChip(label = if (sortAsc) "升序" else "降序", selected = true, onClick = onToggleAsc)
-            }
-        }
-    }
-}
-
-@Composable
-private fun ResultList(
+private fun KtvResultList(
     groups: List<SearchGroup>,
     type: String,
     loadingMore: String?,
@@ -428,7 +329,6 @@ private fun ResultList(
                 add(ResultRow.Header(uniqueKey("header_" + g.plugin), g))
                 if (type == "music") {
                     g.entries.forEach { e ->
-                        // 歌曲条目：plugin + "_" + id（SearchEntry.id 已是 String）
                         add(ResultRow.Song(uniqueKey("song_" + e.plugin + "_" + e.id), e))
                     }
                 } else {
@@ -441,7 +341,7 @@ private fun ResultList(
                     !g.isEnd -> add(
                         ResultRow.Button(
                             uniqueKey("btn_" + g.plugin),
-                            if (loadingMore == g.plugin) "加载更多…" else "加载更多",
+                            if (loadingMore == g.plugin) "加载中…" else "加载更多",
                             g,
                             isError = false
                         )
@@ -452,14 +352,11 @@ private fun ResultList(
         }
     }
 
-    // 渲染分页（仅 UI 层，数据层不变）：初始只渲染前 50 行，滚动接近末尾时继续放量
+    // 渲染分页（仅 UI 层）：初始 50 行，滚动接近末尾时继续放量
     var visibleCount by remember { mutableIntStateOf(INITIAL_VISIBLE_ROWS) }
-    // 新搜索发起时 ViewModel 会先清空 groups，此时重置分页进度
     LaunchedEffect(groups) { if (groups.isEmpty()) visibleCount = INITIAL_VISIBLE_ROWS }
 
     val listState = rememberLazyListState()
-    // 最后一个可见行进入已渲染区倒数 8 行内且还有未渲染行时，自动追加一页渲染量
-    // （TV 上焦点滚到列表末尾继续按向下键即触发；读 visibleCount 状态以便放量后重新判定）
     val nearEnd by remember(rows) {
         derivedStateOf {
             val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
@@ -476,19 +373,34 @@ private fun ResultList(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 32.dp)
     ) {
-        items(shown, key = { it.key }) { row ->
+        itemsIndexed(shown, key = { _, row -> row.key }) { _, row ->
             when (row) {
                 is ResultRow.Header -> {
                     val g = row.g
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+                        modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        SectionHeaderBorderless(g.plugin)
+                        // KTV 大号分组头：色条 + 大字号音源名
+                        Box(
+                            Modifier
+                                .padding(start = 28.dp)
+                                .size(width = 5.dp, height = 22.dp)
+                                .background(
+                                    MaterialTheme.colorScheme.primary,
+                                    RoundedCornerShape(3.dp)
+                                )
+                        )
                         Text(
-                            "第 ${g.page} 页 · 共 ${g.entries.size} 条" +
-                                if (g.isEnd) " · 已到底" else " · 可查看更多",
-                            fontSize = 12.sp,
+                            g.plugin,
+                            fontSize = 20.sp,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(start = 10.dp)
+                        )
+                        Text(
+                            "第 ${g.page} 页 · ${g.entries.size} 条" +
+                                if (g.isEnd) " · 已到底" else "",
+                            fontSize = 13.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(start = 16.dp)
                         )
@@ -496,27 +408,26 @@ private fun ResultList(
                 }
                 is ResultRow.Song -> {
                     val entry = row.e
-                    // 补全 platform 后算收藏主键（与 PlaybackStore 同规则）
                     val favRaw = remember(entry) { withPlatform(entry.raw, entry.plugin) }
                     val favKey = remember(favRaw) { com.tvmusic.data.PlaybackStore.favKeyOf(favRaw) }
-                    MusicRow(
-                        index = 0,
+                    val num = remember(entry, groups) { 0 } // KTV 编号可后续接全局序号，先留空
+                    KtvSongRow(
                         title = entry.title,
                         artist = entry.artist,
-                        album = entry.album,
+                        artwork = entry.artwork,
+                        plugin = entry.plugin,
                         onClick = { onPlay(entry) },
                         trailing = {
-                            // 单曲收藏：弹出收藏夹选择（可加入任意自定义收藏夹）
                             val fav = favKey in favKeys
                             Box(
                                 modifier = Modifier
                                     .tvFocus()
                                     .clickable { onPickFav(favRaw) }
-                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                                    .padding(horizontal = 12.dp, vertical = 6.dp)
                             ) {
                                 Text(
                                     if (fav) "♥" else "♡",
-                                    fontSize = 18.sp,
+                                    fontSize = 22.sp,
                                     color = if (fav) MaterialTheme.colorScheme.primary
                                     else MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -526,11 +437,9 @@ private fun ResultList(
                 }
                 is ResultRow.Cards -> {
                     LazyRow(
-                        contentPadding = PaddingValues(horizontal = 28.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        contentPadding = PaddingValues(horizontal = 28.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        // key 含索引兜底：插件可能返回重复 id+name 的卡片（同名专辑/缺失 id），
-                        // 裸业务 key 冲突会直接 IllegalArgumentException 闪退
                         itemsIndexed(
                             row.entries,
                             key = { i, e -> "c_${i}_${e.plugin}-${e.id}-${e.name}" }
@@ -545,23 +454,88 @@ private fun ResultList(
                     }
                 }
                 is ResultRow.Button -> {
-                    TinyButton(row.label) {
+                    KtvSecondaryButton(row.label, Modifier.padding(start = 28.dp, top = 8.dp)) {
                         if (row.isError) onRetry(row.g) else onLoadMore(row.g)
                     }
                 }
                 is ResultRow.End -> {
                     Text(
                         "— 到底 —",
-                        fontSize = 12.sp,
+                        fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 8.dp),
+                            .padding(vertical = 10.dp),
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
                 }
             }
         }
+    }
+}
+
+/** KTV 大号歌曲行：长圆形 pill 背景（跟随主题色深浅变化）+ 歌名 20sp + 歌手 15sp + 可选封面缩略图。 */
+@Composable
+private fun KtvSongRow(
+    title: String,
+    artist: String,
+    artwork: String,
+    plugin: String = "",
+    onClick: () -> Unit,
+    trailing: @Composable () -> Unit = {}
+) {
+    // 背景色：主题 primary 的深色变体（透明度 25%），默认深青；不同音源用不同透明度区分
+    val primary = MaterialTheme.colorScheme.primary
+    val baseAlpha = if (plugin.isNotBlank()) 0.22f + (plugin.hashCode().mod(3) * 0.08f) else 0.25f
+    val bgColor = primary.copy(alpha = baseAlpha.coerceIn(0.15f, 0.4f))
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 28.dp, vertical = 3.dp)
+            .clip(RoundedCornerShape(24.dp))
+            .background(bgColor)
+            .tvFocus(shapeOverride = RoundedCornerShape(24.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (artwork.isNotBlank()) {
+            coil.compose.AsyncImage(
+                model = artwork,
+                contentDescription = null,
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(RoundedCornerShape(8.dp)),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop
+            )
+            Spacer(Modifier.width(14.dp))
+        }
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                fontSize = 20.sp,
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (artist.isNotBlank()) {
+                Text(
+                    artist,
+                    fontSize = 15.sp,
+                    color = Color.White.copy(alpha = 0.75f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        // 播放按钮（KTV 行内直接点歌）
+        Text(
+            "▶ 播放",
+            fontSize = 14.sp,
+            color = Color.White.copy(alpha = 0.9f),
+            modifier = Modifier.padding(end = 10.dp)
+        )
+        trailing()
     }
 }
 
@@ -574,12 +548,12 @@ private fun cardSubtitle(e: SearchEntry): String = when (e.type) {
     else -> e.descriptionText.ifBlank { e.artist }.ifBlank { e.plugin }
 }
 
-/** 渲染分页常量：初始渲染行数 / 每次放量行数。 */
+/** 渲染分页常量。 */
 private const val INITIAL_VISIBLE_ROWS = 50
 private const val PAGE_STEP_ROWS = 50
 
 private sealed interface ResultRow {
-    /** LazyColumn 稳定 key（构建时已做全局去重，前缀区分类型防止跨 items 块冲突）。 */
+    /** LazyColumn 稳定 key（构建时全局去重）。 */
     val key: String
 
     data class Header(override val key: String, val g: SearchGroup) : ResultRow
@@ -589,29 +563,58 @@ private sealed interface ResultRow {
     data class End(override val key: String, val count: Int) : ResultRow
 }
 
+/** KTV 主按钮：搜索 / 提交（44dp 高，padding 缩小防溢出）。 */
 @Composable
-fun SectionHeaderBorderless(title: String) {
+private fun KtvPrimaryButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier = modifier
+            .height(44.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.primary)
+            .tvFocus(shapeOverride = RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 20.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(label, color = MaterialTheme.colorScheme.onPrimary, fontSize = 16.sp)
+    }
+}
+
+/** 左栏分组小标题。 */
+@Composable
+private fun KtvControlLabel(text: String) {
     Text(
-        text = title,
-        fontSize = 17.sp,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(start = 28.dp)
+        text,
+        fontSize = 13.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(top = 4.dp)
     )
 }
 
+/** KTV 次按钮：加载更多 / 重试。 */
 @Composable
-private fun TinyButton(label: String, onClick: () -> Unit) {
+private fun KtvSecondaryButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
-        modifier = Modifier
-            .padding(start = 28.dp, top = 4.dp)
-            .clip(RoundedCornerShape(6.dp))
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
             .background(MaterialTheme.colorScheme.primaryContainer)
-            .tvFocus(shapeOverride = RoundedCornerShape(6.dp))
+            .tvFocus(shapeOverride = RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 6.dp)
+            .padding(horizontal = 24.dp, vertical = 10.dp)
     ) {
-        Text(label, color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 13.sp)
+        Text(label, color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 15.sp)
     }
+}
+
+/** 横向筛选条中的分隔竖条。 */
+@Composable
+private fun KtvDivider() {
+    Box(
+        Modifier
+            .padding(horizontal = 2.dp)
+            .size(width = 1.dp, height = 22.dp)
+            .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f))
+    )
 }
 
 @Composable
@@ -621,29 +624,28 @@ private fun HistoryPanel(
     query: String
 ) {
     Column(Modifier.fillMaxSize()) {
-        // 历史词
         Row(
-            modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp),
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("搜索历史", fontSize = 16.sp, color = MaterialTheme.colorScheme.onBackground)
+            Text("搜索历史", fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)
             if (history.isNotEmpty()) {
                 Box(
                     modifier = Modifier
                         .padding(start = 16.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .tvFocus(shapeOverride = RoundedCornerShape(6.dp))
+                        .clip(RoundedCornerShape(8.dp))
+                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                         .clickable(onClick = viewModel::clearHistory)
-                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .padding(horizontal = 14.dp, vertical = 6.dp)
                 ) {
-                    Text("清空", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                    Text("清空", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
                 }
             }
         }
         if (history.isEmpty()) {
             Text(
                 "暂无搜索历史",
-                fontSize = 13.sp,
+                fontSize = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 28.dp)
             )
@@ -653,17 +655,12 @@ private fun HistoryPanel(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(history.take(8), key = { "h_$it" }) { w ->
-                    Chip(
-                        label = w,
-                        onSelect = { viewModel.useHistory(w) },
-                        onClose = { viewModel.removeHistory(w) }
-                    )
+                    KtvChip(label = w, onSelect = { viewModel.useHistory(w) }, onClose = { viewModel.removeHistory(w) })
                 }
             }
         }
 
-        // 热门词（静态兜底，替代需要联网聚合的热搜榜）
-        Box(Modifier.padding(top = 18.dp)) {
+        Box(Modifier.padding(top = 20.dp)) {
             SectionHeader("热门搜索")
         }
         val hot = listOf("周杰伦", "林俊杰", "陈奕迅", "邓紫棋", "许嵩", "赵雷", "新歌榜", "纯音乐")
@@ -672,59 +669,40 @@ private fun HistoryPanel(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             items(hot, key = { "hot_$it" }) { w ->
-                Chip(label = w, onSelect = { viewModel.useHistory(w) }, onClose = null)
+                KtvChip(label = w, onSelect = { viewModel.useHistory(w) }, onClose = null)
             }
         }
         if (query.isNotBlank()) {
             Text(
                 "按回车或点「搜索」开始查找“$query”",
-                fontSize = 13.sp,
+                fontSize = 14.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 28.dp).padding(top = 18.dp)
+                modifier = Modifier.padding(horizontal = 28.dp).padding(top = 20.dp)
             )
         }
     }
 }
 
 @Composable
-private fun Chip(label: String, onSelect: () -> Unit, onClose: (() -> Unit)? = null) {
+private fun KtvChip(label: String, onSelect: () -> Unit, onClose: (() -> Unit)? = null) {
     Row(
         modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(18.dp))
             .background(MaterialTheme.colorScheme.surface)
-            .tvFocus(shapeOverride = RoundedCornerShape(16.dp))
+            .tvFocus(shapeOverride = RoundedCornerShape(18.dp))
             .clickable(onClick = onSelect)
-            .padding(horizontal = 14.dp, vertical = 7.dp),
+            .padding(horizontal = 18.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 14.sp)
+        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
         if (onClose != null) {
             Box(
-                modifier = Modifier.padding(start = 8.dp).clip(RoundedCornerShape(8.dp))
+                modifier = Modifier.padding(start = 10.dp).clip(RoundedCornerShape(8.dp))
                     .tvFocus(shapeOverride = RoundedCornerShape(8.dp)).clickable(onClick = onClose)
-                    .padding(horizontal = 4.dp)
+                    .padding(horizontal = 5.dp)
             ) {
-                Text("×", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
+                Text("×", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 16.sp)
             }
         }
-    }
-}
-
-@Composable
-private fun SubmitButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.primary)
-            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp, vertical = 14.dp)
-    ) {
-        Text(
-            label,
-            color = MaterialTheme.colorScheme.onPrimary,
-            fontSize = 15.sp,
-            modifier = Modifier.align(Alignment.Center)
-        )
     }
 }

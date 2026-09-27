@@ -1,5 +1,12 @@
 package com.tvmusic.ui.player
 
+import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -126,25 +133,52 @@ fun PlayerScreen(onBack: () -> Unit) {
         }
 
         Row(
-            modifier = Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 28.dp),
-            verticalAlignment = Alignment.CenterVertically
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.Bottom
         ) {
             Column(Modifier.fillMaxWidth()) {
-                // 上：左大封面（圆角+阴影） + 右逐行歌词
-                Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                // 上：左圆形旋转封面 + 右逐行歌词（weight 推到底部）
+                Row(Modifier.weight(1f).padding(horizontal = 56.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                     val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
                     // 视频模式隐藏大封面：画面已全屏，封面只会在视频上挡视线
                     if (!state.isVideo) {
-                        Box(
-                            modifier = Modifier
-                                .size(340.dp)
+                        // 封面形状/转速可远程配置：circle=圆形旋转，square=方形圆角
+                        val coverShape = com.tvmusic.config.MetaSettings.playerCoverShape
+                        val coverSpinMs = com.tvmusic.config.MetaSettings.playerCoverSpinMs
+                        val isCircle = coverShape == com.tvmusic.config.MetaSettings.COVER_SHAPE_CIRCLE
+                        val spinEnabled = coverSpinMs > 0 && isCircle
+                        val infiniteTransition = rememberInfiniteTransition(label = "cover")
+                        val rotation by infiniteTransition.animateFloat(
+                            initialValue = 0f,
+                            targetValue = 360f,
+                            animationSpec = infiniteRepeatable(
+                                tween(durationMillis = coverSpinMs.coerceIn(1, 120_000), easing = LinearEasing),
+                                repeatMode = RepeatMode.Restart
+                            ),
+                            label = "coverRotation"
+                        )
+                        val coverShapeModifier = if (isCircle) {
+                            Modifier
+                                .size(300.dp)
+                                .graphicsLayer {
+                                    shadowElevation = 26.dp.toPx()
+                                    clip = true
+                                    shape = CircleShape
+                                    rotationZ = if (spinEnabled && state.isPlaying) rotation else 0f
+                                }
+                                .tvFocus(1.03f, shapeOverride = CircleShape)
+                        } else {
+                            Modifier
+                                .size(300.dp)
                                 .graphicsLayer {
                                     shadowElevation = 26.dp.toPx()
                                     clip = true
                                     shape = RoundedCornerShape(tokens.radius * 2)
                                 }
                                 .tvFocus(1.03f, shapeOverride = RoundedCornerShape(tokens.radius * 2))
-                                .clickable(onClick = onBack)
+                        }
+                        Box(
+                            modifier = coverShapeModifier.clickable(onClick = onBack)
                         ) {
                             Artwork(state.current!!.artwork, Modifier.fillMaxSize())
                             if (state.buffering) {
@@ -189,13 +223,13 @@ fun PlayerScreen(onBack: () -> Unit) {
                     }
                 }
 
-                // 下：控制条（进度 + 时间 + 全部控制按钮）；进度每秒刷新只在卡片内部重组
+                // 下：控制条贴最底（进度 + 时间 + 全部控制按钮）；进度每秒刷新只在卡片内部重组
                 ProgressSection(onSeek = { PlayerManager.seek(it) })
                 // 按键分三组：状态（收藏/循环）· 主控（快退/上下首/播放/快进）· 功能（倍速/定时/音效/返回），
                 // 组内紧凑、组间留大间距，d-pad 焦点沿行序自然移动。
                 // 提示区（歌词兜底/音源切换）叠加在 Box 左侧，不占按钮组空间、不影响其居中位置。
                 Box(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 6.dp)
+                    modifier = Modifier.fillMaxWidth().padding(top = 0.dp, bottom = 4.dp, start = 56.dp, end = 56.dp)
                 ) {
                     Column(
                         modifier = Modifier.align(Alignment.CenterStart).width(130.dp),
@@ -251,58 +285,58 @@ fun PlayerScreen(onBack: () -> Unit) {
                     // 状态组
                     RoundCtrlButton(
                         if (state.isFavorite) "♥" else "♡",
-                        size = 52.dp, iconSize = 22.sp, filled = false,
+                        size = 48.dp, iconSize = 20.sp, filled = false,
                         desc = "收藏",
                         onClick = { showFavDialog = true }
                     )
                     RoundCtrlButton(
-                        playModeIcon(state.playMode), size = 52.dp, iconSize = 20.sp, filled = false,
+                        playModeIcon(state.playMode), size = 48.dp, iconSize = 18.sp, filled = false,
                         desc = "循环模式"
                     ) {
                         PlayerManager.cyclePlayMode()
                     }
-                    Spacer(Modifier.width(36.dp))
+                    Spacer(Modifier.width(24.dp))
                     // 主控组
-                    RoundCtrlButton("⏪", size = 52.dp, iconSize = 20.sp, filled = false, desc = "快退30秒") {
+                    RoundCtrlButton("⏪", size = 48.dp, iconSize = 18.sp, filled = false, desc = "快退30秒") {
                         PlayerManager.seekRelative(-30_000)
                     }
-                    RoundCtrlButton("⏮", size = 60.dp, iconSize = 26.sp, filled = false, desc = "上一首") { PlayerManager.prev() }
+                    RoundCtrlButton("⏮", size = 56.dp, iconSize = 24.sp, filled = false, desc = "上一首") { PlayerManager.prev() }
                     RoundCtrlButton(
                         if (state.isPlaying) "⏸" else "▶",
-                        size = 84.dp, iconSize = 34.sp, filled = true,
+                        size = 72.dp, iconSize = 30.sp, filled = true,
                         desc = if (state.isPlaying) "暂停" else "播放"
                     ) { PlayerManager.playPause() }
-                    RoundCtrlButton("⏭", size = 60.dp, iconSize = 26.sp, filled = false, desc = "下一首") { PlayerManager.next() }
-                    RoundCtrlButton("⏩", size = 52.dp, iconSize = 20.sp, filled = false, desc = "快进30秒") {
+                    RoundCtrlButton("⏭", size = 56.dp, iconSize = 24.sp, filled = false, desc = "下一首") { PlayerManager.next() }
+                    RoundCtrlButton("⏩", size = 48.dp, iconSize = 18.sp, filled = false, desc = "快进30秒") {
                         PlayerManager.seekRelative(30_000)
                     }
-                    Spacer(Modifier.width(36.dp))
+                    Spacer(Modifier.width(24.dp))
                     // 功能组
                     // 倍速：点击循环 0.75/1/1.25/1.5/2.0，非 1x 时高亮
                     RoundCtrlButton(
                         speedLabel(state.speed),
-                        size = 52.dp,
-                        iconSize = 14.sp,
+                        size = 48.dp,
+                        iconSize = 13.sp,
                         filled = state.speed != 1f,
                         desc = "倍速"
                     ) { PlayerManager.cycleSpeed() }
                     // 定时关闭：启用时显示剩余分钟
                     RoundCtrlButton(
                         if (state.sleepRemainingMs > 0) "${state.sleepRemainingMs / 60_000}m" else "🌙",
-                        size = 52.dp,
-                        iconSize = 16.sp,
+                        size = 48.dp,
+                        iconSize = 15.sp,
                         filled = state.sleepRemainingMs > 0,
                         desc = "定时关闭"
                     ) { showSleepDialog = true }
                     // 音效：均衡器 / 低音增强
                     RoundCtrlButton(
                         "音效",
-                        size = 52.dp,
-                        iconSize = 14.sp,
+                        size = 48.dp,
+                        iconSize = 13.sp,
                         filled = state.eqEnabled,
                         desc = "音效设置"
                     ) { showEqDialog = true }
-                    RoundCtrlButton("↩", size = 52.dp, iconSize = 22.sp, filled = false, desc = "返回", onClick = onBack)
+                    RoundCtrlButton("↩", size = 48.dp, iconSize = 20.sp, filled = false, desc = "返回", onClick = onBack)
                     }
                 }
             }
@@ -638,15 +672,15 @@ private fun ProgressSection(onSeek: (Long) -> Unit) {
         positionMs = st.positionMs,
         durationMs = st.durationMs,
         bufferedPositionMs = st.bufferedPositionMs,
-        modifier = Modifier.fillMaxWidth().padding(top = 18.dp),
+        modifier = Modifier.fillMaxWidth(),
         onSeek = onSeek
     )
     Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 0.dp, bottom = 0.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(format(st.positionMs), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(format(st.durationMs), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(format(st.positionMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(format(st.durationMs), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -677,13 +711,13 @@ private fun SeekBar(
     val primary = MaterialTheme.colorScheme.primary
     BoxWithConstraints(
         modifier = modifier
-            .height(30.dp)
-            .clip(RoundedCornerShape(15.dp))
-            .background(Color(0x14FFFFFF))
+            .height(26.dp)
+            .clip(RoundedCornerShape(13.dp))
+            .background(Color(0x18FFFFFF))
             .drawBehind { if (focused) drawRect(primary.copy(alpha = 0.25f)) }
             // 左右各让出一个半拇指位：手柄在两端不会溢出被外层 clip 裁掉，
             // 且 tap/拖拽映射到同一内宽，点按位置与手柄中心一致
-            .padding(horizontal = 8.dp)
+            .padding(horizontal = 7.dp)
             .onFocusChanged { focused = it.isFocused }
             .focusable()
             .onKeyEvent { event ->

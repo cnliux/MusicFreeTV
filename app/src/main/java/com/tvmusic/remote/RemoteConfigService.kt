@@ -691,6 +691,9 @@ class RemoteConfigService : Service() {
                     .put("fallbackOtherSource", com.tvmusic.config.MetaSettings.fallbackOtherSource)
                     .put("minPlaySeconds", com.tvmusic.config.MetaSettings.minPlaySeconds)
                     .put("preferPlugin", com.tvmusic.config.MetaSettings.fallbackPreferPlugin)
+                    .put("fallbackStrategy", com.tvmusic.config.MetaSettings.fallbackStrategy)
+                    .put("coverShape", com.tvmusic.config.MetaSettings.playerCoverShape)
+                    .put("coverSpinMs", com.tvmusic.config.MetaSettings.playerCoverSpinMs)
                     .toString())
             }
             method == "POST" && path == "/api/meta" -> {
@@ -715,6 +718,17 @@ class RemoteConfigService : Service() {
                             json.optString("preferPlugin")
                         )
                     }
+                    if (json.has("fallbackStrategy")) {
+                        com.tvmusic.config.MetaSettings.setFallbackStrategy(
+                            json.optString("fallbackStrategy")
+                        )
+                    }
+                    if (json.has("coverShape")) {
+                        com.tvmusic.config.MetaSettings.setCoverShape(json.optString("coverShape"))
+                    }
+                    if (json.has("coverSpinMs")) {
+                        com.tvmusic.config.MetaSettings.setCoverSpinMs(json.optInt("coverSpinMs"))
+                    }
                 }
                 respond(socket, 200, JSONObject()
                     .put("ok", true)
@@ -722,6 +736,9 @@ class RemoteConfigService : Service() {
                     .put("fallbackOtherSource", com.tvmusic.config.MetaSettings.fallbackOtherSource)
                     .put("minPlaySeconds", com.tvmusic.config.MetaSettings.minPlaySeconds)
                     .put("preferPlugin", com.tvmusic.config.MetaSettings.fallbackPreferPlugin)
+                    .put("fallbackStrategy", com.tvmusic.config.MetaSettings.fallbackStrategy)
+                    .put("coverShape", com.tvmusic.config.MetaSettings.playerCoverShape)
+                    .put("coverSpinMs", com.tvmusic.config.MetaSettings.playerCoverSpinMs)
                     .toString())
             }
             // 无操作自动进入播放器页（电视待机显示）：开关 + 时长（分钟）
@@ -1847,6 +1864,15 @@ private val PAGE_HTML = """<!DOCTYPE html>
         <span class="muted" style="flex:1;">优先换源插件：无法播放/受限时最先尝试该插件；「聚合搜索」= 全源并行，最快符合时长的先播</span>
         <select id="preferPlugin" onchange="savePrefer()" style="max-width:220px;flex:none;"></select>
       </div>
+      <div class="row" style="border:none;padding:6px 0 0;">
+        <span class="muted" style="flex:1;">换源策略：控制候选插件的启动与竞速方式（用于对比测速）</span>
+        <select id="fallbackStrategy" onchange="saveFallbackStrategy()" style="max-width:240px;flex:none;">
+          <option value="staggered">分批错峰（默认，兼顾并发与资源）</option>
+          <option value="allParallel">全候选同时启动（最快，吃资源）</option>
+          <option value="sequential">严格顺序（前一个成功即返回）</option>
+          <option value="preferFirst">只试第 1 名（低延迟，成功率低）</option>
+        </select>
+      </div>
     </div>
     <div class="card">
       <h2>待机显示</h2>
@@ -2865,7 +2891,7 @@ function loadLyric() {
 }
 
 /* ---------------- 歌词/封面补全（lrc.cx）+ 播放兜底 ---------------- */
-var metaCfg = { enabled: true, fallbackOtherSource: true, minPlaySeconds: 90, preferPlugin: '' };
+var metaCfg = { enabled: true, fallbackOtherSource: true, minPlaySeconds: 90, preferPlugin: '', fallbackStrategy: 'staggered' };
 function renderMeta() {
   el('metaToggle').textContent = metaCfg.enabled ? '开' : '关';
   el('metaToggle').className = 'small' + (metaCfg.enabled ? '' : ' ghost');
@@ -2874,6 +2900,8 @@ function renderMeta() {
   if (document.activeElement !== el('minPlaySeconds')) el('minPlaySeconds').value = metaCfg.minPlaySeconds;
   var sel = el('preferPlugin');
   if (document.activeElement !== sel && sel.options.length > 0) sel.value = metaCfg.preferPlugin || '';
+  var ssel = el('fallbackStrategy');
+  if (document.activeElement !== ssel && ssel.options.length > 0) ssel.value = metaCfg.fallbackStrategy || 'staggered';
 }
 function fillPreferOptions() {
   // 选项来自已启用插件列表（/api/plugins）；换源候选按 platform 匹配，故 value 用 platform
@@ -2900,22 +2928,34 @@ function savePrefer() {
     if (d.ok) { metaCfg.preferPlugin = d.preferPlugin || ''; toast(v === '*' ? '优先换源：聚合搜索（最快命中）' : (v ? '优先换源插件：' + v : '已清除优先插件，按音源顺序')); }
   }).catch(function () { toast('保存失败'); });
 }
+function saveFallbackStrategy() {
+  var v = el('fallbackStrategy').value || 'staggered';
+  var label = {
+    staggered: '分批错峰',
+    allParallel: '全候选同时启动',
+    sequential: '严格顺序',
+    preferFirst: '只试第 1 名'
+  }[v] || v;
+  post('/api/meta', { fallbackStrategy: v }).then(function (d) {
+    if (d.ok) { metaCfg.fallbackStrategy = d.fallbackStrategy || 'staggered'; toast('换源策略：' + label); }
+  }).catch(function () { toast('保存失败'); });
+}
 function toggleMeta() {
   // 只改 enabled；其余字段由服务端保持原值（缺省字段不覆盖）
   post('/api/meta', { enabled: !metaCfg.enabled }).then(function (d) {
-    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin }; renderMeta(); }
+    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin, fallbackStrategy: d.fallbackStrategy || 'staggered' }; renderMeta(); }
   }).catch(function () { toast('保存失败'); });
 }
 function toggleMetaFallback() {
   post('/api/meta', { fallbackOtherSource: !metaCfg.fallbackOtherSource }).then(function (d) {
-    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin }; renderMeta(); toast(d.fallbackOtherSource ? '已开启换插件救场' : '已关闭换插件救场'); }
+    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin, fallbackStrategy: d.fallbackStrategy || 'staggered' }; renderMeta(); toast(d.fallbackOtherSource ? '已开启换插件救场' : '已关闭换插件救场'); }
   }).catch(function () { toast('保存失败'); });
 }
 function saveMinPlay() {
   var v = parseInt(el('minPlaySeconds').value || '90', 10);
   if (isNaN(v) || v < 0) v = 0; if (v > 300) v = 300;
   post('/api/meta', { minPlaySeconds: v }).then(function (d) {
-    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin }; renderMeta(); toast(v > 0 ? '已保存：播放不足 ' + d.minPlaySeconds + ' 秒自动换源重播' : '已关闭短播换源'); }
+    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin, fallbackStrategy: d.fallbackStrategy || 'staggered' }; renderMeta(); toast(v > 0 ? '已保存：播放不足 ' + d.minPlaySeconds + ' 秒自动换源重播' : '已关闭短播换源'); }
   }).catch(function () { toast('保存失败'); });
 }
 function loadMeta() {
@@ -2925,7 +2965,8 @@ function loadMeta() {
         enabled: d.enabled != null ? d.enabled : true,
         fallbackOtherSource: d.fallbackOtherSource != null ? d.fallbackOtherSource : true,
         minPlaySeconds: d.minPlaySeconds != null ? d.minPlaySeconds : 90,
-        preferPlugin: d.preferPlugin || ''
+        preferPlugin: d.preferPlugin || '',
+        fallbackStrategy: d.fallbackStrategy || 'staggered'
       };
       renderMeta();
       fillPreferOptions();
