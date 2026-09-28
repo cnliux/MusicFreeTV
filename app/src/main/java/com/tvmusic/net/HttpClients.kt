@@ -16,11 +16,21 @@ import java.util.concurrent.TimeUnit
  */
 object HttpClients {
 
-    /** 标准档：JS 插件网络请求、插件订阅下载等常规用途。 */
+    /**
+     * 标准档：JS 插件网络请求、插件订阅下载等常规用途。
+     *
+     * readTimeout 15s → 10s（M8 替代方案）：read 超时约束的是「两次收字节之间的停滞」，
+     * 收紧后"连上了但不吐数据"的死源能提前 5s 释放所在引擎 lane（插件 httpRequest 在
+     * JS 线程同步阻塞，lane 被占期间该平台后续调用只能排队或快速抛 busy）。
+     *
+     * callTimeout 保持 60s 不动：它与 primary.timeoutMillis = 60s 对齐，
+     * 聚合搜索路径允许单次调用最长 60s；调低会让 OkHttp 提前掐断应用层仍允许的慢请求。
+     * 即"慢但在持续吐数据的源"仍可跑满预算，只有彻底停滞的源被更早放弃。
+     */
     val standard: OkHttpClient by lazy {
         OkHttpClient.Builder()
             .connectTimeout(6, TimeUnit.SECONDS)
-            .readTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
             .callTimeout(60, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
