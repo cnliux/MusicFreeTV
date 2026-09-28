@@ -57,7 +57,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 
-/** 弹层遮罩色：全部 ModalCard 共用一份定义。 */
+/** 弹层遮罩色：全部 ModalCard 共用一份定义。
+ *  遮罩色与主题无关——纯黑半透明是通用语义（任何主题下遮罩都希望是"压暗背景"），
+ *  因此收敛为文件级常量而不走 Theme。 */
 private val ModalScrim = Color(0xAA000000)
 
 /**
@@ -161,6 +163,7 @@ fun Artwork(url: String, modifier: Modifier = Modifier) {
     val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
     val bgBrush = remember {
         Brush.linearGradient(
+            // 封面占位的装饰性渐变底色，与主题无关故不走 ThemeTokens（改动需保持视觉一致）
             listOf(Color(0xFF232C38), Color(0xFF12161D))
         )
     }
@@ -435,8 +438,10 @@ private fun FavDialogBox(
 
 /** 新建收藏夹行：输入名称后点「新建」回调（TV 遥控可调起 IME 输入）。 */
 @Composable
-private fun NewFavListRow(onCreate: (String) -> Unit) {
-    var name by remember { mutableStateOf("") }
+private fun NewFavListRow(initialName: String = "", onCreate: (String) -> Unit) {
+    // 预填名称（如歌单名），但只作为输入框初始值——用户需手动点「新建」才会创建，
+    // 不会在打开弹层时自动新建（满足"预填但不直接新建"的需求）。
+    var name by remember(initialName) { mutableStateOf(initialName) }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -478,6 +483,7 @@ private fun NewFavListRow(onCreate: (String) -> Unit) {
 fun CollectSongsDialog(
     entries: List<org.json.JSONObject>,
     playback: com.tvmusic.data.PlaybackStore,
+    sheetName: String = "",
     onDismiss: () -> Unit
 ) {
     val lists by playback.lists.collectAsState()
@@ -521,7 +527,8 @@ fun CollectSongsDialog(
             }
         }
         lastMsg?.let { Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.primary) }
-        NewFavListRow { name ->
+        // 预填歌单名到新建框（用户可改、也可直接点新建），不自动创建
+        NewFavListRow(initialName = sheetName) { name ->
             val id = playback.addList(name)
             if (id != null) {
                 val added = playback.addAllToList(id, entries)

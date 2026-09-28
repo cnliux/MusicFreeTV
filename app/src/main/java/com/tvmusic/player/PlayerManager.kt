@@ -662,6 +662,15 @@ object PlayerManager {
             }
             // READY 即时间线就绪：命中「试听截断」特征立即提前换源，不等掐断段播完
             if (playbackState == Player.STATE_READY) {
+                // M20：起播耗时（play() → 首次 READY）。playStartMs>0 表示本会话尚未记录，
+                // 记录后清零，seek/暂停恢复再次进 READY 不会重复打点。
+                val t0 = playStartMs
+                if (t0 > 0L) {
+                    playStartMs = 0L
+                    val cost = android.os.SystemClock.elapsedRealtime() - t0
+                    com.tvmusic.core.Metrics.recordPlayLatency(cost)
+                    com.tvmusic.core.Metrics.recordPlayStart()
+                }
                 maybeEarlyCutoffSwitch(player?.duration ?: C.TIME_UNSET)
             }
         }
@@ -804,6 +813,7 @@ object PlayerManager {
         // 插件解析（含阻塞式 JS 调用）放 Default 线程；
         // ExoPlayer 只能在主线程访问，拿到地址后必须切回主线程。
         val my = playSession.incrementAndGet()
+        playStartMs = android.os.SystemClock.elapsedRealtime() // M20：起播耗时起点（含解析+缓冲）
         lastLyricKey = null // 新会话重置：重播/切歌后重试同一首歌时不再因旧 key 被跳过
         if (!forceFallback) {
             fallbackTriedFor = null // 用户主动播放：重新给换源机会
@@ -1731,6 +1741,10 @@ object PlayerManager {
     /** 最近一次已发起歌词请求的条目：onMediaItemTransition 与 play() 末尾都会触发，按条目去重。 */
     @Volatile
     private var lastLyricKey: String? = null
+
+    /** M20：起播耗时起点（play() 发起时刻 elapsedRealtime）。READY 首次命中后记录并清零。 */
+    @Volatile
+    private var playStartMs = 0L
 
     private fun fetchLyric(entry: QueueEntry) {
         val key = entryKeyOf(entry)

@@ -68,7 +68,11 @@ fun RecommendScreen(
         BackTopBar(title = "推荐歌单", onBack = onBack)
 
         if (plugins.isEmpty() && !loading) {
-            EmptyState(error ?: "已启用的插件均不支持推荐歌单")
+            EmptyState(
+                error ?: "已启用的插件均不支持推荐歌单",
+                actionLabel = "返回",
+                onAction = onBack
+            )
             return@Column
         }
 

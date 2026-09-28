@@ -44,7 +44,11 @@ fun TopListScreen(
         BackTopBar(title = "排行榜", onBack = onBack)
 
         if (plugins.isEmpty() && !loading) {
-            EmptyState(error ?: "已启用的插件均不提供排行榜")
+            EmptyState(
+                error ?: "已启用的插件均不提供排行榜",
+                actionLabel = "重试",
+                onAction = { viewModel.retry() }
+            )
             return@Column
         }
 

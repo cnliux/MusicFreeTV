@@ -113,7 +113,7 @@ class TvMusicApp : Application() {
     /** 内存紧张时回收：图片内存缓存清空，播放器预加载缓存由 PlayerManager 自行收缩。 */
     private fun trimMemory() {
         runCatching {
-            coil.ImageLoader(this@TvMusicApp).memoryCache?.clear()
+            com.tvmusic.net.AppImageLoader.trimMemory(this@TvMusicApp)
         }
         runCatching { PlayerManager.onTrimMemory() }
     }

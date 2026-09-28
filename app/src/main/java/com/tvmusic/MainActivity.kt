@@ -88,8 +88,14 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         idleHandler.postDelayed(idleRunnable, com.tvmusic.config.IdleSettings.intervalMs)
         setContent {
-            com.tvmusic.ui.theme.MusicFreeTheme {
-                App()
+            // M7：全站 AsyncImage 走统一 ImageLoader（内存上限 15% + 50MB 磁盘缓存）
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            androidx.compose.runtime.CompositionLocalProvider(
+                coil.compose.LocalImageLoader provides com.tvmusic.net.AppImageLoader.get(ctx)
+            ) {
+                com.tvmusic.ui.theme.MusicFreeTheme {
+                    App()
+                }
             }
         }
     }

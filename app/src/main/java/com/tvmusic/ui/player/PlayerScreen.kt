@@ -422,6 +422,7 @@ private fun NoticePill(text: String?) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .clip(RoundedCornerShape(8.dp))
+                // 半透明黑装饰底色，与主题无关故不走 ThemeTokens（toast 背景希望任何主题下都是压暗层）
                 .background(Color(0xB3000000))
                 .padding(horizontal = 8.dp, vertical = 3.dp)
         )
@@ -656,6 +657,7 @@ private fun RoundCtrlButton(
         modifier = Modifier
             .size(size)
             .clip(CircleShape)
+            // 未填充态背景：半透明白装饰色，与主题无关故不走 ThemeTokens（数值勿改，保持视觉一致）
             .background(if (filled) MaterialTheme.colorScheme.primary else Color(0x22FFFFFF))
             .let { if (initialFocus) it.tvInitialFocus() else it }
             .tvFocus(circle = true)
@@ -720,6 +722,7 @@ private fun SeekBar(
         modifier = modifier
             .height(26.dp)
             .clip(RoundedCornerShape(13.dp))
+            // 轨道底色：半透明白装饰色，与主题无关故不走 ThemeTokens（数值勿改，保持视觉一致）
             .background(Color(0x18FFFFFF))
             .drawBehind { if (focused) drawRect(primary.copy(alpha = 0.25f)) }
             // 左右各让出一个半拇指位：手柄在两端不会溢出被外层 clip 裁掉，

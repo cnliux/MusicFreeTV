@@ -161,7 +161,7 @@ fun SearchScreen(
         ) {
             when (val p = phase) {
                 is SearchPhase.Idle -> HistoryPanel(viewModel, history, query)
-                is SearchPhase.NoResult -> EmptyState(p.message)
+                is SearchPhase.NoResult -> EmptyState(p.message, actionLabel = "重试", onAction = { viewModel.submit() })
                 else -> {
                     val s = p as? SearchPhase.Searching
                     if (s != null && groups.isEmpty()) {

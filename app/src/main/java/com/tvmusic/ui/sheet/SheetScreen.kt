@@ -155,6 +155,7 @@ fun SheetScreen(
         CollectSongsDialog(
             entries = savableEntries,
             playback = playback,
+            sheetName = title, // 预填歌单名到新建收藏夹输入框，不自动新建
             onDismiss = { showCollectAll = false }
         )
     }
