@@ -239,26 +239,11 @@ class PluginRuntime private constructor(
     }
 
     companion object {
-        /**
-         * 并行搜索的初始引擎总数（启动即创建：primary + N-1 extras）。
-         * 3 → 4：常用音源有 8 个，聚合搜索是"全候选并行 + 先到先得"，
-         * 初始池太小时后半批音源要等扩容或排队，首屏结果偏慢。
-         * 引擎创建已在 IO 协程（TvMusicApp 启动重构），不占冷启动主线程。
-         */
-        private const val SEARCH_ENGINES = 4
+        /** 并行搜索的初始引擎总数。Amlogic p230 上 3 台足够，过大会推高 CPU/内存。 */
+        private const val SEARCH_ENGINES = 3
 
-        /**
-         * 引擎池上限：所有现有引擎都忙时按需懒扩容。
-         * 6 → 8：与常用音源数对齐，让每个音源尽量独占一条 lane。
-         *
-         * 背景：插件的 httpRequest 在 JS 线程上同步阻塞执行（M8 评估后决定不改异步桥，
-         * 因为 axios.js 同步返回响应对象、改 Promise 会让未写 await 的第三方插件
-         * 静默拿到 undefined）。跨源阻塞只能靠 lane 隔离缓解——
-         * lane 独占后，慢源的阻塞被限制在自己的引擎线程内，不拖累其他音源。
-         * 代价：懒创建，未用满时不占内存；每台引擎的 OkHttp 已共享（M1），
-         * 增量主要是一个 QuickJS runtime。
-         */
-        private const val MAX_LANES = 8
+        /** 引擎池上限：所有现有引擎都忙时按需懒扩容，最多 6 台。 */
+        private const val MAX_LANES = 6
 
         @Volatile private var INSTANCE: PluginRuntime? = null
 
