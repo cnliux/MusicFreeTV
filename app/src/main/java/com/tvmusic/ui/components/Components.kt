@@ -329,13 +329,13 @@ private fun TabItem(
             .padding(end = 10.dp)
             .focusRequester(fr),
         highlight = isSelected,
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 9.dp)
+        contentPadding = PaddingValues(horizontal = 44.dp, vertical = 18.dp)
     ) { focused ->
         Text(
             text = label,
             color = if (isSelected || focused) MaterialTheme.colorScheme.primary
             else MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 16.sp,
+            fontSize = 22.sp,
             fontWeight = if (isSelected || focused) androidx.compose.ui.text.font.FontWeight.SemiBold
             else androidx.compose.ui.text.font.FontWeight.Normal
         )
@@ -454,7 +454,10 @@ fun GlassButton(
             }
             .tvFocus(focusScale, circle = true, shapeOverride = CircleShape)
             .onFocusChanged { focused = it.isFocused }
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(enabled = enabled, onClick = onClick)
+            // contentPadding 必须挂在链尾（clickable 之后）：内边距区域也属于可点/可聚焦范围，
+            // 之前漏挂导致该参数形同虚设、所有玻璃胶囊比设计小一圈。
+            .padding(contentPadding),
         contentAlignment = Alignment.Center
     ) {
         content(focused)
@@ -473,11 +476,11 @@ fun FilterChip(
         onClick = onClick,
         modifier = modifier,
         highlight = selected,
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
+        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 18.dp)
     ) { focused ->
         Text(
             label,
-            fontSize = 13.sp,
+            fontSize = 19.sp,
             maxLines = 1,
             fontWeight = if (selected || focused) FontWeight.SemiBold else FontWeight.Normal,
             color = when {
@@ -642,8 +645,8 @@ private fun NewFavListRow(initialName: String = "", onCreate: (String) -> Unit) 
                 val n = name.trim()
                 if (n.isNotEmpty()) { onCreate(n); name = "" }
             },
-            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp)
-        ) { _ -> Text("新建", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp) }
+            contentPadding = PaddingValues(horizontal = 34.dp, vertical = 16.dp)
+        ) { _ -> Text("新建", color = MaterialTheme.colorScheme.primary, fontSize = 19.sp) }
     }
 }
 
@@ -896,8 +899,8 @@ fun DialogTextButton(
     GlassButton(
         onClick = onClick,
         modifier = modifier,
-        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 9.dp)
-    ) { _ -> Text(label, color = textColor, fontSize = 14.sp) }
+        contentPadding = PaddingValues(horizontal = 34.dp, vertical = 15.dp)
+    ) { _ -> Text(label, color = textColor, fontSize = 19.sp) }
 }
 
 /* ---------------- 逐行歌词行块：播放页歌词区共用 ---------------- */
@@ -1008,8 +1011,8 @@ fun EmptyState(
             GlassButton(
                 onClick = onAction,
                 modifier = Modifier.padding(top = 20.dp),
-                contentPadding = PaddingValues(horizontal = 24.dp, vertical = 10.dp)
-            ) { _ -> Text(actionLabel, color = MaterialTheme.colorScheme.primary, fontSize = 15.sp) }
+                contentPadding = PaddingValues(horizontal = 40.dp, vertical = 17.dp)
+            ) { _ -> Text(actionLabel, color = MaterialTheme.colorScheme.primary, fontSize = 20.sp) }
         }
     }
 }
@@ -1043,8 +1046,8 @@ fun LoadMoreFooter(
             }
             hasMore -> GlassButton(
                 onClick = onLoadMore,
-                contentPadding = PaddingValues(horizontal = 28.dp, vertical = 10.dp)
-            ) { _ -> Text("加载更多", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp) }
+                contentPadding = PaddingValues(horizontal = 44.dp, vertical = 17.dp)
+            ) { _ -> Text("加载更多", color = MaterialTheme.colorScheme.primary, fontSize = 19.sp) }
             allLoadedText != null -> Text(
                 allLoadedText,
                 fontSize = 12.sp,
