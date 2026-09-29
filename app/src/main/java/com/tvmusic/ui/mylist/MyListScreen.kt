@@ -51,6 +51,7 @@ import com.tvmusic.ui.components.BackTopBar
 import com.tvmusic.ui.components.DialogTextButton
 import com.tvmusic.ui.components.EmptyState
 import com.tvmusic.ui.components.FilterChip
+import com.tvmusic.ui.components.GlassButton
 import com.tvmusic.ui.components.ModalCard
 import com.tvmusic.ui.components.tvFocus
 import org.json.JSONObject
@@ -132,17 +133,13 @@ fun MyListScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (!batchMode) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(MaterialTheme.colorScheme.primary)
-                            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                            .clickable { playAll(list, currentList?.name ?: "播放记录") }
-                            .padding(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
+                    GlassButton(
+                        onClick = { playAll(list, currentList?.name ?: "播放记录") },
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                    ) { _ ->
                         Text(
                             "▶ 播放全部 (${list.size})",
-                            color = MaterialTheme.colorScheme.onPrimary,
+                            color = MaterialTheme.colorScheme.primary,
                             fontSize = 14.sp
                         )
                     }
@@ -150,6 +147,26 @@ fun MyListScreen(
                 SmallAction(if (batchMode) "取消多选" else "批量删除") {
                     batchMode = !batchMode
                     checkedKeys = emptySet()
+                }
+                // 一键清空当前列表（播放历史 / 收藏专辑）：两步确认防误触，
+                // 2.6 秒无操作自动复原（与远程页卸载确认同一套交互惯例）。
+                var confirmClear by rememberSaveable { mutableStateOf(false) }
+                androidx.compose.runtime.LaunchedEffect(confirmClear, selectedListId) {
+                    if (confirmClear) {
+                        kotlinx.coroutines.delay(2600)
+                        confirmClear = false
+                    }
+                }
+                SmallAction(if (confirmClear) "确认清空？" else "一键清空", danger = confirmClear) {
+                    if (confirmClear) {
+                        val lid = selectedListId
+                        if (lid == null) playback.clearHistory()
+                        else playback.removeFromList(lid, list)
+                        checkedKeys = emptySet()
+                        confirmClear = false
+                    } else {
+                        confirmClear = true
+                    }
                 }
                 if (batchMode) {
                     SmallAction("全选") { checkedKeys = list.map(::itemKey).toSet() }
@@ -276,14 +293,17 @@ key = { i, e ->
 private const val QUEUE_ID = "__queue__"
 
 @Composable
-private fun SmallAction(label: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .tvFocus()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 4.dp)
-    ) {
-        Text(label, color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+private fun SmallAction(label: String, danger: Boolean = false, onClick: () -> Unit) {
+    GlassButton(
+        onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+    ) { _ ->
+        Text(
+            label,
+            color = if (danger) androidx.compose.ui.graphics.Color(0xFFFF5A5A)
+            else MaterialTheme.colorScheme.primary,
+            fontSize = 13.sp
+        )
     }
 }
 
@@ -307,8 +327,7 @@ fun AlbumNameDialog(
             DialogTextButton(
                 "确定",
                 onClick = { onConfirm(text) },
-                background = MaterialTheme.colorScheme.primary,
-                textColor = MaterialTheme.colorScheme.onPrimary
+                textColor = MaterialTheme.colorScheme.primary
             )
             DialogTextButton("取消", onClick = onDismiss)
         }
@@ -438,12 +457,10 @@ private fun HistoryRow(
             )
         }
         if (showRemove) {
-            Box(
-                modifier = Modifier
-                    .tvFocus()
-                    .clickable(onClick = onRemove)
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
-            ) {
+            GlassButton(
+                onClick = onRemove,
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+            ) { _ ->
                 Text("移除", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
             }
         }

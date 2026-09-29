@@ -153,9 +153,27 @@ class RemoteConfigService : Service() {
             port = ss.localPort
             hostDisplay = resolveLocalIp()
             Log.i(TAG, "config server on $hostDisplay:$port")
+            var acceptFailures = 0
 
             while (!ss.isClosed) {
-                val sock = try { ss.accept() } catch (_: Exception) { break }
+                /* accept 对单个连接的瞬时失败（Linux ECONNABORTED 等，连接风暴下常见）会抛
+                   SocketException——绝不能因此 break 打死整个监听器（进程活着、端口消失，
+                   远程管理"随机失联"的真因，2026-09-29 探测连接风暴下两次复现）。
+                   只有 ServerSocket 真正关闭（isClosed）才退出；连续失败超限才放弃。 */
+                var sock: Socket? = null
+                try {
+                    sock = ss.accept()
+                } catch (e: Exception) {
+                    if (ss.isClosed) break
+                    acceptFailures++
+                    if (acceptFailures > 50) {
+                        Log.e(TAG, "accept 连续失败 ${acceptFailures} 次，放弃: ${e.message}")
+                        break
+                    }
+                    try { Thread.sleep(20) } catch (_: InterruptedException) { break }
+                    continue
+                }
+                acceptFailures = 0
                 // 每个连接交给线程池并发处理：浏览器会并发多条轮询/封面代理连接，
                 // 单线程串行会让一条慢请求（如 /api/img 代理最坏阻塞十几秒）卡死整个服务。
                 try {
@@ -477,44 +495,53 @@ class RemoteConfigService : Service() {
                 }
                 respond(socket, 200, r.put("kind", kind).put("page", page).toString())
             }
+            // 整张歌单/榜单收藏（2026-09-29 按用户要求恢复）：服务端翻页取全量后批量入库。
+            // 与旧实现的本质区别：入库的是插件 musicList 的**裸条目**（从 musicItems 包装条目取 raw、
+            // 补 platform），不是包装对象本身——旧实现把包装条目灌进收藏夹污染 1498 条后被迫移除。
             method == "POST" && path == "/api/plugin/collect" -> {
-                // 整张歌单/榜单收进收藏夹：对齐 TV 端 SheetScreen 的「全部收藏」，
-                // 由服务端自己翻页取完整歌曲，手机端不必先把整张歌单拉下来。
                 val body = readBody(input, headers)
                 val json = runCatching { JSONObject(body) }.getOrNull()
                 val platform = json?.optString("platform", "") ?: ""
                 val listId = json?.optString("listId", "") ?: ""
+                val kind = json?.optString("kind", "SHEET") ?: "SHEET"
+                val item = json?.optJSONObject("item") ?: JSONObject()
                 if (platform.isBlank() || listId.isBlank()) {
                     respond(socket, 400, JSONObject().put("ok", false).put("error", "missing platform/listId").toString())
                     return
                 }
-                val kind = json?.optString("kind", "SHEET") ?: "SHEET"
-                val item = json?.optJSONObject("item") ?: JSONObject()
-                val maxPages = (json?.optInt("maxPages", 20) ?: 20).coerceIn(1, 50)
-                val cap = (json?.optInt("maxSongs", 3000) ?: 3000).coerceIn(1, 20000)
-                val all = JSONArray()
+                // 翻页取全量（上限 50 页 / 2000 首，防御异常插件无限翻页）
+                val bare = ArrayList<JSONObject>()
                 var pages = 0
-                var isEnd = false
-                while (pages < maxPages && !isEnd && all.length() < cap) {
+                var page = 1
+                var stopped = false
+                while (page <= 50 && bare.size < 2000) {
+                    val r = resolveDetailPage(platform, kind, item, page)
+                    if (r == null) { stopped = bare.isEmpty(); break }
                     pages++
-                    val r = resolveDetailPage(platform, kind, item, pages) ?: break
-                    val m = r.optJSONArray("music") ?: JSONArray()
-                    if (m.length() == 0) break
-                    for (i in 0 until m.length()) {
-                        if (all.length() >= cap) break
-                        all.put(m.optJSONObject(i))
+                    val music = r.optJSONArray("music") ?: JSONArray()
+                    for (i in 0 until music.length()) {
+                        val w = music.optJSONObject(i) ?: continue
+                        val raw = w.optJSONObject("raw") ?: continue
+                        if (raw.optString("platform").isBlank()) raw.put("platform", platform)
+                        bare.add(raw)
                     }
-                    isEnd = r.optBoolean("isEnd", true)
+                    if (r.optBoolean("isEnd", true) || music.length() == 0) {
+                        // 解析"成功"但 0 首也是空歌单（QQ音乐部分歌单插件内回退后返回空，与 APK 浏览行为一致）
+                        if (bare.isEmpty()) stopped = true
+                        break
+                    }
+                    page++
                 }
-                if (all.length() == 0) {
+                if (bare.isEmpty()) {
                     respond(socket, 200, JSONObject().put("ok", false)
-                        .put("error", "该歌单没有取到歌曲").put("pages", pages).toString())
+                        .put("error", if (stopped) "该歌单没有取到歌曲" else "解析歌单失败")
+                        .put("pages", pages).toString())
                     return
                 }
-                val items = (0 until all.length()).mapNotNull { all.optJSONObject(it) }
-                val added = app().playback.addAllToList(listId, items)
+                val added = app().playback.addAllToList(listId, bare)
                 respond(socket, 200, JSONObject().put("ok", true)
-                    .put("added", added).put("total", all.length()).put("pages", pages).toString())
+                    .put("added", added).put("total", bare.size).put("pages", pages)
+                    .put("message", "已收藏 ${added} 首到收藏夹").toString())
             }
             method == "POST" && path == "/api/sync" -> {
                 app().repository.syncAll(force = true)
@@ -820,6 +847,21 @@ class RemoteConfigService : Service() {
                     com.tvmusic.player.PlayerManager.toggleFavorite(listId)
                 respond(socket, 200, JSONObject().put("ok", true).put("favorited", fav).toString())
             }
+            method == "POST" && path == "/api/player/favAt" -> {
+                // 收藏播放队列中的指定歌曲（远程播放页队列行的 ♡）：
+                // raw 不随 2 秒轮询下发（避免每帧携带整队列 raw 撑爆响应），按索引在服务端取。
+                val body = readBody(input, headers)
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                val index = json?.optInt("index", -1) ?: -1
+                val listId = json?.optString("listId", "") ?: ""
+                val entry = com.tvmusic.player.PlayerManager.uiState.value.queue.getOrNull(index)
+                if (entry == null || listId.isBlank()) {
+                    respond(socket, 400, JSONObject().put("ok", false).put("error", "bad index/listId").toString())
+                    return
+                }
+                val fav = app().playback.toggleFavorite(entry.raw, listId)
+                respond(socket, 200, JSONObject().put("ok", true).put("favorited", fav).toString())
+            }
             method == "GET" && path == "/api/player/fav-albums" -> {
                 // 全部收藏专辑 + 当前播放曲目在各专辑中的收藏状态
                 val cur = com.tvmusic.player.PlayerManager.uiState.value.current
@@ -866,6 +908,7 @@ class RemoteConfigService : Service() {
                     .put("fallbackStrategy", com.tvmusic.config.MetaSettings.fallbackStrategy)
                     .put("coverShape", com.tvmusic.config.MetaSettings.playerCoverShape)
                     .put("coverSpinMs", com.tvmusic.config.MetaSettings.playerCoverSpinMs)
+                    .put("coverSpinDir", com.tvmusic.config.MetaSettings.playerCoverSpinDir)
                     .toString())
             }
             method == "POST" && path == "/api/meta" -> {
@@ -901,6 +944,9 @@ class RemoteConfigService : Service() {
                     if (json.has("coverSpinMs")) {
                         com.tvmusic.config.MetaSettings.setCoverSpinMs(json.optInt("coverSpinMs"))
                     }
+                    if (json.has("coverSpinDir")) {
+                        com.tvmusic.config.MetaSettings.setCoverSpinDir(json.optString("coverSpinDir"))
+                    }
                 }
                 respond(socket, 200, JSONObject()
                     .put("ok", true)
@@ -911,6 +957,7 @@ class RemoteConfigService : Service() {
                     .put("fallbackStrategy", com.tvmusic.config.MetaSettings.fallbackStrategy)
                     .put("coverShape", com.tvmusic.config.MetaSettings.playerCoverShape)
                     .put("coverSpinMs", com.tvmusic.config.MetaSettings.playerCoverSpinMs)
+                    .put("coverSpinDir", com.tvmusic.config.MetaSettings.playerCoverSpinDir)
                     .toString())
             }
             // 无操作自动进入播放器页（电视待机显示）：开关 + 时长（分钟）
@@ -1341,9 +1388,25 @@ class RemoteConfigService : Service() {
             .put("themes", arr)
     }
 
+    /** 已收藏歌曲 key 集合（"title\0artist"），缓存跟随 lists StateFlow 引用失效（收藏变更必然 emit 新 List）。 */
+    private var favKeysCache: Set<String>? = null
+    private var favKeysRef: List<com.tvmusic.data.FavList>? = null
+
+    private fun favTitleKeys(): Set<String> {
+        val cur = app().playback.lists.value
+        val cached = favKeysCache
+        if (cached != null && favKeysRef === cur) return cached
+        val s = HashSet<String>()
+        cur.forEach { l -> l.items.forEach { it -> s.add(it.optString("title", "") + '\u0000' + it.optString("artist", "")) } }
+        favKeysCache = s
+        favKeysRef = cur
+        return s
+    }
+
     private fun playerStatusJson(): JSONObject {
         val st = com.tvmusic.player.PlayerManager.uiState.value
         val cur = st.current
+        val favKeys = favTitleKeys()
         val queue = JSONArray()
         st.queue.forEachIndexed { i, e ->
             queue.put(
@@ -1352,6 +1415,7 @@ class RemoteConfigService : Service() {
                     .put("title", e.title)
                     .put("artist", e.artist)
                     .put("album", e.album)
+                    .put("faved", favKeys.contains(e.title + '\u0000' + e.artist))
             )
         }
         return JSONObject()

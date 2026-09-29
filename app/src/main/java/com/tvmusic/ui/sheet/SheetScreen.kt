@@ -79,8 +79,7 @@ fun SheetScreen(
                     DialogTextButton(
                         "▶ 播放全部",
                         onClick = viewModel::playAll,
-                        background = MaterialTheme.colorScheme.primary,
-                        textColor = MaterialTheme.colorScheme.onPrimary
+                        textColor = MaterialTheme.colorScheme.primary
                     )
                     DialogTextButton("♡ 全部收藏", onClick = { showCollectAll = true })
                 }
