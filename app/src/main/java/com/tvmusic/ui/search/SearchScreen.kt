@@ -53,6 +53,7 @@ import com.tvmusic.config.SearchSettings
 import com.tvmusic.data.SearchEntry
 import com.tvmusic.ui.components.EmptyState
 import com.tvmusic.ui.components.FilterChip
+import com.tvmusic.ui.components.GlassButton
 import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
 import com.tvmusic.ui.components.SectionHeader
@@ -253,18 +254,14 @@ private fun ColumnScope.ResultsPanel(
             }
         }
         if (visibleSongs.isNotEmpty()) {
-            Box(
-                modifier = Modifier
-                    .padding(top = 6.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .tvFocus(shapeOverride = RoundedCornerShape(10.dp))
-                    .clickable { showCollectAll = true }
-                    .padding(horizontal = 18.dp, vertical = 9.dp)
-            ) {
+            GlassButton(
+                onClick = { showCollectAll = true },
+                modifier = Modifier.padding(top = 6.dp),
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 9.dp)
+            ) { _ ->
                 Text(
                     "♡ 全部收藏（${visibleSongs.size}）",
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = MaterialTheme.colorScheme.primary,
                     fontSize = 15.sp
                 )
             }
@@ -580,20 +577,20 @@ private sealed interface ResultRow {
     data class End(override val key: String, val count: Int) : ResultRow
 }
 
-/** KTV 主按钮：搜索 / 提交（44dp 高，padding 缩小防溢出）。 */
+/** KTV 主按钮：搜索 / 提交（44dp 高玻璃胶囊，padding 缩小防溢出）。 */
 @Composable
 private fun KtvPrimaryButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(
-        modifier = modifier
-            .height(44.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.primary)
-            .tvFocus(shapeOverride = RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 20.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(label, color = MaterialTheme.colorScheme.onPrimary, fontSize = 16.sp)
+    GlassButton(
+        onClick = onClick,
+        modifier = modifier.height(44.dp),
+        contentPadding = PaddingValues(horizontal = 20.dp)
+    ) { _ ->
+        Text(
+            label,
+            color = MaterialTheme.colorScheme.primary,
+            fontSize = 16.sp,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
+        )
     }
 }
 
@@ -608,19 +605,14 @@ private fun KtvControlLabel(text: String) {
     )
 }
 
-/** KTV 次按钮：加载更多 / 重试。 */
+/** KTV 次按钮：加载更多 / 重试。玻璃胶囊。 */
 @Composable
 private fun KtvSecondaryButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.primaryContainer)
-            .tvFocus(shapeOverride = RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 24.dp, vertical = 10.dp)
-    ) {
-        Text(label, color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 15.sp)
-    }
+    GlassButton(
+        onClick = onClick,
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 10.dp)
+    ) { _ -> Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp) }
 }
 
 @Composable
@@ -636,16 +628,11 @@ private fun HistoryPanel(
         ) {
             Text("搜索历史", fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)
             if (history.isNotEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .padding(start = 16.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                        .clickable(onClick = viewModel::clearHistory)
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text("清空", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp)
-                }
+                GlassButton(
+                    onClick = viewModel::clearHistory,
+                    modifier = Modifier.padding(start = 16.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+                ) { _ -> Text("清空", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp) }
             }
         }
         if (history.isEmpty()) {

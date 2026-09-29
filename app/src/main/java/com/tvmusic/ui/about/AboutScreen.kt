@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -38,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tvmusic.BuildConfig
 import com.tvmusic.ui.components.DialogTextButton
+import com.tvmusic.ui.components.GlassButton
 import com.tvmusic.ui.components.ModalCard
 import com.tvmusic.ui.components.tvFocus
 import kotlinx.coroutines.CoroutineScope
@@ -179,15 +181,14 @@ fun AboutScreen() {
                                 UpdateChecker.downloadApkAsync(scope, context, it.version, onState = { s -> update = s })
                             }
                         },
-                        background = MaterialTheme.colorScheme.primary,
-                        textColor = MaterialTheme.colorScheme.onPrimary,
+                        textColor = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.focusRequester(updateDialogFocus)
                     )
                 }
             ) {}
         }
         AnimatedVisibility(
-            visible = downloading != null && dialogVisible,
+            visible = dlFailed != null && dialogVisible,
             enter = fadeIn() + scaleIn(initialScale = 0.96f),
             exit = fadeOut() + scaleOut(targetScale = 0.96f)
         ) {
@@ -228,8 +229,7 @@ fun AboutScreen() {
                                 UpdateChecker.downloadApkAsync(scope, context, it.version, onState = { s -> update = s })
                             }
                         },
-                        background = MaterialTheme.colorScheme.primary,
-                        textColor = MaterialTheme.colorScheme.onPrimary,
+                        textColor = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.focusRequester(updateDialogFocus)
                     )
                 }
@@ -248,16 +248,12 @@ private fun UpdateButton(state: UpdateState, onClick: () -> Unit) {
         is UpdateState.Ready -> "安装更新 v${state.version}"
         is UpdateState.UpToDate, is UpdateState.Found -> "检查更新"
     }
-    Box(
-        modifier = Modifier
-            .padding(top = 18.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.primary)
-            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 26.dp, vertical = 10.dp)
-    ) {
-        Text(label, color = MaterialTheme.colorScheme.onPrimary, fontSize = 15.sp)
+    GlassButton(
+        onClick = onClick,
+        modifier = Modifier.padding(top = 18.dp),
+        contentPadding = PaddingValues(horizontal = 26.dp, vertical = 10.dp)
+    ) { _ ->
+        Text(label, color = MaterialTheme.colorScheme.primary, fontSize = 15.sp)
     }
 }
 

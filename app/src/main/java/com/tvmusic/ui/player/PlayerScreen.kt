@@ -1,12 +1,5 @@
 package com.tvmusic.ui.player
 
-import androidx.compose.animation.core.Easing
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -35,6 +28,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -61,6 +55,7 @@ import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.contentDescription
@@ -77,6 +72,7 @@ import com.tvmusic.player.PlayerManager
 import com.tvmusic.player.PlayerUiState
 import com.tvmusic.ui.components.Artwork
 import com.tvmusic.ui.components.DialogTextButton
+import com.tvmusic.ui.components.GlassButton
 import com.tvmusic.ui.components.LyricLineBlock
 import com.tvmusic.ui.components.ModalCard
 import com.tvmusic.ui.components.tvFocus
@@ -146,43 +142,47 @@ fun PlayerScreen(onBack: () -> Unit) {
                     val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
                     // 视频模式隐藏大封面：画面已全屏，封面只会在视频上挡视线
                     if (!state.isVideo) {
-                        // 封面形状/转速可远程配置：circle=圆形旋转，square=方形圆角。
-                        // 必须 collectAsState：这两个值远程改完要立刻在播放页生效，
+                        // 封面形状（circle=黑胶圆盘 / square=方形圆角）+ 转速 + 方向，均可远程配置。
+                        // 必须 collectAsState：远程改完要立刻在播放页生效，
                         // 之前用普通 getter 读（非响应式），改完不重组，要等切歌/重进才看得到。
                         val coverShape by com.tvmusic.config.MetaSettings.coverShapeFlow.collectAsState()
                         val coverSpinMs by com.tvmusic.config.MetaSettings.coverSpinMsFlow.collectAsState()
-                        val isCircle = coverShape == com.tvmusic.config.MetaSettings.COVER_SHAPE_CIRCLE
-                        val spinEnabled = coverSpinMs > 0 && isCircle
-                        val infiniteTransition = rememberInfiniteTransition(label = "cover")
-                        val rotation by infiniteTransition.animateFloat(
-                            initialValue = 0f,
-                            targetValue = 360f,
-                            animationSpec = infiniteRepeatable(
-                                tween(durationMillis = coverSpinMs.coerceIn(1, 120_000), easing = LinearEasing),
-                                repeatMode = RepeatMode.Restart
-                            ),
-                            label = "coverRotation"
-                        )
-                        /* 封面三层结构（顺序有讲究，勿调换）：
-                           ① 外层 Box 只挂 tvFocus —— 焦点缩放必须发生在裁剪之外，
-                              否则 1.03 倍放大会把描边顶出裁剪区、边框被切掉一截；
-                           ② 中间 graphicsLayer 只做阴影，阴影形状跟着内层裁剪结果走；
-                           ③ 内层 clip(封面形状) 裁内容，最内层 graphicsLayer 做黑胶旋转。
-                           shapeOverride 交给 tvFocus，描边才会跟圆形/方形一致
-                           （此前它被忽略，圆形封面外面套的仍是圆角矩形描边）。 */
-                        val coverClipShape = if (isCircle) CircleShape else RoundedCornerShape(tokens.radius * 2)
+                        val coverSpinDir by com.tvmusic.config.MetaSettings.coverSpinDirFlow.collectAsState()
+                        val isCircle = coverShape != com.tvmusic.config.MetaSettings.COVER_SHAPE_SQUARE
+                        val spinEnabled = coverSpinMs > 0
+                        // 帧驱动旋转，不用 rememberInfiniteTransition：后者的 animationSpec 只在首次
+                        // 组合时固定，远程改转速/方向后动画不重启（"旋转耗时无效"的根因）。
+                        // 每帧按耗时推进角度，暂停冻结（从当前角度继续），时长/方向改动即时生效。
+                        val rotation = remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+                        val spinDirFactor = if (coverSpinDir == com.tvmusic.config.MetaSettings.SPIN_DIR_CCW) -1f else 1f
+                        LaunchedEffect(coverSpinMs, coverSpinDir, spinEnabled, state.isPlaying) {
+                            if (!spinEnabled || !state.isPlaying) return@LaunchedEffect
+                            val msPerTurn = coverSpinMs.coerceIn(1, 120_000).toFloat()
+                            var last = androidx.compose.runtime.withFrameNanos { it }
+                            while (true) {
+                                androidx.compose.runtime.withFrameNanos { now ->
+                                    val dt = now - last
+                                    last = now
+                                    rotation.floatValue = (rotation.floatValue + dt / (msPerTurn * 1_000_000f) * 360f * spinDirFactor) % 360f
+                                }
+                            }
+                        }
+                        val coverShapeShape = if (isCircle) CircleShape else RoundedCornerShape(16.dp)
+                        /* 封面裁剪用 Modifier.clip（draw 阶段 outline 裁剪），不再用 graphicsLayer 的
+                           shape+clip——后者在 Android 7 真机上会整个失效（2026-09-29 实测：圆形遮罩
+                           不生效，封面渲染成倾斜的方形圆角）。方形圆角模式同样旋转整个封面内容。 */
                         Box(
                             modifier = Modifier
                                 .size(300.dp)
-                                .tvFocus(1.03f, circle = isCircle, shapeOverride = coverClipShape)
+                                .tvFocus(1.03f, circle = isCircle, shapeOverride = coverShapeShape)
                         ) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .graphicsLayer { shadowElevation = 26.dp.toPx() }
-                                    .clip(coverClipShape)
+                                    .shadow(12.dp, coverShapeShape)
+                                    .clip(coverShapeShape)
                                     .graphicsLayer {
-                                        rotationZ = if (spinEnabled && state.isPlaying) rotation else 0f
+                                        rotationZ = if (spinEnabled && state.isPlaying) rotation.floatValue else 0f
                                     }
                                     .clickable(onClick = onBack)
                             ) {
@@ -489,12 +489,7 @@ private fun FavAlbumDialog(
     // 初始焦点给第一个收藏夹行（主要交互）；列表为空时 ModalCard 自动退回容器兜底
     val firstListFocus = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
     ModalCard(title = "收藏到…", onDismiss = onDismiss, initialFocus = firstListFocus, bottomBar = {
-        DialogTextButton(
-            "＋ 新建专辑",
-            onNewAlbum,
-            MaterialTheme.colorScheme.primaryContainer,
-            MaterialTheme.colorScheme.onPrimaryContainer
-        )
+        DialogTextButton("＋ 新建专辑", onNewAlbum, MaterialTheme.colorScheme.primary)
         DialogTextButton("关闭", onDismiss)
     }) {
         LazyColumn(modifier = Modifier.height(260.dp)) {
@@ -641,22 +636,17 @@ private fun EqDialog(state: PlayerUiState, onDismiss: () -> Unit) {
     }
 }
 
-/** 音效弹层的步进小按钮（低音 −/＋）。 */
+/** 音效弹层的步进小按钮（低音 −/＋）：玻璃胶囊。 */
 @Composable
 private fun EqStepButton(label: String, desc: String, onClick: () -> Unit) {
-Box(
-         modifier = Modifier
-             .clip(RoundedCornerShape(8.dp))
-             .background(MaterialTheme.colorScheme.surfaceVariant)
-             .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-             .clickable(onClick = onClick)
-             .padding(horizontal = 14.dp, vertical = 6.dp)
-             .semantics { contentDescription = desc },
-        contentAlignment = Alignment.Center
-    ) { Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp) }
+    GlassButton(
+        onClick = onClick,
+        modifier = Modifier.semantics { contentDescription = desc },
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
+    ) { _ -> Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp) }
 }
 
-/** 圆形控制按钮：filled=主色实心（播放/暂停），否则半透明白底；焦点样式走统一 tvFocus。
+/** 控制按钮：玻璃胶囊（无底色符号+玻璃底座），filled=主色符号（播放/暂停）；焦点样式走统一 tvFocus。
  *  initialFocus=true 时请求初始焦点（H10：播放页进入后遥控器立即可操作，不再"无响应"）。 */
 @Composable
 private fun RoundCtrlButton(
@@ -670,21 +660,18 @@ private fun RoundCtrlButton(
 ) {
     // 初始焦点抢占与焦点兜底注册共用同一个 FocusRequester（同节点双挂只有最后一个生效）
     val fr = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
-    Box(
+    GlassButton(
+        onClick = onClick,
         modifier = Modifier
             .size(size)
-            .clip(CircleShape)
-            // 未填充态背景：半透明白装饰色，与主题无关故不走 ThemeTokens（数值勿改，保持视觉一致）
-            .background(if (filled) MaterialTheme.colorScheme.primary else Color(0x22FFFFFF))
             .let { if (initialFocus) it.tvInitialFocus(fr).tvFocusFallback(fr) else it }
-            .tvFocus(circle = true)
-            .clickable(onClick = onClick)
             .semantics { contentDescription = desc },
-        contentAlignment = Alignment.Center
-    ) {
+        contentPadding = PaddingValues(0.dp)
+    ) { _ ->
         Text(
             symbol,
-            color = if (filled) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+            // 主按钮（播放/暂停）用主色符号强调，其余常规色
+            color = if (filled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
             fontSize = iconSize
         )
     }

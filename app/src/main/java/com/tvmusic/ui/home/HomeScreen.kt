@@ -47,6 +47,7 @@ import com.tvmusic.player.PlayerManager
 import com.tvmusic.ui.components.Artwork
 import com.tvmusic.ui.components.EmptyState
 import com.tvmusic.ui.components.ErrorBox
+import com.tvmusic.ui.components.GlassButton
 import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
 import com.tvmusic.ui.components.FilterChip
@@ -210,8 +211,7 @@ fun HomeScreen(
                         resumeDismissed = true
                         PlayerManager.resumePlayback()
                     },
-                    background = MaterialTheme.colorScheme.primary,
-                    textColor = MaterialTheme.colorScheme.onPrimary,
+                    textColor = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.focusRequester(resumeButtonFocus)
                 )
             }
@@ -472,14 +472,10 @@ private fun SectionWithMore(title: String, onMore: () -> Unit) {
             color = MaterialTheme.colorScheme.onBackground,
             modifier = Modifier.weight(1f).padding(start = 10.dp)
         )
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(16.dp))
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f))
-                .tvFocus(shapeOverride = RoundedCornerShape(16.dp))
-                .clickable(onClick = onMore)
-                .padding(horizontal = 16.dp, vertical = 7.dp)
-        ) {
+        GlassButton(
+            onClick = onMore,
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp)
+        ) { _ ->
             Text("更多 ›", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
         }
     }

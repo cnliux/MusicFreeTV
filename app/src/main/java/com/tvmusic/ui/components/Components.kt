@@ -1,5 +1,8 @@
 package com.tvmusic.ui.components
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -25,8 +29,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -42,10 +49,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
@@ -208,6 +217,8 @@ private fun DrawScope.focusCornerRadius(
 ): CornerRadius {
     when {
         circle -> return CornerRadius(minDimension / 2f)
+        // RectangleShape=纯文字按钮的直角焦点框（按钮本体无圆角，焦点框跟随无圆角）
+        shapeOverride === androidx.compose.ui.graphics.RectangleShape -> return CornerRadius.Zero
         shapeOverride is RoundedCornerShape -> {
             // RoundedCornerShape 的圆角可能是 Dp 或 Percent，只处理 Dp（项目内只用 Dp）
             val dp = shapeOverride.topStart as? Dp
@@ -312,25 +323,20 @@ private fun TabItem(
         if (slot != null) slot.value = fr
         onDispose { if (slot != null && slot.value === fr) slot.value = prev }
     }
-    Box(
+    GlassButton(
+        onClick = { onSelect(key) },
         modifier = Modifier
             .padding(end = 10.dp)
-            .clip(RoundedCornerShape(20.dp))
-            .background(
-                if (isSelected) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)
-            )
-            .focusRequester(fr)
-            .tvFocus(shapeOverride = RoundedCornerShape(20.dp))
-            .clickable { onSelect(key) }
-            .padding(horizontal = 24.dp, vertical = 9.dp)
-    ) {
+            .focusRequester(fr),
+        highlight = isSelected,
+        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 9.dp)
+    ) { focused ->
         Text(
             text = label,
-            color = if (isSelected) MaterialTheme.colorScheme.onPrimary
+            color = if (isSelected || focused) MaterialTheme.colorScheme.primary
             else MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 16.sp,
-            fontWeight = if (isSelected) androidx.compose.ui.text.font.FontWeight.SemiBold
+            fontWeight = if (isSelected || focused) androidx.compose.ui.text.font.FontWeight.SemiBold
             else androidx.compose.ui.text.font.FontWeight.Normal
         )
     }
@@ -358,7 +364,104 @@ fun SectionHeader(title: String) {
     }
 }
 
-/** 通用筛选 chip：胶囊形，选中=主色填充，聚焦=白边（tvFocus）。 */
+/* ---------------- 玻璃拟态胶囊按钮（T 方案：全 App 按钮统一底座） ---------------- */
+
+/**
+ * T 方案玻璃胶囊按钮：磨砂玻璃感 + 胶囊圆角 + 顶部高光缝 + 聚焦扫光。
+ * Compose 无 CSS backdrop-filter（实时背景取景），玻璃底用半透明白斜向渐变模拟——
+ * 播放页背景本就是 blur(40dp) 封面，胶囊透出底层光斑即磨砂观感；普通深色页面
+ * 上呈现为细腻雾面胶囊。聚焦视觉沿用 tvFocus（主色描边+发光+缩放），玻璃同步
+ * 增亮；聚焦瞬间一道高光从左扫到右（T 方案签名效果，对齐设计稿 tv-buttons.html）。
+ * highlight=true 常亮（页签选中态等非焦点高亮场景）。
+ */
+@Composable
+fun GlassButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    highlight: Boolean = false,
+    focusScale: Float = 1.07f,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 22.dp, vertical = 12.dp),
+    content: @Composable androidx.compose.foundation.layout.BoxScope.(focused: Boolean) -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    val lit = focused || highlight
+    // 扫光：聚焦触发一次；t 为高光条左缘归一位置（-0.6 入左界 → 1.2 出右界）
+    val shine = remember { Animatable(-0.6f) }
+    LaunchedEffect(focused) {
+        if (focused) {
+            shine.snapTo(-0.6f)
+            shine.animateTo(1.2f, tween(550, easing = LinearEasing))
+        }
+    }
+    Box(
+        modifier = modifier
+            .drawBehind {
+                val b = if (lit) 1.55f else 1f
+                // 玻璃底：120° 斜向渐变
+                drawRoundRect(
+                    brush = Brush.linearGradient(
+                        colors = listOf(
+                            Color.White.copy(alpha = 0.14f * b),
+                            Color.White.copy(alpha = 0.05f * b),
+                            Color.White.copy(alpha = 0.10f * b)
+                        ),
+                        start = Offset.Zero,
+                        end = Offset(size.width, size.height * 0.45f)
+                    ),
+                    cornerRadius = CornerRadius(size.height / 2f)
+                )
+                // 顶部高光缝（两端收进左右弧区，不露到胶囊外）
+                drawLine(
+                    color = Color.White.copy(alpha = 0.30f * b),
+                    start = Offset(size.height / 2f, 0.75f),
+                    end = Offset(size.width - size.height / 2f, 0.75f),
+                    strokeWidth = 1.dp.toPx()
+                )
+            }
+            .border(1.dp, Color.White.copy(alpha = if (lit) 0.34f else 0.16f), CircleShape)
+            .drawWithContent {
+                drawContent()
+                // 扫光高光条：裁剪进胶囊形，聚焦瞬间从左扫到右
+                val t = shine.value
+                if (t > -0.6f && t < 1.2f) {
+                    clipPath(
+                        Path().apply {
+                            addRoundRect(
+                                RoundRect(
+                                    rect = Rect(Offset.Zero, size),
+                                    cornerRadius = CornerRadius(size.height / 2f)
+                                )
+                            )
+                        }
+                    ) {
+                        val w = size.width * 0.45f
+                        val x = size.width * t
+                        drawRect(
+                            brush = Brush.horizontalGradient(
+                                colors = listOf(
+                                    Color.Transparent,
+                                    Color.White.copy(alpha = 0.35f),
+                                    Color.Transparent
+                                ),
+                                startX = x, endX = x + w
+                            ),
+                            topLeft = Offset(x, 0f),
+                            size = Size(w, size.height)
+                        )
+                    }
+                }
+            }
+            .tvFocus(focusScale, circle = true, shapeOverride = CircleShape)
+            .onFocusChanged { focused = it.isFocused }
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        content(focused)
+    }
+}
+
+/** 通用筛选 chip：玻璃胶囊（T 方案），选中=主色文字+加粗+玻璃常亮。 */
 @Composable
 fun FilterChip(
     label: String,
@@ -366,23 +469,22 @@ fun FilterChip(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(
-                if (selected) MaterialTheme.colorScheme.primary
-                else MaterialTheme.colorScheme.surface
-            )
-            .tvFocus(shapeOverride = RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 10.dp)
-    ) {
+    GlassButton(
+        onClick = onClick,
+        modifier = modifier,
+        highlight = selected,
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
+    ) { focused ->
         Text(
             label,
             fontSize = 13.sp,
             maxLines = 1,
-            color = if (selected) MaterialTheme.colorScheme.onPrimary
-            else MaterialTheme.colorScheme.onSurfaceVariant
+            fontWeight = if (selected || focused) FontWeight.SemiBold else FontWeight.Normal,
+            color = when {
+                selected -> MaterialTheme.colorScheme.primary
+                focused -> MaterialTheme.colorScheme.onSurface
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            }
         )
     }
 }
@@ -535,17 +637,13 @@ private fun NewFavListRow(initialName: String = "", onCreate: (String) -> Unit) 
                 cursorColor = MaterialTheme.colorScheme.primary
             )
         )
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.primary)
-                .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                .clickable {
-                    val n = name.trim()
-                    if (n.isNotEmpty()) { onCreate(n); name = "" }
-                }
-                .padding(horizontal = 18.dp, vertical = 10.dp)
-        ) { Text("新建", color = MaterialTheme.colorScheme.onPrimary, fontSize = 14.sp) }
+        GlassButton(
+            onClick = {
+                val n = name.trim()
+                if (n.isNotEmpty()) { onCreate(n); name = "" }
+            },
+            contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp)
+        ) { _ -> Text("新建", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp) }
     }
 }
 
@@ -786,26 +884,20 @@ fun ModalCard(
     }
 }
 
-/** 弹层内的文字按钮（统一焦点/圆角/配色）。 */
+/** 弹层内的文字按钮：玻璃胶囊（T 方案），主操作用 textColor=primary 强调。 */
 @Composable
 fun DialogTextButton(
     label: String,
     onClick: () -> Unit,
-    background: Color = MaterialTheme.colorScheme.surfaceVariant,
     textColor: Color = MaterialTheme.colorScheme.onSurface,
     /** 供调用方把该按钮设为弹层的初始焦点目标。 */
     modifier: Modifier = Modifier
 ) {
-    Box(
-        modifier = modifier
-             .clip(RoundedCornerShape(8.dp))
-             .background(background)
-             .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-             .clickable(onClick = onClick)
-             .padding(horizontal = 18.dp, vertical = 9.dp)
-    ) {
-        Text(label, color = textColor, fontSize = 14.sp)
-    }
+    GlassButton(
+        onClick = onClick,
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 9.dp)
+    ) { _ -> Text(label, color = textColor, fontSize = 14.sp) }
 }
 
 /* ---------------- 逐行歌词行块：播放页歌词区共用 ---------------- */
@@ -913,17 +1005,11 @@ fun EmptyState(
             lineHeight = 22.sp
         )
         if (actionLabel != null && onAction != null) {
-            Box(
-                modifier = Modifier
-                    .padding(top = 20.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.primaryContainer)
-                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                    .clickable(onClick = onAction)
-                    .padding(horizontal = 24.dp, vertical = 10.dp)
-            ) {
-                Text(actionLabel, color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 15.sp)
-            }
+            GlassButton(
+                onClick = onAction,
+                modifier = Modifier.padding(top = 20.dp),
+                contentPadding = PaddingValues(horizontal = 24.dp, vertical = 10.dp)
+            ) { _ -> Text(actionLabel, color = MaterialTheme.colorScheme.primary, fontSize = 15.sp) }
         }
     }
 }
@@ -953,23 +1039,12 @@ fun LoadMoreFooter(
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(error, fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
-                DialogTextButton(
-                    "重试",
-                    onLoadMore,
-                    MaterialTheme.colorScheme.primaryContainer,
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                )
+                DialogTextButton("重试", onLoadMore, MaterialTheme.colorScheme.primary)
             }
-            hasMore -> Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.primaryContainer)
-                    .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-                    .clickable(onClick = onLoadMore)
-                    .padding(horizontal = 28.dp, vertical = 10.dp)
-            ) {
-                Text("加载更多", color = MaterialTheme.colorScheme.onPrimaryContainer, fontSize = 14.sp)
-            }
+            hasMore -> GlassButton(
+                onClick = onLoadMore,
+                contentPadding = PaddingValues(horizontal = 28.dp, vertical = 10.dp)
+            ) { _ -> Text("加载更多", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp) }
             allLoadedText != null -> Text(
                 allLoadedText,
                 fontSize = 12.sp,

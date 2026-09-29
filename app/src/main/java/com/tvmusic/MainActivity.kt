@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -52,6 +53,7 @@ import androidx.navigation.navArgument
 import com.tvmusic.core.TvMusicApp
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.ui.components.AppTitleBar
+import com.tvmusic.ui.components.GlassButton
 import com.tvmusic.ui.components.tvFocus
 import com.tvmusic.ui.home.HomeScreen
 import com.tvmusic.ui.home.HomeViewModel
@@ -389,8 +391,7 @@ class MainActivity : ComponentActivity() {
                             )
                             (context as? android.app.Activity)?.finishAffinity()
                         },
-                        background = MaterialTheme.colorScheme.primary,
-                        textColor = MaterialTheme.colorScheme.onPrimary,
+                        textColor = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.focusRequester(exitButtonFocus)
                     )
                 }
@@ -511,22 +512,19 @@ private fun MiniPlayerBar(
                 )
             }
 
-            // 右：操作按钮（白色图标，播放键大一圈）
+            // 右：操作按钮（玻璃胶囊，播放键大一圈）
             MiniControl("⏮", desc = "上一首", onClick = onPrev)
-            Box(
+            GlassButton(
+                onClick = onToggle,
                 modifier = Modifier
                     .padding(horizontal = 10.dp)
                     .size(52.dp)
-                    .clip(CircleShape)
-                    .background(primary)
-                    .tvFocus(circle = true)
-                    .clickable(onClick = onToggle)
                     .semantics { contentDescription = if (isPlaying) "暂停" else "播放" },
-                contentAlignment = Alignment.Center
-            ) {
+                contentPadding = PaddingValues(0.dp)
+            ) { _ ->
                 Text(
                     if (isPlaying) "⏸" else "▶",
-                    color = MaterialTheme.colorScheme.onPrimary,
+                    color = MaterialTheme.colorScheme.primary,
                     fontSize = 22.sp
                 )
             }
@@ -537,16 +535,12 @@ private fun MiniPlayerBar(
 
 @Composable
 private fun MiniControl(symbol: String, desc: String, onClick: () -> Unit) {
-    Box(
+    GlassButton(
+        onClick = onClick,
         modifier = Modifier
             .size(44.dp)
-            .clip(CircleShape)
-            .tvFocus(circle = true)
-            .clickable(onClick = onClick)
             .semantics { contentDescription = desc },
-        contentAlignment = Alignment.Center
-    ) {
-        Text(symbol, color = androidx.compose.ui.graphics.Color.White, fontSize = 22.sp)
-    }
+        contentPadding = PaddingValues(0.dp)
+    ) { _ -> Text(symbol, color = androidx.compose.ui.graphics.Color.White, fontSize = 22.sp) }
 }
 }

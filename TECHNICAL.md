@@ -99,7 +99,9 @@ MusicFreeTV/
 1. **外层** `.size(300.dp).tvFocus(1.03f, circle = isCircle, shapeOverride = coverClipShape)`——焦点缩放必须在此层，**放在裁剪层之外**，否则描边被 `clip` 切掉。
 2. **阴影层** `.graphicsLayer { shadowElevation = 26.dp }`。
 3. **裁剪层** `.clip(coverClipShape)`，`coverClipShape` 为 `CircleShape` 或 `RoundedCornerShape(tokens.radius * 2)`（`isCircle` 由 `MetaSettings.coverShapeState` 驱动）。
-4. **旋转层** `.graphicsLayer { rotationZ = if (spinEnabled && state.isPlaying) rotation else 0f }`，`spinEnabled = isCircle && coverSpinMs > 0`——黑胶旋转独立成层，不受裁剪与阴影影响。
+4. **旋转层** `.graphicsLayer { rotationZ = if (spinEnabled && state.isPlaying) rotation else 0f }`——黑胶旋转独立成层，不受裁剪与阴影影响。`spinEnabled = coverSpinMs > 0`（**circle / square 都转**）。
+
+**旋转实现（帧驱动，勿回退 rememberInfiniteTransition）**：`LaunchedEffect(coverSpinMs, coverSpinDir, spinEnabled, isPlaying)` + `withFrameNanos` 每帧推进 `mutableFloatStateOf` 角度（`dt / (msPerTurn*1e6) * 360 * spinDirFactor`，ccw 为 -1）。原因：`rememberInfiniteTransition` 的 animationSpec 只在**首次组合时固定**，远程改转速/方向后动画不重启——这就是「旋转耗时改了无效」的根因。帧驱动下暂停冻结（从当前角度继续）、时长/方向改动即时生效。方向持久化在 `MetaSettings.coverSpinDir`（cw/ccw，非法值忽略），`/api/meta` GET/POST 均带 `coverSpinDir`，远程管理封面设置卡有方向下拉。
 
 > 变量命名注意：外层状态是 `val coverShape by ...collectAsState()`，局部形状变量必须叫 `coverClipShape`，否则 `Conflicting declarations`。
 
@@ -107,11 +109,12 @@ MusicFreeTV/
 
 `Components.kt` 的 `tvFocus(scaleOverride, circle, shapeOverride)`：
 
-- 焦点描边圆角由 `DrawScope.focusCornerRadius(shapeOverride, circle, themeRadius, minDimension)` 推导：`circle = true` → 半径 = 短边/2（正圆）；否则取 `RoundedCornerShape.topStart` 的 Dp 圆角；再否则退回主题 `tokens.radius`。
+- 焦点描边圆角由 `DrawScope.focusCornerRadius(shapeOverride, circle, themeRadius, minDimension)` 推导：`circle = true` → 半径 = 短边/2（正圆）；`shapeOverride === RectangleShape` → `CornerRadius.Zero`（**直角焦点框**，纯文字按钮用）；否则取 `RoundedCornerShape.topStart` 的 Dp 圆角；再否则退回主题 `tokens.radius`。
 - 该 helper 声明为 **`DrawScope` 扩展**以拿到 `Density` 做 `Dp.toPx()`；写成普通函数会报 `Unresolved reference 'toPx'`。
 - helper 内**不要**对 `CircleShape` 做 `is` 判断（该符号在 `Components.kt` 中无法解析），圆形统一由 `circle: Boolean` 传入。
 - 发光用 `drawIntoCanvas` + `nativeCanvas.drawRoundRect`；边框用 `drawRoundRect(style = Stroke)`，两者共用同一 `radius`。
 - 焦点视觉全部由 Compose 自绘（主题化边框 + 发光），不依赖平台高亮；`themes.xml` 里 `android:defaultFocusHighlightEnabled=false` 仅 API 26+ 生效，Android 7 靠「焦点永不落在全屏节点上」根治白圈。
+- **按钮纯文字化约定（2026-09-29，用户指令）**：全部按钮**无底色 / 无圆角 / 无阴影**——删 `.clip(...)` + `.background(...)`，焦点框传 `shapeOverride = RectangleShape`（直角），主操作按钮靠**文字 primary 色**（必要时 SemiBold）强调，不再靠填充底色。涉及组件见 AGENTS.md 同日章节。例外：颜色选择器（需选中反馈底色）、歌曲行/卡片（列表项非按钮）、封面阴影。焦点视觉（tvFocus 边框/发光）**必须保留**——TV 焦点红线。
 
 ### TV 焦点三层兜底
 
@@ -192,14 +195,17 @@ POST /api/plugin/toplists → getTopLists → { groups:[{title, boards:[…]}] }
 POST /api/plugin/tags     → getRecommendSheetTags → { tags:[{id,title}] }
 POST /api/plugin/sheets   → getRecommendSheetsByTag(tag, page) → { sheets, isEnd, hasMore }
 POST /api/plugin/detail   → 歌单/榜单详情 → { header, music, isEnd, hasMore, tried }
-POST /api/plugin/collect  → 整张歌单收藏（服务端自己翻页取全量再 addAllToList）
 GET/POST /api/idle        → 待机显示（enabled + minutes）
-GET/POST /api/meta        → 封面形状 / 黑胶转速等播放显示配置
+GET/POST /api/meta        → 封面形状 / 黑胶转速 / 旋转方向（coverSpinDir: cw|ccw）等播放显示配置
 POST /api/play、/api/play/queue、/api/player/{playpause|next|prev|seek|volume|skip|mode}
 GET  /api/player、/api/lyric、/api/themes
+     /api/player 队列条目带 faved 标记（"title\0artist" 命中任一收藏专辑即 true，缓存跟随 lists Flow 引用失效），SSE 帧同源
 POST /api/theme、/api/lyric、/api/export、/api/import
 GET  /api/fav/lists、/api/fav/items、/api/player/fav-albums
 POST /api/fav/{lists/create|lists/rename|lists/remove|toggle|play}
+POST /api/player/favAt   → 按播放队列索引收藏当前曲（{index, listId}，raw 不随轮询下发）
+GET/POST /api/history、/api/history/clear → 播放历史（最多 100 条，供收藏页「🕘 历史」虚拟专辑）
+POST /api/plugin/collect → 整张歌单/榜单收藏（{platform, kind, item, listId}，服务端翻页取全量**裸 raw 条目**批量入库，主键去重；上限 50 页/2000 首）
 GET  /api/img?url=...     → 图片代理（绕过图床防盗链，控制台封面可见）
 ```
 

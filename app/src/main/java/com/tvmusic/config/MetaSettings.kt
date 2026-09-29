@@ -21,6 +21,7 @@ object MetaSettings {
     private const val KEY_FAST_BATCH = "fallbackFastBatch"
     private const val KEY_COVER_SHAPE = "coverShape"
     private const val KEY_COVER_SPIN_MS = "coverSpinMs"
+    private const val KEY_COVER_SPIN_DIR = "coverSpinDir"
     private const val KEY_HEALTH_WEIGHT = "fallbackHealthWeight"
     private const val KEY_SPEC_PRELOAD = "fallbackSpecPreload"
 
@@ -90,15 +91,20 @@ object MetaSettings {
     @Volatile
     private var _fallbackStrategy: String = STRATEGY_STAGGERED
 
-    /** 播放页封面形状：circle=圆形旋转，square=方形圆角。 */
+    /** 播放页封面形状：circle=黑胶圆盘，square=方形圆角。两者均支持旋转。 */
     const val COVER_SHAPE_CIRCLE = "circle"
     const val COVER_SHAPE_SQUARE = "square"
     const val DEFAULT_COVER_SHAPE = COVER_SHAPE_CIRCLE
     const val DEFAULT_COVER_SPIN_MS = 10_000
 
+    /** 封面旋转方向：cw=顺时针，ccw=逆时针。 */
+    const val SPIN_DIR_CW = "cw"
+    const val SPIN_DIR_CCW = "ccw"
+    const val DEFAULT_COVER_SPIN_DIR = SPIN_DIR_CW
+
     @Volatile
     private var coverShape: String = DEFAULT_COVER_SHAPE
-    /** 封面形状/转速的响应式副本：远程改设置后要立刻在播放页生效，必须可观察。 */
+    /** 封面形状/转速/方向的响应式副本：远程改设置后要立刻在播放页生效，必须可观察。 */
     private val coverShapeState = kotlinx.coroutines.flow.MutableStateFlow(DEFAULT_COVER_SHAPE)
     val coverShapeFlow: kotlinx.coroutines.flow.StateFlow<String> get() = coverShapeState
 
@@ -106,6 +112,11 @@ object MetaSettings {
     private val coverSpinMs = java.util.concurrent.atomic.AtomicInteger(DEFAULT_COVER_SPIN_MS)
     private val coverSpinMsState = kotlinx.coroutines.flow.MutableStateFlow(DEFAULT_COVER_SPIN_MS)
     val coverSpinMsFlow: kotlinx.coroutines.flow.StateFlow<Int> get() = coverSpinMsState
+
+    @Volatile
+    private var coverSpinDir: String = DEFAULT_COVER_SPIN_DIR
+    private val coverSpinDirState = kotlinx.coroutines.flow.MutableStateFlow(DEFAULT_COVER_SPIN_DIR)
+    val coverSpinDirFlow: kotlinx.coroutines.flow.StateFlow<String> get() = coverSpinDirState
 
     val fallbackMode: String get() = _fallbackMode
 
@@ -120,6 +131,7 @@ object MetaSettings {
 
     val playerCoverShape: String get() = coverShape
     val playerCoverSpinMs: Int get() = coverSpinMs.get()
+    val playerCoverSpinDir: String get() = coverSpinDir
 
     fun init(context: Context) {
         appContext = context.applicationContext
@@ -138,6 +150,8 @@ object MetaSettings {
         val spin = (sp?.getInt(KEY_COVER_SPIN_MS, DEFAULT_COVER_SPIN_MS) ?: DEFAULT_COVER_SPIN_MS).coerceIn(0, 120_000)
         coverSpinMs.set(spin)
         coverSpinMsState.value = spin
+        coverSpinDir = sp?.getString(KEY_COVER_SPIN_DIR, DEFAULT_COVER_SPIN_DIR) ?: DEFAULT_COVER_SPIN_DIR
+        coverSpinDirState.value = coverSpinDir
     }
 
     fun setFallbackMode(mode: String) {
@@ -195,6 +209,16 @@ object MetaSettings {
         coverSpinMsState.value = v
         appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             ?.edit()?.putInt(KEY_COVER_SPIN_MS, v)?.apply()
+    }
+
+    /** 封面旋转方向：仅接受 cw/ccw，其他值静默忽略（保留旧值）。 */
+    fun setCoverSpinDir(dir: String) {
+        val v = dir.trim()
+        if (v != SPIN_DIR_CW && v != SPIN_DIR_CCW) return
+        coverSpinDir = v
+        coverSpinDirState.value = v
+        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            ?.edit()?.putString(KEY_COVER_SPIN_DIR, v)?.apply()
     }
 
     fun setEnabled(on: Boolean) {

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -40,6 +41,7 @@ import androidx.compose.ui.unit.sp
 import com.tvmusic.plugin.PlatformHealth
 import kotlinx.coroutines.delay
 import com.tvmusic.ui.components.ErrorBox
+import com.tvmusic.ui.components.GlassButton
 import com.tvmusic.ui.components.SectionHeader
 import com.tvmusic.ui.components.tvFocus
 
@@ -589,20 +591,14 @@ private fun healthDotColor(h: PlatformHealth?): Color {
 
 @Composable
 fun ActionButton(label: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .semantics { contentDescription = label }
-            .clickable(onClick = onClick)
-            .background(
-                MaterialTheme.colorScheme.primaryContainer,
-                RoundedCornerShape(8.dp)
-            )
-            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-             .padding(horizontal = 16.dp, vertical = 9.dp)
-    ) {
+    GlassButton(
+        onClick = onClick,
+        modifier = Modifier.semantics { contentDescription = label },
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 9.dp)
+    ) { _ ->
         Text(
             label,
-            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            color = MaterialTheme.colorScheme.primary,
             fontSize = 14.sp
         )
     }
@@ -611,16 +607,13 @@ fun ActionButton(label: String, onClick: () -> Unit) {
 /** 字号加减按钮。 */
 @Composable
 private fun StepperButton(label: String, onClick: () -> Unit) {
-    Box(
+    GlassButton(
+        onClick = onClick,
         modifier = Modifier
             .semantics { contentDescription = label }
-            .size(38.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
+            .size(38.dp),
+        contentPadding = PaddingValues(0.dp)
+    ) { _ ->
         Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp)
     }
 }
