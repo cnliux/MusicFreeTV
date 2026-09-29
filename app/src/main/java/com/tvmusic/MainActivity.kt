@@ -27,6 +27,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -129,12 +131,51 @@ class MainActivity : ComponentActivity() {
             else -> ""
         }
 
+        // 焦点兜底槽（F11）：全屏根节点拿到焦点（对话框关闭/页面销毁后的自动归位）时，
+        // 立即重定向到当前页面注册的兜底目标（子页=返回按钮，播放页=主控制按钮，
+        // 主页=当前页签）。全屏焦点节点=遥控器死区+Android 7 系统白圈，绝不能停留。
+        val focusFallback = androidx.compose.runtime.remember {
+            androidx.compose.runtime.mutableStateOf<androidx.compose.ui.focus.FocusRequester?>(null)
+        }
+        androidx.compose.runtime.CompositionLocalProvider(
+            com.tvmusic.ui.components.LocalFocusFallback provides focusFallback
+        ) {
         // 主界面按返回：弹退出确认，避免遥控器返回键一按就直接退出应用
         val showExitDialog = androidx.compose.runtime.remember {
             androidx.compose.runtime.mutableStateOf(false)
         }
         androidx.activity.compose.BackHandler(enabled = route == "home" || route == null) {
             showExitDialog.value = true
+        }
+        // 退出弹层「退出」按钮的初始焦点目标（弹层关闭后焦点由根节点兜底重定向归位）
+        val exitButtonFocus = androidx.compose.runtime.remember {
+            androidx.compose.ui.focus.FocusRequester()
+        }
+        // 内容区焦点状态（F11）：内层观察者（根 focusable 之内）的 hasFocus=true 表示
+        // 焦点在真实内容节点上（弹框按钮/页签/列表等）；根 focusable 自身拿到焦点
+        // （孤儿归位/TV 系统默认焦点）或整树无焦点时它为 false。全屏根节点=遥控器死区
+        // +Android 7 白圈，绝不能停留，由下方观察器立即重定向到兜底目标。
+        val rootContentFocus = androidx.compose.runtime.remember {
+            androidx.compose.runtime.mutableStateOf(false)
+        }
+        // 焦点观察器（F11）：内容区无焦点时把焦点送回兜底目标。覆盖三类场景：
+        // ①根 focusable 抢到焦点（孤儿归位/TV 系统默认焦点；事件回调检测存在顺序竞态：
+        //   弹框关闭后有约 20ms"整树无焦点"窗口，期间事件回调里 outer=false，tick 永不
+        //   触发——2026-09-29 实测焦点滞留根节点死区）②冷启动尚无焦点 ③弹框打开瞬间
+        //   initialFocus 尚未挂上。真实内容节点（含弹框按钮）持有焦点时绝不抢占。
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            while (true) {
+                if (!rootContentFocus.value) {
+                    val target = focusFallback.value
+                    if (target != null) {
+                        try {
+                            target.requestFocus()
+                        } catch (_: IllegalStateException) {
+                        }
+                    }
+                }
+                kotlinx.coroutines.delay(200)
+            }
         }
 
         // 无操作 60 秒且正在播放：自动进入播放器页（已在播放页则只消费标记不导航）
@@ -147,7 +188,16 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-Box(Modifier.focusable().fillMaxSize()) {
+        // 根节点不再 focusable（F11 根治）：全屏 focusable 节点=遥控器死区+Android 7 白圈
+        // （TV 系统默认焦点会落在它上面）。删除后焦点丢失时整树无焦点，
+        // 由上方观察器重定向到兜底目标（2026-09-29 真机全路径验证通过）。
+        // 注意：遥控器（keyevent）路径一切正常；仅 input tap（touch mode）会让
+        // requestFocus 静默失效，但任意实体按键即恢复——TV 产品只走遥控器，无影响。
+        Box(
+            Modifier
+                .onFocusChanged { rootContentFocus.value = it.hasFocus }
+                .fillMaxSize()
+        ) {
          Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
             AppTitleBar(
                 selected = tabKey,
@@ -318,6 +368,9 @@ Box(Modifier.focusable().fillMaxSize()) {
                 title = "退出应用",
                 subtitle = "确定要退出 MusicFree TV 吗？退出后播放也会停止。",
                 onDismiss = { showExitDialog.value = false },
+                // 初始焦点直接给「退出」按钮：焦点停在弹层容器上时按 OK 无反应、
+                // 也看不到焦点框，正是"没有聚焦退出按钮"的根因。
+                initialFocus = exitButtonFocus,
                 bottomBar = {
                     Spacer(Modifier.weight(1f))
                     com.tvmusic.ui.components.DialogTextButton("取消", { showExitDialog.value = false })
@@ -337,7 +390,8 @@ Box(Modifier.focusable().fillMaxSize()) {
                             (context as? android.app.Activity)?.finishAffinity()
                         },
                         background = MaterialTheme.colorScheme.primary,
-                        textColor = MaterialTheme.colorScheme.onPrimary
+                        textColor = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.focusRequester(exitButtonFocus)
                     )
                 }
             ) {}
@@ -494,4 +548,5 @@ private fun MiniControl(symbol: String, desc: String, onClick: () -> Unit) {
     ) {
         Text(symbol, color = androidx.compose.ui.graphics.Color.White, fontSize = 22.sp)
     }
+}
 }

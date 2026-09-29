@@ -363,6 +363,159 @@ class RemoteConfigService : Service() {
                 app().store.replaceVariables(platform, map)
                 respond(socket, 200, JSONObject().put("ok", true).put("message", "已保存 $platform 的变量").toString())
             }
+            // 插件能力探测：一次拿到所有已启用插件支持"排行榜 / 推荐歌单"哪些，与 TV 端 TopListViewModel /
+            // RecommendViewModel 的 probePlugins 同构，只是批量做、免得前端逐个轮询。
+            method == "GET" && path == "/api/plugin/caps" -> {
+                val app = app()
+                val runtime = app.runtime
+                val arr = JSONArray()
+                // 与 TV 端一致按 SearchSettings.sourceOrder 排序（音源与插件页的行顺序）
+                val order = com.tvmusic.config.SearchSettings.load(app).sourceOrder
+                val metas = com.tvmusic.config.SearchSettings.ordered(
+                    app.store.loadPluginMetas().filter { it.info != null && it.loadError == null },
+                    order
+                ) { it.info?.platform ?: it.name }
+                kotlinx.coroutines.runBlocking {
+                    metas.forEach { rec ->
+                        val pf = rec.info?.platform ?: return@forEach
+                        arr.put(
+                            JSONObject()
+                                .put("platform", pf)
+                                .put("name", rec.name)
+                                .put("topLists", runCatching { runtime.hasMethod(pf, "getTopLists") }.getOrDefault(false))
+                                .put("recommend", runCatching { runtime.hasMethod(pf, "getRecommendSheetsByTag") }.getOrDefault(false))
+                        )
+                    }
+                }
+                respond(socket, 200, JSONObject().put("ok", true).put("plugins", arr).toString())
+            }
+            // 排行榜：getTopLists → 分组 + 组内榜单卡片（对应 APK「排行榜」页）
+            method == "POST" && path == "/api/plugin/toplists" -> {
+                val body = readBody(input, headers)
+                val platform = runCatching { JSONObject(body).optString("platform", "") }.getOrDefault("")
+                if (platform.isBlank()) {
+                    respond(socket, 400, JSONObject().put("ok", false).put("error", "missing platform").toString())
+                    return
+                }
+                val c = callPlugin(platform, "getTopLists", emptyList())
+                val res = c.res ?: run { respond(socket, 200, c.meta.toString()); return }
+                respond(socket, 200, c.meta
+                    .put("groups", topListGroups(res, platform))
+                    .put("data", res)
+                    .toString())
+            }
+            // 推荐分类：getRecommendSheetTags → 一排分类 chip（对应 APK「推荐歌单」页第二行）
+            method == "POST" && path == "/api/plugin/tags" -> {
+                val body = readBody(input, headers)
+                val platform = runCatching { JSONObject(body).optString("platform", "") }.getOrDefault("")
+                if (platform.isBlank()) {
+                    respond(socket, 400, JSONObject().put("ok", false).put("error", "missing platform").toString())
+                    return
+                }
+                var res: Any? = null
+                var meta: JSONObject
+                // 分类拿不到不算失败：只有"默认"一个 chip，照样能出推荐列表（与 TV 端 loadTags 同策略）
+                val c = callPlugin(platform, "getRecommendSheetTags", emptyList())
+                if (c.res != null) {
+                    res = c.res
+                    meta = c.meta
+                } else {
+                    meta = JSONObject().put("ok", true).put("platform", platform)
+                        .put("method", "getRecommendSheetTags").put("warning", c.meta.optString("error"))
+                }
+                respond(socket, 200, meta.put("tags", recommendTags(res)).put("data", res ?: JSONObject.NULL).toString())
+            }
+            // 推荐歌单列表：getRecommendSheetsByTag(tag, page) → 卡片网格
+            method == "POST" && path == "/api/plugin/sheets" -> {
+                val body = readBody(input, headers)
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                val platform = json?.optString("platform", "") ?: ""
+                if (platform.isBlank()) {
+                    respond(socket, 400, JSONObject().put("ok", false).put("error", "missing platform").toString())
+                    return
+                }
+                val tag = json?.optJSONObject("tag") ?: JSONObject().put("id", "").put("title", "默认")
+                val page = (json?.optInt("page", 1) ?: 1).coerceIn(1, 500)
+                val c = callPlugin(
+                    platform, "getRecommendSheetsByTag",
+                    listOf(tag.toString(), page.toString())
+                )
+                val res = c.res ?: run { respond(socket, 200, c.meta.toString()); return }
+                val obj = res as? JSONObject
+                val arr = obj?.optJSONArray("data") ?: (res as? JSONArray) ?: JSONArray()
+                val sheets = JSONArray()
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    if (o.optString("title").isBlank()) continue
+                    sheets.put(sectionItem(o, "list", "musicSheetInfo", platform))
+                }
+                val isEnd = obj?.optBoolean("isEnd", true) ?: true
+                respond(socket, 200, c.meta
+                    .put("page", page)
+                    .put("sheets", sheets)
+                    .put("isEnd", isEnd)
+                    .put("hasMore", !isEnd && sheets.length() > 0)
+                    .put("data", res)
+                    .toString())
+            }
+            // 详情（歌单 / 榜单）：与 TV 端 SheetViewModel.fetchPage 同一套方法回退顺序，点歌即可播
+            method == "POST" && path == "/api/plugin/detail" -> {
+                val body = readBody(input, headers)
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                val platform = json?.optString("platform", "") ?: ""
+                if (platform.isBlank()) {
+                    respond(socket, 400, JSONObject().put("ok", false).put("error", "missing platform").toString())
+                    return
+                }
+                val kind = json?.optString("kind", "SHEET") ?: "SHEET"
+                val item = json?.optJSONObject("item") ?: JSONObject()
+                val page = (json?.optInt("page", 1) ?: 1).coerceIn(1, 500)
+                val r = resolveDetailPage(platform, kind, item, page)
+                if (r == null) {
+                    respond(socket, 200, JSONObject().put("ok", false).put("error", "no candidate method").toString())
+                    return
+                }
+                respond(socket, 200, r.put("kind", kind).put("page", page).toString())
+            }
+            method == "POST" && path == "/api/plugin/collect" -> {
+                // 整张歌单/榜单收进收藏夹：对齐 TV 端 SheetScreen 的「全部收藏」，
+                // 由服务端自己翻页取完整歌曲，手机端不必先把整张歌单拉下来。
+                val body = readBody(input, headers)
+                val json = runCatching { JSONObject(body) }.getOrNull()
+                val platform = json?.optString("platform", "") ?: ""
+                val listId = json?.optString("listId", "") ?: ""
+                if (platform.isBlank() || listId.isBlank()) {
+                    respond(socket, 400, JSONObject().put("ok", false).put("error", "missing platform/listId").toString())
+                    return
+                }
+                val kind = json?.optString("kind", "SHEET") ?: "SHEET"
+                val item = json?.optJSONObject("item") ?: JSONObject()
+                val maxPages = (json?.optInt("maxPages", 20) ?: 20).coerceIn(1, 50)
+                val cap = (json?.optInt("maxSongs", 3000) ?: 3000).coerceIn(1, 20000)
+                val all = JSONArray()
+                var pages = 0
+                var isEnd = false
+                while (pages < maxPages && !isEnd && all.length() < cap) {
+                    pages++
+                    val r = resolveDetailPage(platform, kind, item, pages) ?: break
+                    val m = r.optJSONArray("music") ?: JSONArray()
+                    if (m.length() == 0) break
+                    for (i in 0 until m.length()) {
+                        if (all.length() >= cap) break
+                        all.put(m.optJSONObject(i))
+                    }
+                    isEnd = r.optBoolean("isEnd", true)
+                }
+                if (all.length() == 0) {
+                    respond(socket, 200, JSONObject().put("ok", false)
+                        .put("error", "该歌单没有取到歌曲").put("pages", pages).toString())
+                    return
+                }
+                val items = (0 until all.length()).mapNotNull { all.optJSONObject(it) }
+                val added = app().playback.addAllToList(listId, items)
+                respond(socket, 200, JSONObject().put("ok", true)
+                    .put("added", added).put("total", all.length()).put("pages", pages).toString())
+            }
             method == "POST" && path == "/api/sync" -> {
                 app().repository.syncAll(force = true)
                 respond(socket, 200, JSONObject().put("ok", true).put("message", "开始同步订阅").toString())
@@ -449,11 +602,12 @@ class RemoteConfigService : Service() {
                 }
                 if (item.optString("platform").isBlank()) item.put("platform", plugin)
                 val entry = com.tvmusic.player.QueueEntry(plugin, item)
-                com.tvmusic.player.PlayerManager.play(plugin, entry, listOf(entry), 0, source = "$plugin · 远程点播")
+                val source = json?.optString("source", "")?.takeIf { it.isNotBlank() } ?: "$plugin · 远程点播"
+                com.tvmusic.player.PlayerManager.play(plugin, entry, listOf(entry), 0, source = source)
                 respond(socket, 200, JSONObject().put("ok", true).put("message", "已在电视端开始播放").toString())
             }
             method == "POST" && path == "/api/play/queue" -> {
-                // 批量入队播放（如"播放全部"搜索结果）：{ plugin, items: [raw...] }
+                // 歌单/榜单「播放全部」与点歌：{ plugin, items: [raw...], index?, source? }
                 val body = readBody(input, headers)
                 val json = runCatching { JSONObject(body) }.getOrNull()
                 val plugin = json?.optString("plugin", "") ?: ""
@@ -474,9 +628,14 @@ class RemoteConfigService : Service() {
                     respond(socket, 400, JSONObject().put("ok", false).put("error", "no valid items").toString())
                     return
                 }
+                // 点某一首就从那一首开始（对齐 TV 端 SheetViewModel.play(index)）
+                val idx = (json?.optInt("index", 0) ?: 0).coerceIn(0, entries.size - 1)
                 // 首条用其自身来源插件播放，队列内条目解析时各自走粘性引擎
-                com.tvmusic.player.PlayerManager.play(entries.first().plugin, entries.first(), entries, 0, source = "${entries.first().plugin} · 远程点播")
-                respond(socket, 200, JSONObject().put("ok", true).put("count", entries.size).put("message", "已加入播放列表并开始播放").toString())
+                val source = json?.optString("source", "")?.takeIf { it.isNotBlank() }
+                    ?: "${entries.first().plugin} · 远程点播"
+                com.tvmusic.player.PlayerManager.play(entries[idx].plugin, entries[idx], entries, idx, source = source)
+                respond(socket, 200, JSONObject().put("ok", true).put("count", entries.size)
+                    .put("index", idx).put("message", "已加入播放列表并开始播放").toString())
             }
             method == "GET" && path == "/api/player" -> {
                 respond(socket, 200, playerStatusJson().toString())
@@ -884,6 +1043,260 @@ class RemoteConfigService : Service() {
     }
 
     private fun app(): TvMusicApp = TvMusicApp.from(this)
+
+
+    /**
+     * 一次插件调用的结果：meta 里带 ok/method/elapsedMs（失败时带 error），res 是原始返回值。
+     * 远程页所有板块接口共用，超时/未实现/异常三种情况都在这里收口。
+     */
+    private data class PluginCall(val meta: JSONObject, val res: Any?)
+
+    private fun callPlugin(platform: String, method: String, args: List<String>): PluginCall {
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        val meta = JSONObject().put("ok", true).put("platform", platform).put("method", method)
+        var lastError: Throwable? = null
+        // 引擎分 lane 加锁，上一次长调用（歌单一次返回上千首）没跑完时新请求会拿到
+        // "js engine busy/timeout"。远程页是人手点、间隔短，撞车概率比 TV 端高，
+        // 这里补一次短等待重试；仍失败才原样报错。
+        repeat(2) { attempt ->
+            val res = try {
+                // 单次 invoke 45s，与搜索路径同预算；外层 60s 覆盖引擎排队
+                kotlinx.coroutines.runBlocking {
+                    withTimeoutOrNull(60_000) {
+                        app().runtime.callParallel(platform, method, args, timeoutMs = 45_000)
+                    }
+                }
+            } catch (t: Throwable) {
+                lastError = t
+                val busy = (t.message?.contains("busy") == true || t.message?.contains("timeout") == true)
+                if (attempt == 0 && busy) {
+                    Thread.sleep(600)
+                    return@repeat
+                }
+                return PluginCall(
+                    meta.put("ok", false)
+                        .put("elapsedMs", android.os.SystemClock.elapsedRealtime() - startedAt)
+                        .put("error", healthError(lastError)),
+                    null
+                )
+            }
+            meta.put("elapsedMs", android.os.SystemClock.elapsedRealtime() - startedAt)
+            if (res == null) {
+                return PluginCall(meta.put("ok", false).put("error", "调用超时（60s）"), null)
+            }
+            if (res is NotImplementedError) {
+                return PluginCall(meta.put("ok", false).put("error", "插件未实现 $method"), null)
+            }
+            return PluginCall(meta, res)
+        }
+        @Suppress("UNREACHABLE_CODE")
+        return PluginCall(
+            meta.put("ok", false)
+                .put("elapsedMs", android.os.SystemClock.elapsedRealtime() - startedAt)
+                .put("error", healthError(lastError)),
+            null
+        )
+    }
+
+    /** 去掉 JS 堆栈噪音，只留首行原因，远端页面读起来是一句话而不是一坨栈。 */
+    private fun healthError(t: Throwable?): String {
+        if (t == null) return "未知错误"
+        val raw = (t as? java.util.concurrent.ExecutionException)?.cause?.message
+            ?: t.message
+            ?: t.javaClass.simpleName
+        val first = raw.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: raw
+        val frame = Regex("^at\\s+(.+?)\\s*\\((\\S+)\\)$").find(first)
+        return if (frame != null) "${frame.groupValues[1]} 失败（${frame.groupValues[2]}）" else first.take(200)
+    }
+
+    /** 1:1 复刻 TV 端 TopListViewModel：顶层必须是数组，每项 {title, data:[榜单]}，空组丢弃。 */
+    private fun topListGroups(res: Any, platform: String): JSONArray {
+        val groups = JSONArray()
+        val arr = res as? JSONArray ?: return groups
+        for (i in 0 until arr.length()) {
+            val g = arr.optJSONObject(i) ?: continue
+            val data = g.optJSONArray("data") ?: continue
+            val boards = JSONArray()
+            for (j in 0 until data.length()) {
+                val o = data.optJSONObject(j) ?: continue
+                if (o.optString("title").isBlank()) continue
+                boards.put(sectionItem(o, "list", "topListDetail", platform))
+            }
+            if (boards.length() > 0) {
+                groups.put(JSONObject().put("title", cleanText(g.optString("title", ""))).put("boards", boards))
+            }
+
+        }
+        return groups
+    }
+
+    /** 1:1 复刻 TV 端 RecommendViewModel.loadTags：默认分类永远第一个，再拼 pinned + 各分组 data，按 id 去重。 */
+    private fun recommendTags(res: Any?): JSONArray {
+        val tags = JSONArray()
+        val seen = LinkedHashMap<String, Boolean>()
+        fun put(o: JSONObject?) {
+            if (o == null) return
+            val id = o.optString("id", "")
+            val title = o.optString("title", "")
+            if (id.isBlank() && title.isBlank()) return
+            if (seen.putIfAbsent(id, true) != null) return
+            tags.put(JSONObject().put("id", id).put("title", title))
+        }
+        put(JSONObject().put("id", "").put("title", "默认"))
+        val root = res as? JSONObject ?: return tags
+        fun addAll(arr: JSONArray?) {
+            if (arr == null) return
+            for (i in 0 until arr.length()) put(arr.optJSONObject(i))
+        }
+        addAll(root.optJSONArray("pinned"))
+        val groups = root.optJSONArray("data")
+        if (groups != null) {
+            for (i in 0 until groups.length()) {
+                val g = groups.optJSONObject(i) ?: continue
+                val inner = g.optJSONArray("data")
+                if (inner != null) addAll(inner) else put(g)
+            }
+        }
+        return tags
+    }
+
+    /** 歌单/榜单/歌手/专辑详情统一解析：{isEnd, musicList} / {isEnd, data} / 裸数组。 */
+    /**
+     * 取歌单/榜单第 [page] 页歌曲，候选方法按 TV 端优先级逐个回退到第一个成功的。
+     * `/api/plugin/detail`（翻页浏览）与 `/api/plugin/collect`（整张收藏）共用，避免回退链写两遍。
+     * 返回 {ok,method,elapsedMs,header,music,isEnd,hasMore,tried}；全部候选都失败返回 null。
+     */
+    private fun resolveDetailPage(platform: String, kind: String, rawItem: JSONObject, page: Int): JSONObject? {
+        val item = JSONObject(rawItem.toString())
+        if (item.optString("platform").isBlank()) item.put("platform", platform)
+        val pageArg = page.toString()
+        val candidates: List<Pair<String, List<String>>> = when (kind) {
+            "TOPLIST" -> listOf(
+                "getTopListDetail" to listOf(item.toString(), pageArg),
+                "getMusicSheetInfo" to listOf(item.toString(), pageArg)
+            )
+            "ALBUM" -> listOf("getAlbumInfo" to listOf(item.toString(), pageArg))
+            "ARTIST" -> listOf("getArtistWorks" to listOf(item.toString(), pageArg, "music"))
+            "IMPORT" -> listOf(
+                "importMusicSheet" to listOf(JSONArray().put(item.optString("url", "")).toString())
+            )
+            else -> buildList {
+                add("getMusicSheetInfo" to listOf(item.toString(), pageArg))
+                add("getTopListDetail" to listOf(item.toString(), pageArg))
+                if (page == 1) {
+                    add("importMusicSheet" to listOf(JSONArray().put(item.optString("url", "")).toString()))
+                }
+            }
+        }
+        var meta: JSONObject? = null
+        var arr: JSONArray? = null
+        var isEnd = true
+        var headerOverride: JSONObject? = null
+        val tried = JSONArray()
+        for ((method, args) in candidates) {
+            val c = callPlugin(platform, method, args)
+            if (c.res == null) {
+                tried.put(JSONObject().put("method", method).put("ok", false)
+                    .put("error", c.meta.optString("error")))
+                meta = c.meta
+                continue
+            }
+            val (music, end) = musicPage(c.res)
+            tried.put(JSONObject().put("method", method).put("ok", true).put("items", music.length()))
+            meta = c.meta
+            // 第一个方法能调通就按它的结果翻页；调通但返回空也照样返回（避免永远回退到错误的第二方法）
+            arr = music
+            isEnd = end
+            // 翻页返回的 topListItem/sheetItem/albumItem 会覆盖标题和封面，与 TV 端 applyHeader 一致
+            val obj = c.res as? JSONObject
+            listOf("topListItem", "sheetItem", "albumItem").forEach { k ->
+                if (headerOverride == null) headerOverride = obj?.optJSONObject(k)
+            }
+            break
+        }
+        val m = meta ?: return null
+        val musicArr = arr ?: return null
+        m.put("tried", tried)
+        val head = headerOverride ?: item
+        val header = JSONObject()
+            .put("title", cleanText(head.optString("title", "").ifBlank { head.optString("name", "") }))
+            .put("artwork", sectionItem(head, "list", "", platform).optString("artwork", ""))
+            .put("description", cleanText(head.optString("description", "").ifBlank { head.optString("desc", "") }))
+        val music = musicItems(musicArr, platform, if (kind == "TOPLIST") "topListDetail" else "musicSheetInfo")
+        return m.put("ok", true)
+            .put("header", header)
+            .put("music", music)
+            .put("isEnd", isEnd)
+            .put("hasMore", !isEnd && music.length() > 0)
+    }
+
+    private fun musicPage(res: Any): Pair<JSONArray, Boolean> {
+        val obj = res as? JSONObject
+        val arr = obj?.optJSONArray("musicList")
+            ?: obj?.optJSONArray("data")
+            ?: (res as? JSONArray)
+            ?: JSONArray()
+        return arr to (obj?.optBoolean("isEnd", true) ?: true)
+    }
+
+    /** 1:1 复刻 SheetViewModel.dedupMusic：platform+id 去重，缺 id 时回退 标题+歌手。 */
+    private fun musicItems(arr: JSONArray, platform: String, sectionKey: String): JSONArray {
+        val out = JSONArray()
+        val seen = HashSet<String>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id", "")
+            val key = if (id.isNotBlank()) "$platform#$id"
+            else "$platform#${o.optString("title", "")}#${o.optString("artist", "")}"
+            if (!seen.add(key)) continue
+            out.put(sectionItem(o, "music", sectionKey, platform))
+        }
+        return out
+    }
+
+    private fun sectionItem(
+        o: JSONObject,
+        type: String,
+        sectionKey: String,
+        platform: String = "",
+    ): JSONObject {
+        // 封面兜底与 TV 端 TopListEntry 对齐（artwork/coverImg/cover/pic/image/img/logo/avatar）
+        val artwork = o.optString("artwork", "")
+            .ifBlank { o.optString("coverImg", "") }
+            .ifBlank { o.optString("cover", "") }
+            .ifBlank { o.optString("pic", "") }
+            .ifBlank { o.optString("image", "") }
+            .ifBlank { o.optString("img", "") }
+            .ifBlank { o.optString("logo", "") }
+            .ifBlank { o.optString("avatar", "") }
+        // DetailTarget.stamped 的等价动作：详情/播放都要靠 raw.platform 定位插件
+        if (platform.isNotBlank() && o.optString("platform").isBlank()) o.put("platform", platform)
+        return JSONObject()
+            .put("type", type)
+            .put("id", o.optString("id", ""))
+            .put("title", cleanText(o.optString("title", "").ifBlank { o.optString("name", "") }))
+            .put("artist", cleanText(o.optString("artist", "")))
+            .put("album", cleanText(o.optString("album", "")))
+            .put("duration", o.optLong("duration", 0L))
+            .put("artwork", artwork)
+            .put("description", cleanText(o.optString("description", "").ifBlank { o.optString("desc", "") }))
+            .put("section", sectionKey)
+            .put("platform", o.optString("platform", "").ifBlank { platform })
+            .put("raw", o)
+    }
+
+    /**
+     * 清洗插件返回的文本：去掉 U+FFFD 替换符（乱码方块）与 C0/C1 控制字符、合并空白。
+     * 部分插件（如 QQ 音乐）歌单名末尾带被截断的多字节字符，直接透传会在页面上显示成乱码。
+     */
+    private fun cleanText(s: String): String {
+        if (s.isEmpty()) return s
+        return s
+            .replace('\uFFFD', ' ')
+            .replace(Regex("[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F]"), " ")
+            .replace(Regex("[ \\t\\u00A0]+"), " ")
+            .trim()
+    }
 
     private fun readBody(input: InputStream, headers: Map<String, String>): String {
         val len = headers["content-length"]?.toIntOrNull() ?: 0

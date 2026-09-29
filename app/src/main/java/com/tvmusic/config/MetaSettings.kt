@@ -98,9 +98,14 @@ object MetaSettings {
 
     @Volatile
     private var coverShape: String = DEFAULT_COVER_SHAPE
+    /** 封面形状/转速的响应式副本：远程改设置后要立刻在播放页生效，必须可观察。 */
+    private val coverShapeState = kotlinx.coroutines.flow.MutableStateFlow(DEFAULT_COVER_SHAPE)
+    val coverShapeFlow: kotlinx.coroutines.flow.StateFlow<String> get() = coverShapeState
 
     /** 封面转一圈耗时（毫秒），0=不转。 */
     private val coverSpinMs = java.util.concurrent.atomic.AtomicInteger(DEFAULT_COVER_SPIN_MS)
+    private val coverSpinMsState = kotlinx.coroutines.flow.MutableStateFlow(DEFAULT_COVER_SPIN_MS)
+    val coverSpinMsFlow: kotlinx.coroutines.flow.StateFlow<Int> get() = coverSpinMsState
 
     val fallbackMode: String get() = _fallbackMode
 
@@ -129,7 +134,10 @@ object MetaSettings {
         specPreload = sp?.getBoolean(KEY_SPEC_PRELOAD, DEFAULT_SPEC_PRELOAD) ?: DEFAULT_SPEC_PRELOAD
         _fallbackStrategy = sp?.getString(KEY_FALLBACK_STRATEGY, STRATEGY_STAGGERED) ?: STRATEGY_STAGGERED
         coverShape = sp?.getString(KEY_COVER_SHAPE, DEFAULT_COVER_SHAPE) ?: DEFAULT_COVER_SHAPE
-        coverSpinMs.set((sp?.getInt(KEY_COVER_SPIN_MS, DEFAULT_COVER_SPIN_MS) ?: DEFAULT_COVER_SPIN_MS).coerceIn(0, 120_000))
+        coverShapeState.value = coverShape
+        val spin = (sp?.getInt(KEY_COVER_SPIN_MS, DEFAULT_COVER_SPIN_MS) ?: DEFAULT_COVER_SPIN_MS).coerceIn(0, 120_000)
+        coverSpinMs.set(spin)
+        coverSpinMsState.value = spin
     }
 
     fun setFallbackMode(mode: String) {
@@ -176,6 +184,7 @@ object MetaSettings {
     fun setCoverShape(shape: String) {
         val v = if (shape == COVER_SHAPE_SQUARE) COVER_SHAPE_SQUARE else COVER_SHAPE_CIRCLE
         coverShape = v
+        coverShapeState.value = v
         appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             ?.edit()?.putString(KEY_COVER_SHAPE, v)?.apply()
     }
@@ -183,6 +192,7 @@ object MetaSettings {
     fun setCoverSpinMs(ms: Int) {
         val v = ms.coerceIn(0, 120_000)
         coverSpinMs.set(v)
+        coverSpinMsState.value = v
         appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             ?.edit()?.putInt(KEY_COVER_SPIN_MS, v)?.apply()
     }

@@ -35,6 +35,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -190,10 +191,16 @@ fun HomeScreen(
     // 继续播放确认：全站统一 ModalCard 风格（覆盖在首页之上）
     if (resumeAvailable && !resumeDismissed) {
         androidx.activity.compose.BackHandler { resumeDismissed = true }
+        // 初始焦点给「继续播放」按钮：不传 initialFocus 时 ModalCard 回退到容器，
+        // 容器 focusable 但不可点击——OK 键无反应、也看不到焦点框（2026-09-29 实测）。
+        val resumeButtonFocus = androidx.compose.runtime.remember {
+            androidx.compose.ui.focus.FocusRequester()
+        }
         com.tvmusic.ui.components.ModalCard(
             title = "继续播放",
             subtitle = "检测到上次未播完的内容，是否从上次进度继续播放？",
             onDismiss = { resumeDismissed = true },
+            initialFocus = resumeButtonFocus,
             bottomBar = {
                 Spacer(Modifier.weight(1f))
                 com.tvmusic.ui.components.DialogTextButton("取消", { resumeDismissed = true })
@@ -204,7 +211,8 @@ fun HomeScreen(
                         PlayerManager.resumePlayback()
                     },
                     background = MaterialTheme.colorScheme.primary,
-                    textColor = MaterialTheme.colorScheme.onPrimary
+                    textColor = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.focusRequester(resumeButtonFocus)
                 )
             }
         ) {}

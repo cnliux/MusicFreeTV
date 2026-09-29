@@ -81,6 +81,8 @@ class TvMusicApp : Application() {
                 PlayerManager.attachPlaybackStore(playback)
                 PlayerManager.loadResumeAsync()
             }
+            // 标记引擎就绪：解除 awaitEngineReady 的等待（ViewModel/远程服务可安全访问）
+            markEngineReady()
             // M20：冷启动关键路径（引擎+DB+warmup 前奏）完成打点
             com.tvmusic.core.Metrics.markColdStartDone()
 
@@ -159,6 +161,31 @@ class TvMusicApp : Application() {
         return text.lineSequence().map { it.trim() }
             .filter { it.isNotEmpty() && !it.startsWith("#") && it.startsWith("http") }
             .toList()
+    }
+
+    // ---------------- 引擎就绪等待（H5/H9 异步初始化的访问安全） ----------------
+
+    /** 引擎初始化完成的闭锁：IO 协程完成后 countDown。 */
+    private val engineReadyLatch = java.util.concurrent.CountDownLatch(1)
+
+    /**
+     * 同步等待引擎/仓库就绪（最多 30s）。
+     * ViewModel 构造、RemoteConfigService 处理请求时在访问 runtime/repository 前调用，
+     * 避免 lateinit 未赋值导致的 UninitializedPropertyAccessException（真机崩溃根因）。
+     * 引擎初始化在 IO 协程（H5/H9），通常 <1s 完成；超时返回 false 让调用方降级。
+     */
+    fun awaitEngineReady(timeoutMs: Long = 30_000): Boolean {
+        return try {
+            engineReadyLatch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+    }
+
+    /** 引擎就绪后调用（由初始化协程在完成时触发）。 */
+    private fun markEngineReady() {
+        engineReadyLatch.countDown()
     }
 
     companion object {

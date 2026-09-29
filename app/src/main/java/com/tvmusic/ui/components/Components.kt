@@ -19,12 +19,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -63,30 +65,61 @@ import coil.compose.AsyncImage
 private val ModalScrim = Color(0xAA000000)
 
 /**
+ * 焦点兜底槽（F11）：注册"焦点丢失时应回到哪个节点"。
+ * MainActivity 的全屏根节点是最后的焦点捕手（对话框关闭/页面销毁时焦点自动归位到它），
+ * 但全屏节点=遥控器死区+Android 7 全屏系统白圈。根节点一旦拿到焦点就立即重定向到
+ * 本槽注册的最近兜底目标（子页=返回按钮/播放主按钮，主页=当前页签）。
+ */
+val LocalFocusFallback = androidx.compose.runtime.compositionLocalOf<androidx.compose.runtime.MutableState<androidx.compose.ui.focus.FocusRequester?>?> { null }
+
+/** 把当前节点注册为所在页面的焦点兜底目标（配合 BackTopBar / 播放页主按钮使用）。
+ *  注意：fr 需由调用方与 tvInitialFocus 共用并自行挂 focusRequester(fr)——
+ *  同一节点挂两个 focusRequester 只有最后一个生效，另一个会永远 not-initialized。 */
+@Composable
+fun Modifier.tvFocusFallback(fr: androidx.compose.ui.focus.FocusRequester): Modifier {
+    val slot = LocalFocusFallback.current
+    androidx.compose.runtime.DisposableEffect(fr) {
+        val prev = slot?.value
+        if (slot != null) slot.value = fr
+        onDispose {
+            if (slot != null && slot.value === fr) slot.value = prev
+        }
+    }
+    return this
+}
+
+/**
  * 初始焦点：进入界面时主动请求焦点。
  * 真机遥控器没有鼠标，若焦点树中无任何焦点节点，D-pad 按键无处移动——
  * 这是"模拟器能操作、真机遥控不能操作"的常见根因。
  * 首帧节点可能尚未挂载导致 requestFocus 失败，这里带重试。
  */
 @Composable
-fun Modifier.tvInitialFocus(): Modifier {
-    val fr = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+fun Modifier.tvInitialFocus(fr: androidx.compose.ui.focus.FocusRequester = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }): Modifier {
     // 首帧节点可能尚未挂载/暂不可聚焦：requestFocus 会抛 IllegalStateException
-    // （"FocusRequester is not initialized"，2026-09-26 连环闪退根因），
-    // 必须捕获并重试；成功后立即停止。
+    // （"FocusRequester is not initialized"，2026-09-26 连环闪退根因），必须捕获并重试。
+    // 2026-09-28 真机焦点死区根因：requestFocus 成功**之后**，上一个页面被销毁的焦点节点
+    // 会触发 Compose「焦点归位到最近可聚焦祖先」——即 MainActivity 的全屏 focusable 根 Box，
+    // 把本页刚抢到的焦点抢走。全屏节点吞掉一切 D-pad 搜索（下方无可聚焦候选），整页遥控器失灵。
+    // 因此 requestFocus 后必须校验是否留住，被抢走则重新请求，直到焦点真正留住。
     // 组合被销毁时 LaunchedEffect 自动取消，不会泄漏。
+    var hasFocus by androidx.compose.runtime.remember { mutableStateOf(false) }
     androidx.compose.runtime.LaunchedEffect(Unit) {
-        repeat(20) {
+        repeat(40) {
             try {
                 fr.requestFocus()
-                return@LaunchedEffect
             } catch (_: IllegalStateException) {
                 // 焦点目标还没就绪，稍后重试
             }
-            kotlinx.coroutines.delay(80)
+            kotlinx.coroutines.delay(100)
+            if (hasFocus) {
+                // 焦点可能在上一个页面销毁时被全屏根节点抢走：再等 400ms 仍在我方才算落定
+                kotlinx.coroutines.delay(400)
+                if (hasFocus) return@LaunchedEffect
+            }
         }
     }
-    return this.focusRequester(fr)
+    return this.focusRequester(fr).onFocusChanged { hasFocus = it.isFocused }
 }
 
 /**
@@ -119,10 +152,12 @@ fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false, shap
         .drawBehind {
             if (focused) {
                 drawRect(glow.copy(alpha = if (tokens.focusBrightnessOnly) 0.08f else 0.14f))
-                // 圆角来自本 Modifier 自身的圆钮开关与主题 Token（shapeOverride 仅用于焦点外型一致性，
-                // 边框半径以 tokens.radius 为准；圆钮用整圆）。
-                val radius = if (circle) CornerRadius(size.minDimension / 2f)
-                else CornerRadius(tokens.radius.toPx())
+                /* 描边/外发光必须跟着元素自身的形状走。之前这里只认 circle 开关、
+                   圆角一律用 tokens.radius，把传进来的 shapeOverride 丢掉了——播放器封面
+                   选「圆形」时内容确实被裁成圆，但外面套的仍是一个圆角矩形描边，
+                   看起来就像「圆形没生效、只有方形圆角生效」。 */
+                val radius = focusCornerRadius(shapeOverride, circle, tokens.radius, size.minDimension)
+                val stroke = 3.dp.toPx()
                 // M13：激活 focusGlow token——外发光环（模糊描边），强度随主题 token 变化。
                 // 不用 shadowElevation（模拟顶部光源、深色底上出现难看下偏阴影），
                 // 改用 BlurMaskFilter 对称模糊。focusGlow=0 的主题（极简黑白/杂志排版）自然无发光。
@@ -144,18 +179,43 @@ fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false, shap
                         native.drawRoundRect(0f, 0f, size.width, size.height, radius.x, radius.y, paint)
                     }
                 }
-                val stroke = 3.dp.toPx()
                 // 边框画在自身 DrawModifier 上（不受上方 graphicsLayer 缩放影响），
-                // topLeft+size 内缩半个线宽，圆角处不再溢出直角。
+                // topLeft+size 内缩半个线宽，圆角处不再溢出直角；圆角半径同步等比缩放。
+                val inset = stroke / 2f
+                val k = if (size.minDimension > 0f) (size.minDimension - inset * 2) / size.minDimension else 1f
                 drawRoundRect(
                     color = tokens.focusBorder,
                     style = Stroke(width = stroke),
-                    cornerRadius = radius,
-                    topLeft = Offset(stroke / 2f, stroke / 2f),
+                    cornerRadius = CornerRadius(radius.x * k, radius.y * k),
+                    topLeft = Offset(inset, inset),
                     size = Size(size.width - stroke, size.height - stroke)
                 )
             }
         }
+}
+
+/**
+ * 由元素自身形状推导焦点描边的圆角半径。
+ * circle=true 或传入圆形 shapeOverride 时取整圆（半径=短边/2）；
+ * 否则按 RoundedCornerShape 的 Dp 圆角，再否则退回主题 tokens.radius。
+ * DrawScope 扩展是为了拿到 Density 做 Dp→px。
+ */
+private fun DrawScope.focusCornerRadius(
+    shapeOverride: androidx.compose.ui.graphics.Shape?,
+    circle: Boolean,
+    themeRadius: Dp,
+    minDimension: Float
+): CornerRadius {
+    when {
+        circle -> return CornerRadius(minDimension / 2f)
+        shapeOverride is RoundedCornerShape -> {
+            // RoundedCornerShape 的圆角可能是 Dp 或 Percent，只处理 Dp（项目内只用 Dp）
+            val dp = shapeOverride.topStart as? Dp
+            if (dp != null) return CornerRadius(dp.toPx())
+        }
+        else -> {}
+    }
+    return CornerRadius(themeRadius.toPx())
 }
 
 @Composable
@@ -219,13 +279,15 @@ fun AppTitleBar(
             fontSize = 22.sp,
             modifier = Modifier.padding(end = 28.dp)
         )
-        // H13：初始焦点跟随当前选中页签（焦点记忆），不再写死首页——
-        // 从子页返回/切换 Tab 后焦点落在当前页签，遥控器体验更连贯。
-        TabItem("首页", "home", selected, onSelect, initialFocus = selected == "home")
-        TabItem("搜索", "search", selected, onSelect, initialFocus = selected == "search")
-        TabItem("设置", "settings", selected, onSelect, initialFocus = selected == "settings")
-        TabItem("我的歌单", "mylist", selected, onSelect, initialFocus = selected == "mylist")
-        TabItem("关于", "about", selected, onSelect, initialFocus = selected == "about")
+        // H13：选中态高亮跟随当前页签（焦点记忆）。
+        // 注意：页签**不主动抢焦点**（会与子页返回按钮的 tvInitialFocus 抢焦点打乒乓，
+        // 两边都抢输、焦点落到全屏根节点死区）。页签只注册为焦点兜底目标：
+        // 焦点丢失到根节点时由 MainActivity 重定向回当前页签（F11）。
+        TabItem("首页", "home", selected, onSelect)
+        TabItem("搜索", "search", selected, onSelect)
+        TabItem("设置", "settings", selected, onSelect)
+        TabItem("我的歌单", "mylist", selected, onSelect)
+        TabItem("关于", "about", selected, onSelect)
     }
 }
 
@@ -234,10 +296,22 @@ private fun TabItem(
     label: String,
     key: String,
     selected: String,
-    onSelect: (String) -> Unit,
-    initialFocus: Boolean = false
+    onSelect: (String) -> Unit
 ) {
     val isSelected = selected == key
+    val fr = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+    // 冷启动抢焦点不在这里做（FocusManager 无 hasFocus API，无法安全判断"整个焦点树无焦点"；
+    // 无条件 requestFocus 是抢占式的，会抢走启动弹框的 initialFocus，2026-09-29 实测）。
+    // 已上移到 MainActivity.App()：用根节点外层观察者的 hasFocus 判定全树无焦点后才抢。
+    // 选中页签注册为焦点兜底目标：主页上弹层关闭/子页销毁等场景，
+    // 根节点收到焦点后重定向到这里（F11）。
+    val slot = LocalFocusFallback.current
+    androidx.compose.runtime.DisposableEffect(fr, isSelected) {
+        if (!isSelected) return@DisposableEffect onDispose {}
+        val prev = slot?.value
+        if (slot != null) slot.value = fr
+        onDispose { if (slot != null && slot.value === fr) slot.value = prev }
+    }
     Box(
         modifier = Modifier
             .padding(end = 10.dp)
@@ -246,7 +320,7 @@ private fun TabItem(
                 if (isSelected) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)
             )
-            .let { if (initialFocus) it.tvInitialFocus() else it }
+            .focusRequester(fr)
             .tvFocus(shapeOverride = RoundedCornerShape(20.dp))
             .clickable { onSelect(key) }
             .padding(horizontal = 24.dp, vertical = 9.dp)
@@ -431,9 +505,10 @@ private fun FavDialogBox(
     title: String,
     subtitle: String,
     onDismiss: () -> Unit,
+    initialFocus: androidx.compose.ui.focus.FocusRequester? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    ModalCard(title = title, subtitle = subtitle, width = 420.dp, onDismiss = onDismiss, content = content)
+    ModalCard(title = title, subtitle = subtitle, width = 420.dp, onDismiss = onDismiss, initialFocus = initialFocus, content = content)
 }
 
 /** 新建收藏夹行：输入名称后点「新建」回调（TV 遥控可调起 IME 输入）。 */
@@ -488,20 +563,24 @@ fun CollectSongsDialog(
 ) {
     val lists by playback.lists.collectAsState()
     var lastMsg by remember { mutableStateOf<String?>(null) }
+    // 初始焦点给第一个收藏夹行（主要交互）；列表为空时 ModalCard 自动退回容器兜底
+    val firstRowFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     FavDialogBox(
         title = "全部收藏到…",
         subtitle = "将本页已加载的 ${entries.size} 首加入所选收藏夹（已收藏的自动跳过）",
-        onDismiss = onDismiss
+        onDismiss = onDismiss,
+        initialFocus = firstRowFocus
     ) {
         val entryKeys = remember(entries) { entries.mapTo(HashSet()) { playback.primaryKey(it) } }
         androidx.compose.foundation.lazy.LazyColumn(modifier = Modifier.height(280.dp)) {
-            items(lists, key = { it.id }) { fl ->
+            itemsIndexed(lists, key = { _, it -> it.id }) { idx, fl ->
                 val keys = remember(fl) { fl.items.mapTo(HashSet()) { playback.primaryKey(it) } }
                 val have = entryKeys.count { it in keys }
                 val all = entries.isNotEmpty() && have >= entries.size
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .let { if (idx == 0) it.focusRequester(firstRowFocus) else it }
                         .tvFocus()
                         .clickable {
                             val added = playback.addAllToList(fl.id, entries)
@@ -551,17 +630,21 @@ fun PickFavDialog(
     val lists by playback.lists.collectAsState()
     val key = remember(item) { playback.primaryKey(item) }
     val songName = item.optString("title", "").ifBlank { "该曲目" }
+    // 初始焦点给第一个收藏夹行（主要交互）；列表为空时 ModalCard 自动退回容器兜底
+    val firstRowFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     FavDialogBox(
         title = "收藏到…",
         subtitle = songName + "（点击收藏夹加入/移出）",
-        onDismiss = onDismiss
+        onDismiss = onDismiss,
+        initialFocus = firstRowFocus
     ) {
         androidx.compose.foundation.lazy.LazyColumn(modifier = Modifier.height(280.dp)) {
-            items(lists, key = { it.id }) { fl ->
+            itemsIndexed(lists, key = { _, it -> it.id }) { idx, fl ->
                 val has = remember(fl) { fl.items.any { playback.primaryKey(it) == key } }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .let { if (idx == 0) it.focusRequester(firstRowFocus) else it }
                         .tvFocus()
                         .clickable { playback.toggleFavorite(item, fl.id) }
                         .padding(vertical = 10.dp),
@@ -628,6 +711,15 @@ fun ModalCard(
     width: Dp = 420.dp,
     onDismiss: (() -> Unit)? = null,
     bottomBar: (@Composable RowScope.() -> Unit)? = null,
+    /**
+     * 弹层打开时的初始焦点目标（通常是主操作按钮的 FocusRequester）。
+     *
+     * 为什么需要它：弹层容器自身 focusable 但**不可点击**，旧实现把初始焦点给了容器，
+     * 结果是遥控器按 OK 键毫无反应、视觉上也没有任何焦点框——用户看到的正是
+     * "没有聚焦退出按钮"。焦点必须落在真正可操作的按钮上。
+     * 传 null 时回退到容器（保持其余弹层的既有行为不变）。
+     */
+    initialFocus: androidx.compose.ui.focus.FocusRequester? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
     if (onDismiss != null) {
@@ -635,6 +727,24 @@ fun ModalCard(
     }
     // 至少有一个可关闭/操作按钮时才有可聚焦子节点，可安全接管焦点
     val focusSafe = onDismiss != null || bottomBar != null
+    val containerRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+    androidx.compose.runtime.LaunchedEffect(initialFocus, focusSafe) {
+        if (!focusSafe) return@LaunchedEffect
+        val target = initialFocus ?: containerRequester
+        // 首帧节点可能尚未挂载，requestFocus 会抛 IllegalStateException，带重试
+        repeat(20) {
+            try {
+                target.requestFocus()
+                return@LaunchedEffect
+            } catch (_: IllegalStateException) {
+                kotlinx.coroutines.delay(80)
+            }
+        }
+        // 目标迟迟挂不上（如空列表的首行不存在）：退回容器，保证焦点至少留在弹层内
+        if (initialFocus != null) {
+            try { containerRequester.requestFocus() } catch (_: IllegalStateException) {}
+        }
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -645,9 +755,11 @@ fun ModalCard(
             modifier = Modifier
                 .width(width)
                 .clip(RoundedCornerShape(14.dp))
-                // 弹层自身可聚焦并请求初始焦点（tvInitialFocus 放在 focusable 之前，
-                // 使 FocusRequester 处于外层、焦点目标在其内侧，请求焦点才能命中）。
-                .let { if (focusSafe) it.tvInitialFocus().focusable() else it }
+                // 容器焦点仅作兜底 / D-pad 停留点，不再承担初始焦点。
+                // focusRequester 必须排在 focusable 之前，请求才能命中该节点。
+                .let {
+                    if (focusSafe) it.focusRequester(containerRequester).focusable() else it
+                }
                 .background(MaterialTheme.colorScheme.surface)
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -680,10 +792,12 @@ fun DialogTextButton(
     label: String,
     onClick: () -> Unit,
     background: Color = MaterialTheme.colorScheme.surfaceVariant,
-    textColor: Color = MaterialTheme.colorScheme.onSurface
+    textColor: Color = MaterialTheme.colorScheme.onSurface,
+    /** 供调用方把该按钮设为弹层的初始焦点目标。 */
+    modifier: Modifier = Modifier
 ) {
     Box(
-modifier = Modifier
+        modifier = modifier
              .clip(RoundedCornerShape(8.dp))
              .background(background)
              .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
@@ -730,39 +844,51 @@ fun LyricLineBlock(
 
 /* ---------------- 页级统一组件：返回头栏 / 空态 / 加载更多 ---------------- */
 
-/** 返回 + 标题头栏。用 LazyRow 替代 horizontalScroll：焦点项自动滚入可视区，
- *  标题过长也不会把可聚焦的返回键卷出屏幕（焦点陷阱）。 */
+/** 返回 + 标题头栏。用普通 Row（非 LazyRow）：LazyRow 的懒加载焦点作用域会吞掉
+ *  tvInitialFocus 的 requestFocus，并把后续 D-pad 焦点搜索困在空作用域里，导致
+ *  整页焦点丢失到根节点（真机遥控器上下左右全失灵，2026-09-28 推荐/排行/歌单详情
+ *  共同根因）。标题 weight(1f)+省略号，长标题不再把返回键/trailing 挤出屏幕。 */
 @Composable
 fun BackTopBar(
     title: String,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     titleSize: androidx.compose.ui.unit.TextUnit = 22.sp,
-    trailing: (@Composable RowScope.() -> Unit)? = null
+    trailing: (@Composable RowScope.() -> Unit)? = null,
+    /** 进入页面时是否把初始焦点落到「返回」按钮。默认 true：从首页等带焦点页跳入
+     *  子页面时，旧焦点节点销毁会导致焦点丢失（D-pad 无处移动/跳错），返回按钮
+     *  拿到焦点后方向键即可向下进入内容区。 */
+    initialFocus: Boolean = true
 ) {
-    androidx.compose.foundation.lazy.LazyRow(
+    // 返回按钮共用同一个 FocusRequester：初始焦点抢占 + 焦点兜底注册必须指向同一节点
+    // （同节点挂两个 focusRequester 只有最后一个生效）。
+    val backFr = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+    Row(
         modifier = modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item(key = "back") {
-            Box(
-                modifier = Modifier
-                    .tvFocus()
-                    .clickable(onClick = onBack)
-                    .padding(horizontal = 12.dp, vertical = 9.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("← 返回", color = MaterialTheme.colorScheme.primary, fontSize = 15.sp)
-            }
+        Box(
+            modifier = Modifier
+                .let { if (initialFocus) it.tvInitialFocus(backFr) else it.focusRequester(backFr) }
+                .tvFocusFallback(backFr)
+                .tvFocus()
+                .clickable(onClick = onBack)
+                .padding(horizontal = 12.dp, vertical = 9.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("← 返回", color = MaterialTheme.colorScheme.primary, fontSize = 15.sp)
         }
-        item(key = "title") {
-            Text(title, fontSize = titleSize, color = MaterialTheme.colorScheme.onBackground)
-        }
+        Text(
+            text = title,
+            fontSize = titleSize,
+            color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
         if (trailing != null) {
-            item(key = "trailing") {
-                Row(verticalAlignment = Alignment.CenterVertically) { trailing() }
-            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) { trailing() }
         }
     }
 }

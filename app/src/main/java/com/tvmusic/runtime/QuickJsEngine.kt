@@ -69,6 +69,15 @@ class QuickJsEngine(
         /** jsBlock 跨线程同步等待的超时（ms）：防 JS 线程挂死引发 ANR（H6）。 */
         private const val JS_BLOCK_TIMEOUT_MS = 5_000L
 
+        /**
+         * 插件注册专用预算（ms）：插件源码普遍 300KB~1.5MB，注册要把整段源码
+         * JSON.quote 后交给 QuickJS 求值。沿用 5s 通用预算时，低配 TV 上极易超时——
+         * 而超时只是放弃等待，**JS 线程仍在跑那段大脚本**，后续所有 jsBlock 调用
+         * 继续排队超时，整台引擎就此"假死"，表现为"导入插件后 APK/插件一直加载不出来"。
+         * 故注册路径给足独立预算。
+         */
+        private const val JS_REGISTER_TIMEOUT_MS = 60_000L
+
         private val parseLibsOrder = listOf(
             "crypto-js", "qs", "dayjs", "he", "big-integer", "cheerio", "webdav", "axios"
         )
@@ -212,7 +221,11 @@ class QuickJsEngine(
         val script = "globalThis.__registerPlugin(" +
             JSONObject.quote(platform) + ", " + JSONObject.quote(source) + ");"
         val ok = try {
-            jsBlock { jsContext.executeBooleanScript(script, "register_$platform") }
+            // 注册用独立的长预算（见 JS_REGISTER_TIMEOUT_MS），不用通用 5s：
+            // 大插件求值本就可能超过 5s，误超时会让引擎被大脚本长期占住。
+            jsBlock(timeoutMs = JS_REGISTER_TIMEOUT_MS) {
+                jsContext.executeBooleanScript(script, "register_$platform")
+            }
         } catch (e: Throwable) {
             // 脚本求值抛 QuickJSException 属正常失败路径（语法错误等），
             // 绝不能让它冒泡——冒泡后调用方 runCatching 能接住，但引擎状态可能已脏。
@@ -373,8 +386,15 @@ class QuickJsEngine(
 
     // ---------------- 内部工具 ----------------
 
-    /** 在 JS 线程上执行，跨线程时同步等待结果。 */
-    private inline fun <T> jsBlock(crossinline block: () -> T): T {
+    /**
+     * 在 JS 线程上执行，跨线程时同步等待结果。
+     * @param timeoutMs 等待预算，默认 [JS_BLOCK_TIMEOUT_MS]；插件注册等重活需显式放宽
+     *                  （超时只放弃等待，不中断 JS 线程，预算过小会留下仍占着线程的长任务）。
+     */
+    private inline fun <T> jsBlock(
+        timeoutMs: Long = JS_BLOCK_TIMEOUT_MS,
+        crossinline block: () -> T
+    ): T {
         val handler = jsHandler ?: error("JsEngine not initialized")
         if (jsThreadName != null && Thread.currentThread().name == jsThreadName) {
             return block()
@@ -385,7 +405,7 @@ class QuickJsEngine(
         // 与 invoke 的 5s 兜底对齐：超时抛出后由调用方按 PluginCallException 处理，
         // 避免主线程/启动线程无限等待。
         return try {
-            future.get(JS_BLOCK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            future.get(timeoutMs, TimeUnit.MILLISECONDS)
         } catch (e: java.util.concurrent.TimeoutException) {
             throw PluginCallException("js engine busy/timeout (jsBlock)")
         } catch (e: java.util.concurrent.ExecutionException) {

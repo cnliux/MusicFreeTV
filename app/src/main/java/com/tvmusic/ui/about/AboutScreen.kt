@@ -31,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -152,6 +153,9 @@ fun AboutScreen() {
         val found = update as? UpdateState.Found
         val downloading = update as? UpdateState.Downloading
         val dlFailed = update as? UpdateState.DownloadFailed
+        // 三个更新弹框互斥显示，共用一个初始焦点目标（不传 initialFocus 时
+        // ModalCard 回退到不可点击的容器，OK 键无反应）
+        val updateDialogFocus = remember { androidx.compose.ui.focus.FocusRequester() }
 
         AnimatedVisibility(
             visible = found != null && dialogVisible,
@@ -162,6 +166,7 @@ fun AboutScreen() {
                 title = "发现新版本",
                 subtitle = "v${found?.version}（当前 v${BuildConfig.VERSION_NAME}）",
                 onDismiss = { dialogVisible = false },
+                initialFocus = updateDialogFocus,
                 bottomBar = {
                     androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
                     DialogTextButton("取消", { dialogVisible = false })
@@ -175,7 +180,8 @@ fun AboutScreen() {
                             }
                         },
                         background = MaterialTheme.colorScheme.primary,
-                        textColor = MaterialTheme.colorScheme.onPrimary
+                        textColor = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.focusRequester(updateDialogFocus)
                     )
                 }
             ) {}
@@ -189,9 +195,14 @@ fun AboutScreen() {
                 title = "正在下载更新",
                 subtitle = "v${downloading?.version} · ${downloading?.progress ?: 0}%",
                 onDismiss = { dialogVisible = false },
+                initialFocus = updateDialogFocus,
                 bottomBar = {
                     androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
-                    DialogTextButton("后台下载", { dialogVisible = false })
+                    DialogTextButton(
+                        "后台下载",
+                        { dialogVisible = false },
+                        modifier = Modifier.focusRequester(updateDialogFocus)
+                    )
                 }
             ) {}
         }
@@ -204,6 +215,7 @@ fun AboutScreen() {
                 title = "下载失败",
                 subtitle = dlFailed?.message,
                 onDismiss = { dialogVisible = false },
+                initialFocus = updateDialogFocus,
                 bottomBar = {
                     androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
                     DialogTextButton("取消", { update = UpdateState.Idle })
@@ -217,7 +229,8 @@ fun AboutScreen() {
                             }
                         },
                         background = MaterialTheme.colorScheme.primary,
-                        textColor = MaterialTheme.colorScheme.onPrimary
+                        textColor = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.focusRequester(updateDialogFocus)
                     )
                 }
             ) {}

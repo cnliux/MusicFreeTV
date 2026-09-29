@@ -5,5 +5,8 @@
         <item name="android:colorPrimary">#FF4CAF50</item>
         <item name="android:colorPrimaryDark">#000000</item>
         <item name="android:windowFullscreen">true</item>
+        <!-- 关闭系统焦点高亮白圈：老设备（Android 7/8 盒子）会在 Compose 自绘焦点
+             之上再叠一层平台 focusHighlight，形成双重边框；焦点反馈由 Compose 负责 -->
+        <item name="android:defaultFocusHighlightEnabled">false</item>
     </style>
 </resources>

@@ -39,6 +39,10 @@ internal val PAGE_HTML = """<!DOCTYPE html>
   .page.on { display: block; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; margin-bottom: 14px; }
   .card h2 { font-size: 13px; margin: 0 0 10px; color: var(--muted); font-weight: 600; letter-spacing: 1px; }
+  /* 歌单名/榜单名可能很长，标题行必须限宽截断，否则长标题把整页横向撑破（乱码溢出） */
+  .card h2 #pgTitle, .card h2 #pgDetailTitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; display: inline-block; vertical-align: bottom; }
+  /* 描述/统计是长文本，最多两行，隐藏溢出 */
+  #pgDetailDesc { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-word; }
   .row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); }
   .row:last-child { border-bottom: none; }
   .grow { flex: 1; min-width: 0; }
@@ -165,6 +169,92 @@ internal val PAGE_HTML = """<!DOCTYPE html>
   .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 18px 0; }
   .volrow { display: flex; align-items: center; gap: 10px; padding: 4px 10px 0; }
   .volrow input { flex: 1; }
+  /* 插件板块调试 */
+  textarea {
+    width: 100%; min-height: 74px; background: var(--card2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font-size: 12px;
+    font-family: ui-monospace, Menlo, Consolas, monospace; outline: none; resize: vertical;
+  }
+  textarea:focus { border-color: var(--accent); }
+  .jsonbox {
+    margin-top: 8px; background: #0a0c11; border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px; font-size: 11px; line-height: 1.5; color: #a8d8b9;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-all; max-height: 320px; overflow: auto;
+  }
+  /* 插件浏览：与电视端一致的两级 chip + 卡片网格 */
+  .crumb { cursor: pointer; color: var(--accent); }
+  /* 平台/分类 chip：横向依次排列、排满自动换行、胶囊形状、横纵间距一致 8px，
+     文字强制单行（容器变窄时是整颗按钮换行，不是文字在按钮内折行）。
+     作用域只限插件页两行（#pgPlatforms / #pgTags），不影响其它地方的 .chip。 */
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 0 10px; }
+  .chips .chip {
+    flex: 0 0 auto; max-width: 100%; white-space: nowrap; border-radius: 999px;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  /* flex-basis 而非 min-width：宽屏两枚等分铺满，窄屏自动换行堆叠，不横向溢出 */
+  .entry {
+    flex: 1 1 150px; min-width: 0; text-align: left; font-size: 15px; padding: 12px 14px;
+    background: var(--card2); border: 1px solid var(--line); border-radius: 12px; color: var(--text);
+  }
+  .entry span {
+    display: block; color: var(--muted); font-size: 11px; margin-top: 3px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .entry:active { border-color: var(--accent); }
+  .gname { font-size: 15px; padding: 12px 0 4px; }
+  /* 排行榜分组与推荐歌单共用定宽网格：排满自动换行、无横向滚动条。
+     列宽固定 132px 而非 1fr——1fr 会撑宽列而卡片仍固定宽，间距不均。 */
+  .strip { display: grid; grid-template-columns: repeat(auto-fill, 132px); gap: 14px 12px; }
+  .mgrid { display: grid; grid-template-columns: repeat(auto-fill, 132px); gap: 14px 12px; }
+  /* 页面不显示滚动条（用户要求），仍可滚动 */
+  ::-webkit-scrollbar { display: none; width: 0; height: 0; }
+  * { scrollbar-width: none; -ms-overflow-style: none; }
+  /* 卡片：封面固定 132x132 正方形，object-fit 裁切不撑破布局 */
+  .mcard {
+    width: 132px; position: relative; text-align: left; cursor: pointer;
+    color: var(--text); background: none;
+  }
+  .cfav {
+    position: absolute; top: 6px; right: 6px; width: 30px; height: 30px; border-radius: 50%;
+    background: rgba(0, 0, 0, .55); border: none; color: #fff; font-size: 15px; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .cfav:active { background: var(--accent); }
+  .mcard img, .mcard .ph {
+    width: 132px; height: 132px; border-radius: 10px; object-fit: cover;
+    background: var(--card2); display: flex; align-items: center; justify-content: center;
+    font-size: 26px; color: var(--muted);
+  }
+  /* 标题/副标题都锁死行高 + 限高截断。行高必须写死：中日韩字形上下伸展比拉丁字母大，
+     用 normal 时同一行里 CJK 与英文的 line box 高度不同，卡片就会高低不齐（实测 184/188px 抖动）。 */
+  .mcard .t {
+    font-size: 12px; line-height: 1.35; margin-top: 6px; height: 2.7em; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  .mcard .s {
+    color: var(--muted); font-size: 11px; line-height: 16px; height: 16px; margin-top: 2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .songrow { display: flex; align-items: center; gap: 10px; padding: 8px 4px; min-height: 58px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .songrow:last-child { border-bottom: none; }
+  .songrow:active { background: var(--card2); }
+  .songrow .no { width: 22px; color: var(--muted); font-size: 12px; text-align: right; flex: none; }
+  /* 歌曲行封面必须定尺：不定就是原图宽度（部分图床给 1500px），一行直接把布局撑爆 */
+  .songrow img { width: 42px; height: 42px; border-radius: 6px; object-fit: cover; background: var(--card2); flex: none; }
+  /* 歌名/歌手必须限宽截断：这两条规则以前只存在于 .bit 下，歌曲行里的长歌名会把整行撑破 */
+  .songrow .g { flex: 1; min-width: 0; }
+  .songrow .t { font-size: 13px; line-height: 18px; height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .songrow .s { color: var(--muted); font-size: 11px; line-height: 16px; height: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rowbtns { display: flex; gap: 6px; flex: none; }
+  .rowbtn {
+    width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--line); background: var(--card2);
+    color: var(--text); font-size: 13px; line-height: 1; display: flex; align-items: center; justify-content: center;
+  }
+  .rowbtn:active { border-color: var(--accent); }
+  .rowbtn.faved { color: var(--accent2); }
+  .spin { display: inline-block; width: 15px; height: 15px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -249,6 +339,52 @@ internal val PAGE_HTML = """<!DOCTYPE html>
     </div>
   </section>
 
+  <!-- 推荐（与电视端 APK 同一套操作：排行榜 / 推荐歌单） -->
+  <section class="page" id="page-plugin">
+    <div class="card" id="pgHome">
+      <h2>推荐</h2>
+      <div class="muted" style="padding:0 0 10px;">和电视端完全一样的操作：选平台 → 点歌单或榜单 → 点歌直接播放。</div>
+      <div class="row" style="border:none;padding:0;gap:8px;flex-wrap:wrap;">
+        <button class="entry" onclick="pgOpen('recommend')">🔥 推荐歌单<span>按标签发现好歌单</span></button>
+        <button class="entry" onclick="pgOpen('toplist')">🏆 排行榜<span>各平台权威榜单</span></button>
+      </div>
+    </div>
+
+    <div class="card" id="pgBrowse" style="display:none;">
+      <h2><span class="crumb" onclick="pgHome()">‹ 返回</span> <span id="pgTitle"></span> <span class="muted" id="pgInfo"></span></h2>
+      <div class="chips" id="pgPlatforms"></div>
+      <div class="chips" id="pgTags" style="display:none;"></div>
+      <div id="pgBody"></div>
+      <div class="row" style="border:none;padding:12px 0 0;gap:8px;">
+        <button class="ghost small" id="pgMoreBtn" style="display:none;" onclick="pgMore()">加载更多</button>
+        <button class="ghost small" style="margin-left:auto;" onclick="pgRaw()">原始 JSON</button>
+      </div>
+      <div id="pgRawBox" style="display:none;">
+        <div class="muted" style="padding:8px 0 2px;">插件原始返回（未加工）</div>
+        <div class="jsonbox" id="pgRaw"></div>
+      </div>
+    </div>
+
+    <div class="card" id="pgDetailCard" style="display:none;">
+      <h2><span class="crumb" onclick="pgBack()">‹ 返回</span> <span id="pgDetailTitle"></span></h2>
+      <div class="row" style="border:none;padding:0 0 6px;gap:10px;flex-wrap:wrap;">
+        <img id="pgDetailArt" style="width:64px;height:64px;border-radius:10px;object-fit:cover;background:var(--card2);flex:none;" alt="">
+        <div style="flex:1;min-width:120px;">
+          <div id="pgDetailDesc" class="muted"></div>
+          <div class="muted" id="pgDetailCount" style="padding-top:4px;"></div>
+        </div>
+        <div style="display:flex;gap:8px;flex:none;">
+          <button class="small" onclick="pgPlayAll()">▶ 播放全部</button>
+          <button class="ghost small" onclick="pgFavDetail()">♡ 收藏</button>
+        </div>
+      </div>
+      <div id="pgSongs"></div>
+      <div class="row" style="border:none;padding:12px 0 0;gap:8px;">
+        <button class="ghost small" id="pgSongMore" style="display:none;" onclick="pgMore()">加载更多</button>
+      </div>
+    </div>
+  </section>
+
   <!-- 收藏 -->
   <section class="page" id="page-fav">
     <div class="card">
@@ -327,6 +463,28 @@ internal val PAGE_HTML = """<!DOCTYPE html>
           <option value="sequential">严格顺序（前一个成功即返回）</option>
           <option value="preferFirst">只试第 1 名（低延迟，成功率低）</option>
         </select>
+      </div>
+    </div>
+    <div class="card">
+      <h2>播放页封面</h2>
+      <div class="muted" style="padding:0 0 8px;">大封面的形状与旋转效果。改动会立刻写入配置，播放页下次显示（或重新进入）时生效。</div>
+      <div class="row" style="border:none;padding:0 0 6px;">
+        <span class="muted" style="flex:1;">封面形状</span>
+        <select id="coverShape" onchange="saveCoverShape()" style="max-width:200px;flex:none;">
+          <option value="circle">圆形（默认）</option>
+          <option value="square">方形圆角</option>
+        </select>
+      </div>
+      <div class="row" style="border:none;padding:6px 0 0;">
+        <span class="muted" style="flex:1;">转一圈耗时（秒，0=不转）：仅圆形封面生效</span>
+        <input type="number" id="coverSpinSec" min="0" max="120" style="width:78px;flex:none;">
+        <button class="small" onclick="saveCoverSpin()">保存</button>
+      </div>
+      <div class="chips" style="padding-top:8px;">
+        <span class="chip" onclick="quickCoverSpin(0)">不转</span>
+        <span class="chip" onclick="quickCoverSpin(10)">10 秒</span>
+        <span class="chip" onclick="quickCoverSpin(20)">20 秒</span>
+        <span class="chip" onclick="quickCoverSpin(30)">30 秒</span>
       </div>
     </div>
     <div class="card">
@@ -418,6 +576,7 @@ internal val PAGE_HTML = """<!DOCTYPE html>
 <nav>
   <button class="on" data-tab="player" onclick="switchTab('player')"><span class="ic">🎵</span>播放</button>
   <button data-tab="search" onclick="switchTab('search')"><span class="ic">🔍</span>搜索</button>
+  <button data-tab="plugin" onclick="switchTab('plugin')"><span class="ic">✨</span>推荐</button>
   <button data-tab="fav" onclick="switchTab('fav')"><span class="ic">❤️</span>收藏</button>
   <button data-tab="history" onclick="switchTab('history')"><span class="ic">🕘</span>历史</button>
   <button data-tab="manage" onclick="switchTab('manage')"><span class="ic">⚙️</span>管理</button>
@@ -458,6 +617,7 @@ function switchTab(name) {
   if (name === 'fav') loadFavLists();
   if (name === 'history') loadHistory();
   if (name === 'search') loadSearchCfg();
+  if (name === 'plugin') pgHome();
   if (name === 'manage') { loadSubs(); loadSearchCfg(); loadLyric(); loadMeta(); loadIdle(); }
 }
 
@@ -562,7 +722,7 @@ function playerCmd(cmd) {
   api('/api/player/' + cmd, { method: 'POST' }).then(function () { loadPlayer(); });
 }
 /* 播放页收藏当前曲：弹出收藏夹选择 */
-var favCtx = null; /* { mode:'player' } 或 { mode:'search', idx } */
+var favCtx = null; /* { mode:'player' } | { mode:'search', idx } | { mode:'song', idx, platform, item } | { mode:'sheet', kind, platform, item } */
 function toggleCurFav() {
   favCtx = { mode: 'player' };
   el('favModalTitle').textContent = '收藏到…（' + (el('pTitle').textContent || '') + '）';
@@ -600,6 +760,26 @@ function pickFavAlbum(i) {
       toast(d.favorited ? '已收藏到「' + a.name + '」' : '已从「' + a.name + '」取消');
       loadPlayer(); loadFavAlbums();
     }).catch(function () { toast('操作失败'); });
+  } else if (favCtx.mode === 'song') {
+    var m = favCtx.item;
+    if (!m) return;
+    post('/api/fav/toggle', { listId: a.id, plugin: favCtx.platform, raw: m.raw || m }).then(function (d) {
+      var b = el('pgfav' + favCtx.idx);
+      if (b) { b.textContent = d.favorited ? '♥' : '♡'; b.className = 'rowbtn' + (d.favorited ? ' faved' : ''); }
+      toast(d.favorited ? '已收藏到「' + a.name + '」' : '已从「' + a.name + '」取消');
+      loadFavAlbums();
+    }).catch(function () { toast('操作失败'); });
+  } else if (favCtx.mode === 'sheet') {
+    var s = favCtx.item;
+    if (!s) return;
+    toast('正在收藏整张歌单，请稍候…');
+    post('/api/plugin/collect', { listId: a.id, platform: favCtx.platform, kind: favCtx.kind, item: s.raw || s })
+      .then(function (d) {
+        if (!d || !d.ok) { toast((d && d.error) || '收藏失败'); return; }
+        toast('已收藏 ' + d.added + ' 首到「' + a.name + '」');
+        closeFavModal();
+        loadFavAlbums();
+      }).catch(function () { toast('收藏失败'); });
   } else {
     var it = searchResults[favCtx.idx];
     if (!it) return;
@@ -1345,8 +1525,21 @@ function loadLyric() {
   }).catch(function () {});
 }
 
-/* ---------------- 歌词/封面补全（lrc.cx）+ 播放兜底 ---------------- */
-var metaCfg = { enabled: true, fallbackOtherSource: true, minPlaySeconds: 90, preferPlugin: '', fallbackStrategy: 'staggered' };
+/* ---------------- 歌词/封面补全（lrc.cx）+ 播放兜底 + 封面形状 ---------------- */
+var metaCfg = { enabled: true, fallbackOtherSource: true, minPlaySeconds: 90, preferPlugin: '', fallbackStrategy: 'staggered', coverShape: 'circle', coverSpinMs: 10000 };
+/* 服务端每次 POST /api/meta 都回全量字段，统一用回显刷新本地副本，避免各处手工复制漏字段 */
+function syncMeta(d) {
+  metaCfg = {
+    enabled: d.enabled != null ? d.enabled : true,
+    fallbackOtherSource: d.fallbackOtherSource != null ? d.fallbackOtherSource : true,
+    minPlaySeconds: d.minPlaySeconds != null ? d.minPlaySeconds : 90,
+    preferPlugin: d.preferPlugin || '',
+    fallbackStrategy: d.fallbackStrategy || 'staggered',
+    coverShape: d.coverShape || 'circle',
+    coverSpinMs: d.coverSpinMs != null ? d.coverSpinMs : 10000
+  };
+  renderMeta();
+}
 function renderMeta() {
   el('metaToggle').textContent = metaCfg.enabled ? '开' : '关';
   el('metaToggle').className = 'small' + (metaCfg.enabled ? '' : ' ghost');
@@ -1357,6 +1550,9 @@ function renderMeta() {
   if (document.activeElement !== sel && sel.options.length > 0) sel.value = metaCfg.preferPlugin || '';
   var ssel = el('fallbackStrategy');
   if (document.activeElement !== ssel && ssel.options.length > 0) ssel.value = metaCfg.fallbackStrategy || 'staggered';
+  var csel = el('coverShape');
+  if (document.activeElement !== csel) csel.value = metaCfg.coverShape === 'square' ? 'square' : 'circle';
+  if (document.activeElement !== el('coverSpinSec')) el('coverSpinSec').value = Math.round((metaCfg.coverSpinMs || 0) / 1000);
 }
 function fillPreferOptions() {
   // 选项来自已启用插件列表（/api/plugins）；换源候选按 platform 匹配，故 value 用 platform
@@ -1380,7 +1576,7 @@ function fillPreferOptions() {
 function savePrefer() {
   var v = el('preferPlugin').value || '';
   post('/api/meta', { preferPlugin: v }).then(function (d) {
-    if (d.ok) { metaCfg.preferPlugin = d.preferPlugin || ''; toast(v === '*' ? '优先换源：聚合搜索（最快命中）' : (v ? '优先换源插件：' + v : '已清除优先插件，按音源顺序')); }
+    if (d.ok) { syncMeta(d); toast(v === '*' ? '优先换源：聚合搜索（最快命中）' : (v ? '优先换源插件：' + v : '已清除优先插件，按音源顺序')); }
   }).catch(function () { toast('保存失败'); });
 }
 function saveFallbackStrategy() {
@@ -1392,38 +1588,45 @@ function saveFallbackStrategy() {
     preferFirst: '只试第 1 名'
   }[v] || v;
   post('/api/meta', { fallbackStrategy: v }).then(function (d) {
-    if (d.ok) { metaCfg.fallbackStrategy = d.fallbackStrategy || 'staggered'; toast('换源策略：' + label); }
+    if (d.ok) { syncMeta(d); toast('换源策略：' + label); }
   }).catch(function () { toast('保存失败'); });
 }
 function toggleMeta() {
   // 只改 enabled；其余字段由服务端保持原值（缺省字段不覆盖）
   post('/api/meta', { enabled: !metaCfg.enabled }).then(function (d) {
-    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin, fallbackStrategy: d.fallbackStrategy || 'staggered' }; renderMeta(); }
+    if (d.ok) { syncMeta(d); }
   }).catch(function () { toast('保存失败'); });
 }
 function toggleMetaFallback() {
   post('/api/meta', { fallbackOtherSource: !metaCfg.fallbackOtherSource }).then(function (d) {
-    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin, fallbackStrategy: d.fallbackStrategy || 'staggered' }; renderMeta(); toast(d.fallbackOtherSource ? '已开启换插件救场' : '已关闭换插件救场'); }
+    if (d.ok) { syncMeta(d); toast(d.fallbackOtherSource ? '已开启换插件救场' : '已关闭换插件救场'); }
   }).catch(function () { toast('保存失败'); });
 }
 function saveMinPlay() {
   var v = parseInt(el('minPlaySeconds').value || '90', 10);
   if (isNaN(v) || v < 0) v = 0; if (v > 300) v = 300;
   post('/api/meta', { minPlaySeconds: v }).then(function (d) {
-    if (d.ok) { metaCfg = { enabled: d.enabled, fallbackOtherSource: d.fallbackOtherSource, minPlaySeconds: d.minPlaySeconds, preferPlugin: d.preferPlugin, fallbackStrategy: d.fallbackStrategy || 'staggered' }; renderMeta(); toast(v > 0 ? '已保存：播放不足 ' + d.minPlaySeconds + ' 秒自动换源重播' : '已关闭短播换源'); }
+    if (d.ok) { syncMeta(d); toast(v > 0 ? '已保存：播放不足 ' + d.minPlaySeconds + ' 秒自动换源重播' : '已关闭短播换源'); }
   }).catch(function () { toast('保存失败'); });
 }
+function saveCoverShape() {
+  var v = el('coverShape').value === 'square' ? 'square' : 'circle';
+  post('/api/meta', { coverShape: v }).then(function (d) {
+    if (d.ok) { syncMeta(d); toast(v === 'square' ? '封面已改为方形圆角' : '封面已改为圆形'); }
+  }).catch(function () { toast('保存失败'); });
+}
+function saveCoverSpin() {
+  var sec = parseInt(el('coverSpinSec').value || '0', 10);
+  if (isNaN(sec) || sec < 0) sec = 0; if (sec > 120) sec = 120;
+  post('/api/meta', { coverSpinMs: sec * 1000 }).then(function (d) {
+    if (d.ok) { syncMeta(d); toast(sec > 0 ? ('封面 ' + sec + ' 秒转一圈') : '封面不旋转'); }
+  }).catch(function () { toast('保存失败'); });
+}
+function quickCoverSpin(sec) { el('coverSpinSec').value = sec; saveCoverSpin(); }
 function loadMeta() {
   api('/api/meta').then(function (d) {
     if (d.ok) {
-      metaCfg = {
-        enabled: d.enabled != null ? d.enabled : true,
-        fallbackOtherSource: d.fallbackOtherSource != null ? d.fallbackOtherSource : true,
-        minPlaySeconds: d.minPlaySeconds != null ? d.minPlaySeconds : 90,
-        preferPlugin: d.preferPlugin || '',
-        fallbackStrategy: d.fallbackStrategy || 'staggered'
-      };
-      renderMeta();
+      syncMeta(d);
       fillPreferOptions();
     }
   }).catch(function () {});
@@ -1522,6 +1725,269 @@ function importConfig(input) {
     input.value = '';
   };
   reader.readAsText(f, 'utf-8');
+}
+
+/* ---------------- 插件：与电视端 APK 同一套操作 ---------------- */
+/* 排行榜：选平台 → 分组榜单卡片 → 榜单歌曲；推荐歌单：选平台 → 分类 → 歌单卡片 → 歌曲。
+   点歌直接投屏播放；原始 JSON 只是排查用的折叠面板，不是另一套操作。 */
+var pgCaps = [], pgView = '', pgPlatform = '', pgTags = [], pgTag = null;
+var pgSheets = [], pgSheetPage = 1, pgSheetEnd = true, pgGroups = [];
+var pgDetail = null, pgSongPage = 1, pgSongEnd = true, pgSongs = [], pgRawData = null;
+
+/* 图片一律走电视端 /api/img 代理。手机浏览器可能没有外网出口（只能连到电视），
+   或者被图床防盗链按 Referer 拦掉，直连 CDN 会整页裂图；电视端一定有外网。 */
+function imgSrc(u) { return u ? '/api/img?url=' + encodeURIComponent(u) : ''; }
+/* 图片加载失败时回落 ♪ 占位。onerror 属性是双引号包裹的，里面绝不能再出现双引号，
+   否则提前闭合属性、后面全被当正文显示（详见 AGENTS.md 坑区）。 */
+function artFail(img) {
+  var ph = document.createElement('div');
+  ph.className = 'ph';
+  ph.textContent = '♪';
+  if (img && img.parentNode) img.parentNode.replaceChild(ph, img);
+}
+function artHtml(u) {
+  return u
+    ? '<img src="' + esc(imgSrc(u)) + '" alt="" onerror="artFail(this)">'
+    : '<div class="ph">♪</div>';
+}
+function rowArt(u) {
+  return u ? '<img src="' + esc(imgSrc(u)) + '" alt="" onerror="this.style.display=\'none\'">' : '';
+}
+
+function pgHome() {
+  pgView = ''; pgPlatform = ''; pgDetail = null;
+  el('pgHome').style.display = '';
+  el('pgBrowse').style.display = 'none';
+  el('pgDetailCard').style.display = 'none';
+}
+function pgOpen(view) {
+  pgView = view; pgPlatform = ''; pgDetail = null; pgTags = []; pgTag = null;
+  pgSheets = []; pgGroups = []; pgSheetPage = 1; pgSheetEnd = true;
+  el('pgHome').style.display = 'none';
+  el('pgDetailCard').style.display = 'none';
+  el('pgBrowse').style.display = '';
+  el('pgTitle').textContent = view === 'toplist' ? '排行榜' : '推荐歌单';
+  el('pgInfo').textContent = '';
+  el('pgBody').innerHTML = '<div class="empty"><span class="spin"></span></div>';
+  el('pgMoreBtn').style.display = 'none';
+  pgRawHide();
+  api('/api/plugin/caps').then(function (d) {
+    pgCaps = (d && d.plugins) || [];
+    // 平台 chip 只列出支持当前玩法的插件，与电视端 probePlugins 同条件
+    var list = pgCaps.filter(function (p) { return view === 'toplist' ? p.topLists : p.recommend; });
+    if (!list.length) {
+      el('pgBody').innerHTML = '<div class="empty">' +
+        (view === 'toplist' ? '已启用的插件均不提供排行榜' : '已启用的插件均不支持推荐歌单') + '</div>';
+      el('pgPlatforms').innerHTML = '';
+      return;
+    }
+    pgPlatform = list[0].platform;
+    var html = '';
+    list.forEach(function (p) {
+      html += '<button class="chip' + (p.platform === pgPlatform ? ' on' : '') + '" onclick="pgPickPlatform(\'' +
+        p.platform.replace(/'/g, '') + '\')">' + esc(p.name || p.platform) + '</button>';
+    });
+    el('pgPlatforms').innerHTML = html;
+    if (view === 'toplist') pgLoadTop(); else pgLoadTags();
+  }).catch(function () { el('pgBody').innerHTML = '<div class="empty">读取插件失败</div>'; });
+}
+function pgPickPlatform(p) {
+  pgPlatform = p; pgTags = []; pgTag = null; pgSheets = []; pgGroups = [];
+  pgSheetPage = 1; pgSheetEnd = true;
+  var chips = el('pgPlatforms').children;
+  for (var i = 0; i < chips.length; i++) chips[i].className = 'chip';
+  el('pgBody').innerHTML = '<div class="empty"><span class="spin"></span></div>';
+  el('pgMoreBtn').style.display = 'none';
+  pgRawHide();
+  if (pgView === 'toplist') pgLoadTop(); else pgLoadTags();
+}
+
+/* ---- 排行榜：分组标题 + 组内横向卡片条带（同 TopListScreen） ---- */
+function pgLoadTop() {
+  post('/api/plugin/toplists', { platform: pgPlatform }).then(function (d) {
+    if (!d || !d.ok) {
+      el('pgBody').innerHTML = '<div class="empty">' + esc(d && d.error ? d.error : '排行榜加载失败') + '</div>';
+      return;
+    }
+    pgGroups = d.groups || [];
+    pgRawData = d.data;
+    el('pgInfo').textContent = (d.method || '') + ' · ' + (d.elapsedMs || 0) + 'ms';
+    if (!pgGroups.length) { el('pgBody').innerHTML = '<div class="empty">暂无排行榜数据</div>'; return; }
+    var html = '';
+    pgGroups.forEach(function (g, gi) {
+      html += '<div class="gname">' + esc(g.title) + '</div><div class="strip">';
+      (g.boards || []).forEach(function (b, bi) {
+        html += pgCardHtml('TOPLIST', gi, bi, b);
+      });
+      html += '</div>';
+    });
+    el('pgBody').innerHTML = html;
+    el('pgMoreBtn').style.display = 'none';
+  }).catch(function () { el('pgBody').innerHTML = '<div class="empty">排行榜加载失败</div>'; });
+}
+
+/* 歌单/榜单卡片：整块可点开，右上角 ♡ 单独收藏（点它不触发打开）。
+   根节点必须是 <div> 而非 <button>——button 内不能放 <div>，会被提前闭合导致结构塌掉（见 AGENTS.md）。 */
+function pgCardHtml(kind, gi, bi, it, sub) {
+  return '<div class="mcard" onclick="pgOpenSheet(\'' + kind + '\',' + gi + ',' + bi + ')">' +
+      artHtml(it.artwork) +
+      '<div class="t">' + esc(it.title) + '</div>' +
+      '<div class="s">' + esc(sub != null ? sub : pgPlatform) + '</div>' +
+      '<button class="cfav" title="收藏整张" onclick="event.stopPropagation();pgFavSheet(\'' + kind + '\',' + gi + ',' + bi + ')">♡</button>' +
+  '</div>';
+}
+/* 收藏整张歌单：选收藏夹后交给服务端翻页取全量（对齐 TV 端 SheetScreen 的「全部收藏」） */
+function pgFavSheet(kind, gi, bi) {
+  var src = (kind === 'TOPLIST' ? pgGroups[gi] : null);
+  var item = (src ? (src.boards || [])[bi] : pgSheets[bi]);
+  if (!item) return;
+  favCtx = { mode: 'sheet', kind: kind, platform: (item.platform || pgPlatform), item: item };
+  el('favModalTitle').textContent = '收藏歌单「' + (item.title || '') + '」';
+  loadFavAlbums();
+  el('favModal').className = 'show';
+}
+/* 详情头部的收藏：收的是当前打开的这张歌单/榜单 */
+function pgFavDetail() {
+  if (!pgDetail) return;
+  favCtx = { mode: 'sheet', kind: pgDetail.kind, platform: pgDetail.platform, item: pgDetail.item };
+  el('favModalTitle').textContent = '收藏歌单「' + (el('pgDetailTitle').textContent || '') + '」';
+  loadFavAlbums();
+  el('favModal').className = 'show';
+}
+function pgFavSong(i) {
+  var m = pgSongs[i];
+  if (!m) return;
+  favCtx = { mode: 'song', idx: i, platform: pgDetail.platform, item: m };
+  el('favModalTitle').textContent = '收藏歌曲「' + (m.title || '') + '」';
+  loadFavAlbums();
+  el('favModal').className = 'show';
+}
+
+/* ---- 推荐歌单：分类 chip + 自适应网格（同 RecommendScreen） ---- */
+function pgLoadTags() {
+  el('pgTags').style.display = '';
+  post('/api/plugin/tags', { platform: pgPlatform }).then(function (d) {
+    pgTags = (d && d.tags) || [];
+    pgTag = pgTags[0] || { id: '', title: '默认' };
+    pgRawData = d && d.data;
+    var html = '';
+    pgTags.forEach(function (t, i) {
+      html += '<button class="chip' + (i === 0 ? ' on' : '') + '" onclick="pgPickTag(' + i + ')">' + esc(t.title) + '</button>';
+    });
+    el('pgTags').innerHTML = html;
+    pgSheetPage = 1; pgSheets = []; pgSheetEnd = true;
+    pgLoadSheets();
+  }).catch(function () { el('pgBody').innerHTML = '<div class="empty">读取分类失败</div>'; });
+}
+function pgPickTag(i) {
+  pgTag = pgTags[i] || { id: '', title: '默认' };
+  var chips = el('pgTags').children;
+  for (var k = 0; k < chips.length; k++) chips[k].className = 'chip';
+  chips[i].className = 'chip on';
+  pgSheetPage = 1; pgSheets = []; pgSheetEnd = true;
+  el('pgBody').innerHTML = '<div class="empty"><span class="spin"></span></div>';
+  el('pgMoreBtn').style.display = 'none';
+  pgLoadSheets();
+}
+function pgLoadSheets() {
+  /* 整页重绘：pgSheets 是累积数组，每页回来都按它重建整个网格。
+     这里以前写的是 pgSheetPage > 1 ? pgBodyAppend() : el('pgBody')，但 pgBodyAppend 从来没定义过，
+     一进函数就抛 ReferenceError，于是「加载更多」永远无效（用户报的就是这个）。 */
+  if (pgSheetPage === 1) el('pgBody').innerHTML = '<div class="empty"><span class="spin"></span></div>';
+  post('/api/plugin/sheets', { platform: pgPlatform, tag: pgTag, page: pgSheetPage }).then(function (d) {
+    if (!d || !d.ok) {
+      if (pgSheetPage === 1) el('pgBody').innerHTML = '<div class="empty">' + esc(d && d.error ? d.error : '加载失败') + '</div>';
+      return;
+    }
+    pgSheetEnd = !!d.isEnd;
+    pgRawData = d.data;
+    var got = d.sheets || [];
+    pgSheets = pgSheets.concat(got);
+    if (!pgSheets.length) {
+      if (pgSheetPage === 1) el('pgBody').innerHTML = '<div class="empty">该分类下暂无歌单</div>';
+      return;
+    }
+    el('pgInfo').textContent = (pgTag ? pgTag.title + ' · ' : '') + (d.method || '') + ' · ' + (d.elapsedMs || 0) + 'ms';
+    el('pgBody').innerHTML = '<div class="mgrid">' + pgSheets.map(function (s, i) {
+      return pgCardHtml('SHEET', 0, i, s, s.description || pgPlatform);
+    }).join('') + '</div>';
+    el('pgMoreBtn').style.display = pgSheetEnd ? 'none' : '';
+  }).catch(function () {
+    if (pgSheetPage === 1) el('pgBody').innerHTML = '<div class="empty">歌单加载失败</div>';
+  });
+}
+function pgMore() {
+  if (pgDetail) { pgSongPage++; pgLoadSongs(); } else { pgSheetPage++; pgLoadSheets(); }
+}
+
+/* ---- 详情：歌单 / 榜单歌曲列表，点歌即播（同 SheetScreen） ---- */
+function pgOpenSheet(kind, gi, bi) {
+  var src = (kind === 'TOPLIST' ? pgGroups[gi] : null);
+  var item = (src ? (src.boards || [])[bi] : pgSheets[bi]);
+  if (!item) return;
+  pgDetail = { kind: kind, item: item, platform: item.platform || pgPlatform };
+  pgSongPage = 1; pgSongs = []; pgSongEnd = true;
+  el('pgBrowse').style.display = 'none';
+  el('pgDetailCard').style.display = '';
+  el('pgDetailTitle').textContent = item.title || '详情';
+  el('pgDetailDesc').textContent = item.description || '';
+  el('pgDetailArt').style.display = item.artwork ? '' : 'none';
+  if (item.artwork) el('pgDetailArt').src = imgSrc(item.artwork);
+  el('pgSongs').innerHTML = '<div class="empty"><span class="spin"></span></div>';
+  el('pgSongMore').style.display = 'none';
+  pgLoadSongs();
+}
+function pgBack() { pgDetail = null; el('pgDetailCard').style.display = 'none'; el('pgBrowse').style.display = ''; }
+function pgLoadSongs() {
+  if (pgSongPage > 1) el('pgSongs').innerHTML += '<div class="empty"><span class="spin"></span></div>';
+  post('/api/plugin/detail', {
+    platform: pgDetail.platform, kind: pgDetail.kind, item: pgDetail.item.raw || pgDetail.item, page: pgSongPage
+  }).then(function (d) {
+    if (!d || !d.ok) {
+      el('pgSongs').innerHTML = '<div class="empty">' + esc(d && d.error ? d.error : '加载失败') + '</div>';
+      return;
+    }
+    pgSongEnd = !!d.isEnd;
+    var head = d.header || {};
+    el('pgDetailTitle').textContent = head.title || el('pgDetailTitle').textContent;
+    el('pgDetailDesc').textContent = head.description || el('pgDetailDesc').textContent;
+    if (head.artwork) { el('pgDetailArt').style.display = ''; el('pgDetailArt').src = imgSrc(head.artwork); }
+    pgSongs = pgSongs.concat(d.music || []);
+    el('pgDetailCount').textContent = '共 ' + pgSongs.length + ' 首' + (d.method ? ' · ' + d.method : '');
+    el('pgSongs').innerHTML = pgSongs.map(function (m, i) {
+      return '<div class="songrow" onclick="pgPlay(' + i + ')"><span class="no">' + (i + 1) + '</span>' +
+        rowArt(m.artwork) +
+        '<span class="g"><div class="t">' + esc(m.title) + '</div><div class="s">' +
+        esc([m.artist, m.album].filter(Boolean).join(' · ')) + '</div></span>' +
+        '<span class="rowbtns">' +
+          '<button class="rowbtn" title="播放这首" onclick="event.stopPropagation();pgPlay(' + i + ')">▶</button>' +
+          '<button class="rowbtn" id="pgfav' + i + '" title="收藏这首" onclick="event.stopPropagation();pgFavSong(' + i + ')">♡</button>' +
+        '</span></div>';
+    }).join('');
+    el('pgSongMore').style.display = pgSongEnd ? 'none' : '';
+  }).catch(function () { el('pgSongs').innerHTML = '<div class="empty">歌曲加载失败</div>'; });
+}
+function pgPlay(i) {
+  var m = pgSongs[i];
+  if (!m) return;
+  post('/api/play/queue', {
+    plugin: pgDetail.platform,
+    items: pgSongs.map(function (x) { return x.raw || x; }),
+    index: i,
+    source: pgDetail.platform + ' · ' + (el('pgDetailTitle').textContent || '歌单')
+  }).then(function (d) { toast(d.message || '已在电视端开始播放'); }).catch(function () { toast('播放失败'); });
+}
+function pgPlayAll() { pgPlay(0); }
+
+function pgRawHide() {
+  el('pgRawBox').style.display = 'none';
+  el('pgRaw').textContent = '';
+}
+function pgRaw() {
+  var b = el('pgRawBox');
+  if (b.style.display === 'block') { b.style.display = 'none'; return; }
+  el('pgRaw').textContent = JSON.stringify(pgRawData, null, 2);
+  b.style.display = 'block';
 }
 
 /* ---------------- 状态与轮询 ---------------- */

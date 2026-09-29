@@ -29,8 +29,9 @@ class RecommendViewModel(
 ) : ViewModel() {
 
     private val application = app
-    private val runtime = app.runtime
-    private val repository = app.repository
+    /** 引擎/仓库异步初始化，构造时不直接访问 lateinit。 */
+    private var runtime: com.tvmusic.plugin.PluginRuntime? = null
+    private var repository: com.tvmusic.plugin.PluginRepository? = null
 
     private val _plugins = MutableStateFlow<List<PluginRecord>>(emptyList())
     val plugins: StateFlow<List<PluginRecord>> = _plugins.asStateFlow()
@@ -64,10 +65,13 @@ class RecommendViewModel(
     private var switchSession = 0
 
     init {
-        viewModelScope.launch {
-            repository.ready.first { it }
+        viewModelScope.launch(Dispatchers.IO) {
+            app.awaitEngineReady()
+            runtime = app.runtime
+            repository = app.repository
+            repository?.ready?.first { it }
             probePlugins()
-            repository.plugins.collectLatest {
+            repository?.plugins?.collectLatest {
                 // 插件启停 / 新装后重新探测
                 probePlugins(keepSelection = true)
             }
@@ -78,11 +82,10 @@ class RecommendViewModel(
         // 页签按远程管理「音源与插件」的优先级排列（与首页音源切换器同一套顺序）
         val cfg = com.tvmusic.config.SearchSettings.load(application)
         val able = com.tvmusic.config.SearchSettings.ordered(
-            repository.listEnabled().filter { rec ->
+            repository?.listEnabled()?.filter { rec ->
                 rec.info != null && rec.loadError == null &&
-                    runCatching { runtime.hasMethod(rec.info.platform, "getRecommendSheetsByTag") }
-                        .getOrDefault(false)
-            },
+                    (runtime?.hasMethod(rec.info.platform, "getRecommendSheetsByTag") == true)
+            } ?: emptyList(),
             cfg.sourceOrder
         ) { it.info?.platform ?: it.name }
         _plugins.value = able
@@ -178,7 +181,7 @@ class RecommendViewModel(
         // 插件方法内部抛错（如某些音源的 getRecommendSheetsByTag 未实现/网络失败）
         // 会以 PluginCallException 冒泡，必须在这里兜住，否则 viewModelScope 未捕获异常直接杀进程。
         val res = try {
-            runtime.callAsync(platform, "getRecommendSheetsByTag", tag.toJson(), pageNo)
+            runtime?.callAsync(platform, "getRecommendSheetsByTag", tag.toJson(), pageNo)
         } catch (e: Exception) {
             android.util.Log.w("RecommendVM", "getRecommendSheetsByTag $platform p$pageNo failed: ${e.message}")
             return null
@@ -199,11 +202,11 @@ class RecommendViewModel(
     private suspend fun loadTags(platform: String): List<RecommendTag> {
         val out = linkedMapOf<String, RecommendTag>()
         out[DEFAULT_TAG.id] = DEFAULT_TAG
-        if (!runCatching { runtime.hasMethod(platform, "getRecommendSheetTags") }.getOrDefault(false)) {
+        if (runtime?.hasMethod(platform, "getRecommendSheetTags") != true) {
             return out.values.toList()
         }
         return try {
-            val res = runtime.callAsync(platform, "getRecommendSheetTags")
+            val res = runtime?.callAsync(platform, "getRecommendSheetTags")
             if (res is NotImplementedError) return out.values.toList()
             val root = res as? JSONObject ?: return out.values.toList()
             root.optJSONArray("pinned")?.let { pinned ->

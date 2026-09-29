@@ -25,8 +25,9 @@ class TopListViewModel(
 ) : ViewModel() {
 
     private val application = app
-    private val runtime = app.runtime
-    private val repository = app.repository
+    /** 引擎/仓库异步初始化，构造时不直接访问 lateinit。 */
+    private var runtime: com.tvmusic.plugin.PluginRuntime? = null
+    private var repository: com.tvmusic.plugin.PluginRepository? = null
 
     data class BoardGroup(
         val title: String,
@@ -52,10 +53,13 @@ class TopListViewModel(
     private var session = 0
 
     init {
-        viewModelScope.launch {
-            repository.ready.first { it }
+        viewModelScope.launch(Dispatchers.IO) {
+            app.awaitEngineReady()
+            runtime = app.runtime
+            repository = app.repository
+            repository?.ready?.first { it }
             probePlugins()
-            repository.plugins.collectLatest {
+            repository?.plugins?.collectLatest {
                 probePlugins(keepSelection = true)
             }
         }
@@ -65,10 +69,9 @@ class TopListViewModel(
         // 页签按远程管理「音源与插件」的优先级排列（与首页音源切换器同一套顺序）
         val cfg = com.tvmusic.config.SearchSettings.load(application)
         val able = com.tvmusic.config.SearchSettings.ordered(
-            repository.listEnabled().filter { rec ->
+            (repository?.listEnabled() ?: emptyList()).filter { rec ->
                 rec.info != null && rec.loadError == null &&
-                    runCatching { runtime.hasMethod(rec.info.platform, "getTopLists") }
-                        .getOrDefault(false)
+                    (runtime?.hasMethod(rec.info.platform, "getTopLists") == true)
             },
             cfg.sourceOrder
         ) { it.info?.platform ?: "" }
@@ -105,7 +108,7 @@ class TopListViewModel(
             _error.value = null
             _groups.value = emptyList()
             try {
-                val res = runtime.callAsync(platform, "getTopLists")
+                val res = runtime?.callAsync(platform, "getTopLists")
                 if (mySession != session) return@launch
                 if (res is NotImplementedError) {
                     _error.value = "该插件不提供排行榜"

@@ -38,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -295,10 +296,13 @@ fun AlbumNameDialog(
     onConfirm: (String) -> Unit
 ) {
     var text by remember { mutableStateOf(initial) }
+    // 初始焦点给输入框（主要交互是命名）；不传时 ModalCard 回退到不可点击容器，OK 无反应
+    val inputFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     ModalCard(
         title = title,
         width = 480.dp,
         onDismiss = onDismiss,
+        initialFocus = inputFocus,
         bottomBar = {
             DialogTextButton(
                 "确定",
@@ -317,6 +321,7 @@ fun AlbumNameDialog(
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
             modifier = Modifier
                 .fillMaxWidth()
+                .focusRequester(inputFocus)
                 .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                 .clip(RoundedCornerShape(8.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)

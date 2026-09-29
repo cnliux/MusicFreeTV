@@ -2,6 +2,7 @@ package com.tvmusic.plugin
 
 import android.content.Context
 import android.os.SystemClock
+import android.util.Log
 import com.tvmusic.config.MetaSettings
 import com.tvmusic.runtime.JsEngine
 import com.tvmusic.runtime.PluginCallException
@@ -276,26 +277,38 @@ class PluginRuntime private constructor(
     /**
      * 插件注册需要同步到所有引擎，否则并行搜索分发到的引擎上找不到该插件。
      * 同时缓存“平台 → 源码”，供新扩容引擎按需注册（无需回查 DB/网络）。
+     *
+     * 不做短路：旧实现用 `all { }`，首台引擎失败/超时即短路，后面的引擎**根本没注册**，
+     * 结果是「部分引擎有插件、部分没有」——并行调用落到没注册的引擎上会报
+     * `plugin not loaded`，而整体又判为失败不入库，用户表现就是"导入插件后没加载上"。
+     * 现在逐台独立注册并记账，未注册成功的 lane 交由 [ensureRegistered] 按需补注册。
      */
     suspend fun loadPlugin(platform: String, source: String): Boolean = withContext(Dispatchers.IO) {
-        synchronized(laneLock) {
-            platformSources[platform] = source
-        }
         val targets = lanes.toList()
-        val ok = targets.all { it.registerPlugin(platform, source) }
-        if (ok) {
-            synchronized(laneLock) {
-                // 只标记注册时的目标引擎；期间新懒创建的引擎保持未注册，走按需注册
-                for (i in targets.indices) laneRegistered.getOrNull(i)?.add(platform)
-            }
-            // 插件源码可能更新了方法集，失效该平台的 hasMethod 缓存
-            methodCache.keys.removeAll { it.startsWith("$platform::") }
+        val results = targets.mapIndexed { i, engine ->
+            val ok = runCatching { engine.registerPlugin(platform, source) }.getOrDefault(false)
+            if (ok) synchronized(laneLock) { laneRegistered.getOrNull(i)?.add(platform) }
+            ok
         }
-        ok
+        val okCount = results.count { it }
+        if (okCount < results.size) {
+            val failed = results.indices.filter { !results[it] }
+            Log.w("PluginRuntime", "register $platform: $okCount/${results.size} lanes ok, failed lanes=$failed")
+        }
+        if (okCount == 0) {
+            // 全军覆没：清掉源码缓存，避免 ensureRegistered 反复拿一份永远注册不上的源码重试
+            synchronized(laneLock) { platformSources.remove(platform) }
+            return@withContext false
+        }
+        synchronized(laneLock) { platformSources[platform] = source }
+        // 插件源码可能更新了方法集，失效该平台的 hasMethod 缓存
+        methodCache.keys.removeAll { it.startsWith("$platform::") }
+        true
     }
 
     suspend fun hasPlugin(platform: String): Boolean = withContext(Dispatchers.IO) {
-        primary.hasPlugin(platform)
+        runCatching { primary.hasPlugin(platform) }.getOrDefault(false) ||
+            lanes.drop(1).any { runCatching { it.hasPlugin(platform) }.getOrDefault(false) }
     }
 
     /**
@@ -312,10 +325,24 @@ class PluginRuntime private constructor(
             .also { methodCache[key] = it }
     }
 
+    /**
+     * 读取插件静态信息。primary 是首选，但 primary 注册失败/超时时（首次装大插件时
+     * 偶发）退到其它 lane 读，避免"插件其实已装上却报读取插件信息失败"而不入库。
+     */
     suspend fun readInfo(platform: String): JSONObject? = withContext(Dispatchers.IO) {
-        val raw = primary.readPluginInfo(platform) ?: return@withContext null
+        val raw = readInfoFrom(0, platform) ?: run {
+            var found: String? = null
+            for (i in 1 until lanes.size) {
+                found = readInfoFrom(i, platform)
+                if (found != null) break
+            }
+            found
+        } ?: return@withContext null
         try { JSONObject(raw) } catch (_: Exception) { null }
     }
+
+    private fun readInfoFrom(lane: Int, platform: String): String? =
+        runCatching { lanes.getOrNull(lane)?.readPluginInfo(platform) }.getOrNull()
 
     suspend fun callAsync(
         platform: String,

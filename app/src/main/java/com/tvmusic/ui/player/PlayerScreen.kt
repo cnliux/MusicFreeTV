@@ -17,6 +17,7 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.key
@@ -79,6 +80,7 @@ import com.tvmusic.ui.components.DialogTextButton
 import com.tvmusic.ui.components.LyricLineBlock
 import com.tvmusic.ui.components.ModalCard
 import com.tvmusic.ui.components.tvFocus
+import com.tvmusic.ui.components.tvFocusFallback
 import com.tvmusic.ui.components.tvInitialFocus
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -144,9 +146,11 @@ fun PlayerScreen(onBack: () -> Unit) {
                     val tokens = com.tvmusic.ui.theme.LocalThemeTokens.current
                     // 视频模式隐藏大封面：画面已全屏，封面只会在视频上挡视线
                     if (!state.isVideo) {
-                        // 封面形状/转速可远程配置：circle=圆形旋转，square=方形圆角
-                        val coverShape = com.tvmusic.config.MetaSettings.playerCoverShape
-                        val coverSpinMs = com.tvmusic.config.MetaSettings.playerCoverSpinMs
+                        // 封面形状/转速可远程配置：circle=圆形旋转，square=方形圆角。
+                        // 必须 collectAsState：这两个值远程改完要立刻在播放页生效，
+                        // 之前用普通 getter 读（非响应式），改完不重组，要等切歌/重进才看得到。
+                        val coverShape by com.tvmusic.config.MetaSettings.coverShapeFlow.collectAsState()
+                        val coverSpinMs by com.tvmusic.config.MetaSettings.coverSpinMsFlow.collectAsState()
                         val isCircle = coverShape == com.tvmusic.config.MetaSettings.COVER_SHAPE_CIRCLE
                         val spinEnabled = coverSpinMs > 0 && isCircle
                         val infiniteTransition = rememberInfiniteTransition(label = "cover")
@@ -159,36 +163,37 @@ fun PlayerScreen(onBack: () -> Unit) {
                             ),
                             label = "coverRotation"
                         )
-                        val coverShapeModifier = if (isCircle) {
-                            Modifier
-                                .size(300.dp)
-                                .graphicsLayer {
-                                    shadowElevation = 26.dp.toPx()
-                                    clip = true
-                                    shape = CircleShape
-                                    rotationZ = if (spinEnabled && state.isPlaying) rotation else 0f
-                                }
-                                .tvFocus(1.03f, shapeOverride = CircleShape)
-                        } else {
-                            Modifier
-                                .size(300.dp)
-                                .graphicsLayer {
-                                    shadowElevation = 26.dp.toPx()
-                                    clip = true
-                                    shape = RoundedCornerShape(tokens.radius * 2)
-                                }
-                                .tvFocus(1.03f, shapeOverride = RoundedCornerShape(tokens.radius * 2))
-                        }
+                        /* 封面三层结构（顺序有讲究，勿调换）：
+                           ① 外层 Box 只挂 tvFocus —— 焦点缩放必须发生在裁剪之外，
+                              否则 1.03 倍放大会把描边顶出裁剪区、边框被切掉一截；
+                           ② 中间 graphicsLayer 只做阴影，阴影形状跟着内层裁剪结果走；
+                           ③ 内层 clip(封面形状) 裁内容，最内层 graphicsLayer 做黑胶旋转。
+                           shapeOverride 交给 tvFocus，描边才会跟圆形/方形一致
+                           （此前它被忽略，圆形封面外面套的仍是圆角矩形描边）。 */
+                        val coverClipShape = if (isCircle) CircleShape else RoundedCornerShape(tokens.radius * 2)
                         Box(
-                            modifier = coverShapeModifier.clickable(onClick = onBack)
+                            modifier = Modifier
+                                .size(300.dp)
+                                .tvFocus(1.03f, circle = isCircle, shapeOverride = coverClipShape)
                         ) {
-                            Artwork(state.current!!.artwork, Modifier.fillMaxSize())
-                            if (state.buffering) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.align(Alignment.Center).size(36.dp),
-                                    strokeWidth = 3.dp,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer { shadowElevation = 26.dp.toPx() }
+                                    .clip(coverClipShape)
+                                    .graphicsLayer {
+                                        rotationZ = if (spinEnabled && state.isPlaying) rotation else 0f
+                                    }
+                                    .clickable(onClick = onBack)
+                            ) {
+                                Artwork(state.current!!.artwork, Modifier.fillMaxSize())
+                                if (state.buffering) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.align(Alignment.Center).size(36.dp),
+                                        strokeWidth = 3.dp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
                             }
                         }
                         Spacer(Modifier.width(48.dp))
@@ -481,7 +486,9 @@ private fun FavAlbumDialog(
     onToggle: (String) -> Unit,
     onNewAlbum: () -> Unit
 ) {
-    ModalCard(title = "收藏到…", onDismiss = onDismiss, bottomBar = {
+    // 初始焦点给第一个收藏夹行（主要交互）；列表为空时 ModalCard 自动退回容器兜底
+    val firstListFocus = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+    ModalCard(title = "收藏到…", onDismiss = onDismiss, initialFocus = firstListFocus, bottomBar = {
         DialogTextButton(
             "＋ 新建专辑",
             onNewAlbum,
@@ -491,11 +498,12 @@ private fun FavAlbumDialog(
         DialogTextButton("关闭", onDismiss)
     }) {
         LazyColumn(modifier = Modifier.height(260.dp)) {
-            items(lists, key = { it.id }) { fl ->
+            itemsIndexed(lists, key = { _, it -> it.id }) { idx, fl ->
                 val inIt = fl.id in inLists
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .let { if (idx == 0) it.focusRequester(firstListFocus) else it }
                         .tvFocus()
                         .clickable { onToggle(fl.id) }
                         .padding(vertical = 10.dp),
@@ -520,20 +528,24 @@ private fun SleepTimerDialog(
     onSelect: (Int) -> Unit
 ) {
     val options = listOf(0 to "不开启", 15 to "15 分钟", 30 to "30 分钟", 45 to "45 分钟", 60 to "60 分钟", 90 to "90 分钟")
+    // 初始焦点给第一个选项行；不传时 ModalCard 回退到不可点击容器，OK 无反应
+    val firstOptionFocus = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
     ModalCard(
         title = "定时关闭",
         width = 360.dp,
         onDismiss = onDismiss,
+        initialFocus = firstOptionFocus,
         bottomBar = {
             Spacer(Modifier.weight(1f))
             DialogTextButton("关闭", onDismiss)
         }
     ) {
-        options.forEach { (minutes, label) ->
+        options.forEachIndexed { idx, (minutes, label) ->
             val active = minutes == currentMinutes || (minutes == 0 && currentMinutes == 0)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .let { if (idx == 0) it.focusRequester(firstOptionFocus) else it }
                     .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
                     .clip(RoundedCornerShape(8.dp))
                     .clickable { onSelect(minutes) }
@@ -566,9 +578,12 @@ private fun speedLabel(speed: Float): String {
 @Composable
 private fun EqDialog(state: PlayerUiState, onDismiss: () -> Unit) {
     val presets by PlayerManager.eqPresets.collectAsState()
+    // 初始焦点给均衡器开关；不传时 ModalCard 回退到不可点击容器，OK 无反应
+    val eqSwitchFocus = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
     ModalCard(
         title = "音效（均衡器 / 低音增强）",
         onDismiss = onDismiss,
+        initialFocus = eqSwitchFocus,
         bottomBar = {
             Spacer(Modifier.weight(1f))
             DialogTextButton("关闭", onDismiss)
@@ -578,7 +593,7 @@ private fun EqDialog(state: PlayerUiState, onDismiss: () -> Unit) {
             androidx.compose.material3.Switch(
                 checked = state.eqEnabled,
                 onCheckedChange = { PlayerManager.setEqEnabled(it) },
-                modifier = Modifier.tvFocus()
+                modifier = Modifier.focusRequester(eqSwitchFocus).tvFocus()
             )
         }
         if (state.eqEnabled) {
@@ -653,13 +668,15 @@ private fun RoundCtrlButton(
     initialFocus: Boolean = false,
     onClick: () -> Unit
 ) {
+    // 初始焦点抢占与焦点兜底注册共用同一个 FocusRequester（同节点双挂只有最后一个生效）
+    val fr = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
     Box(
         modifier = Modifier
             .size(size)
             .clip(CircleShape)
             // 未填充态背景：半透明白装饰色，与主题无关故不走 ThemeTokens（数值勿改，保持视觉一致）
             .background(if (filled) MaterialTheme.colorScheme.primary else Color(0x22FFFFFF))
-            .let { if (initialFocus) it.tvInitialFocus() else it }
+            .let { if (initialFocus) it.tvInitialFocus(fr).tvFocusFallback(fr) else it }
             .tvFocus(circle = true)
             .clickable(onClick = onClick)
             .semantics { contentDescription = desc },

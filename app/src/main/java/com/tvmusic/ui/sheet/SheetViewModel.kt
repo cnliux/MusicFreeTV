@@ -6,6 +6,7 @@ import com.tvmusic.core.TvMusicApp
 import com.tvmusic.data.PlaybackStore
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.player.QueueEntry
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,9 +23,10 @@ import org.json.JSONObject
  *  - getArtistWorks(item, page, "music") -> { isEnd, data }
  *  - importMusicSheet(urlLike)    -> IMusicItem[]
  */
-class SheetViewModel(app: TvMusicApp) : ViewModel() {
+class SheetViewModel(private val app: TvMusicApp) : ViewModel() {
 
-    private val runtime = app.runtime
+    /** 引擎/仓库异步初始化，构造时不直接访问 lateinit。 */
+    private var runtime: com.tvmusic.plugin.PluginRuntime? = null
 
     private val _title = MutableStateFlow("")
     val title: StateFlow<String> = _title.asStateFlow()
@@ -63,7 +65,12 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
     private var nextPage = 1
 
     init {
-        load()
+        // 引擎/仓库异步初始化：先在后台等待就绪，再获取引用并加载详情。
+        viewModelScope.launch(Dispatchers.IO) {
+            app.awaitEngineReady()
+            runtime = app.runtime
+            load()
+        }
     }
 
     private fun load() {
@@ -206,7 +213,7 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
     ): FetchedPage? {
         if (method in notImplemented) return null
         val res = try {
-            runtime.callAsync(plugin, method, item, page)
+            runtime?.callAsync(plugin, method, item, page)
         } catch (e: Exception) {
             // 首页允许回退到下一个候选方法；翻页直接抛给 UI 提示
             if (page == 1) {
@@ -234,7 +241,7 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
         val method = "getArtistWorks"
         if (method in notImplemented) return null
         val res = try {
-            runtime.callAsync(plugin, method, item, page, "music")
+            runtime?.callAsync(plugin, method, item, page, "music")
         } catch (e: Exception) {
             if (page == 1) return null else throw e
         }
@@ -256,7 +263,7 @@ class SheetViewModel(app: TvMusicApp) : ViewModel() {
         val method = "importMusicSheet"
         if (method in notImplemented) return null
         val res = try {
-            runtime.callAsync(plugin, method, listOf(url))
+            runtime?.callAsync(plugin, method, listOf(url))
         } catch (e: Exception) {
             return null
         }

@@ -53,8 +53,9 @@ sealed interface SearchPhase {
 class SearchViewModel(app: TvMusicApp) : ViewModel() {
 
     private val application = app
-    private val runtime = app.runtime
-    private val repository = app.repository
+    /** 引擎/仓库异步初始化，构造时不直接访问 lateinit。 */
+    private var runtime: com.tvmusic.plugin.PluginRuntime? = null
+    private var repository: com.tvmusic.plugin.PluginRepository? = null
 
     private val prefs = app.getSharedPreferences("search_prefs", android.content.Context.MODE_PRIVATE)
 
@@ -116,13 +117,17 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
         _sortBy.value = cfg.sortBy
         _sortAsc.value = cfg.asc
         // 插件列表变化（如远程启用/停用）时刷新：仅已在结果页时重建。
-        viewModelScope.launch {
-            repository.plugins.collect {
-                _searchablePlatforms.value = repository.listEnabled()
-                    .mapNotNull { it.info }
-                    .filter { it.supportedSearchType.isEmpty() || TYPE_MUSIC in it.supportedSearchType }
-                    .map { it.platform }
-                    .distinct()
+        // 引擎/仓库异步初始化：先在后台等待就绪，再获取引用并开始监听。
+        viewModelScope.launch(Dispatchers.IO) {
+            app.awaitEngineReady()
+            runtime = app.runtime
+            repository = app.repository
+            repository?.plugins?.collect {
+                _searchablePlatforms.value = repository?.listEnabled()
+                    ?.mapNotNull { it.info }
+                    ?.filter { it.supportedSearchType.isEmpty() || TYPE_MUSIC in it.supportedSearchType }
+                    ?.map { it.platform }
+                    ?.distinct() ?: emptyList()
                 if (_phase.value is SearchPhase.Ready) rebuildFromCache()
             }
         }
@@ -219,7 +224,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             currentQuery = q
             val my = ++session
             val filter = _selectedSources.value
-            val records = repository.listEnabled()
+            val records = (repository?.listEnabled() ?: emptyList())
                 .filter { it.info != null && it.loadError == null }
             val byPlatform = records.associateBy { it.info?.platform ?: it.name }
             val ordered = SearchSettings.ordered(
@@ -247,7 +252,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
                             group = null
                         } else {
                             group = try {
-                                val res = runtime.callParallel(platform, "search", listOf(q, "1", type))
+                                val res = runtime?.callParallel(platform, "search", listOf(q, "1", type))
                                 if (my != session) return@launch
                                 if (res is NotImplementedError) {
                                     null
@@ -318,7 +323,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             val my = session
             try {
                 // 粘性 home 引擎：与聚合搜索同路由，避免翻页请求长期占用 primary 拖慢播放解析
-                val res = runtime.callParallel(group.plugin, "search", listOf(q, next.toString(), type))
+                val res = runtime?.callParallel(group.plugin, "search", listOf(q, next.toString(), type))
                 if (my != session) return@launch
                 val obj = res as? JSONObject
                 val arr = obj?.optJSONArray("data") ?: (res as? JSONArray)
@@ -350,7 +355,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             val my = session
             try {
                 // 粘性 home 引擎：与聚合搜索同路由，避免占用 primary 拖慢播放解析
-                val res = runtime.callParallel(group.plugin, "search", listOf(q, "1", type))
+                val res = runtime?.callParallel(group.plugin, "search", listOf(q, "1", type))
                 if (my != session) return@launch
                 val obj = res as? JSONObject
                 val arr = obj?.optJSONArray("data") ?: (res as? JSONArray)
@@ -373,7 +378,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
 
     /** 插件启停变化后，过滤掉已禁用插件的分组。 */
     private fun rebuildFromCache() {
-        val enabled = repository.listEnabled().filter { it.info != null && it.loadError == null }
+        val enabled = (repository?.listEnabled() ?: emptyList()).filter { it.info != null && it.loadError == null }
             .map { it.info?.platform ?: it.name }.toSet()
         _groups.value = _groups.value.filter { it.plugin in enabled }
     }

@@ -21,10 +21,12 @@ import org.json.JSONObject
  * 首页：只加载「当前选中插件」的推荐歌单与排行榜，
  * 用户可通过顶部音源切换器自由切换到其他插件。
  */
-class HomeViewModel(app: TvMusicApp) : ViewModel() {
+class HomeViewModel(private val app: TvMusicApp) : ViewModel() {
 
-    private val runtime = app.runtime
-    private val repository = app.repository
+    /** 引擎/仓库异步初始化，构造时不直接访问 lateinit（未就绪即崩溃）。
+     *  init 协程中 awaitEngineReady 后再获取，后续访问用 ?. 安全调用。 */
+    private var runtime: com.tvmusic.plugin.PluginRuntime? = null
+    private var repository: com.tvmusic.plugin.PluginRepository? = null
     private val appContext = app.applicationContext
 
     private val _sections = MutableStateFlow<List<HomeSection>>(emptyList())
@@ -48,9 +50,18 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
     private var loadJob: kotlinx.coroutines.Job? = null
 
     init {
-        // 插件列表就绪后，选定第一个可用插件并加载；列表变化时刷新可选项。
-        viewModelScope.launch {
-            repository.ready.collect { isReady ->
+        // 引擎/仓库异步初始化：先在后台等待就绪，再获取引用并开始监听插件列表。
+        viewModelScope.launch(Dispatchers.IO) {
+            app.awaitEngineReady()
+            runtime = app.runtime
+            repository = app.repository
+            // 插件列表变化时刷新可选项（不重新加载当前插件）。
+            // 必须在 repository 赋值之后再挂收集器——原来放 init 顶层时 repository 还是 null，
+            // `repository?.plugins` 直接返回 null，收集器从未挂上，装新插件后首页音源
+            // 列表永远不刷新（要重启应用才可见）。
+            launch { repository!!.plugins.collect { refreshPlugins() } }
+            // 插件列表就绪后，选定第一个可用插件并加载；列表变化时刷新可选项。
+            repository?.ready?.collect { isReady ->
                 if (!isReady) return@collect
                 refreshPlugins()
                 // 首次选定第一个可用插件
@@ -59,20 +70,16 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
                 }
             }
         }
-        // 插件列表变化时刷新可选项（不重新加载当前插件）
-        viewModelScope.launch {
-            repository.plugins
-                .drop(1)
-                .collect { refreshPlugins() }
-        }
     }
 
     private fun refreshPlugins() {
         // 按用户配置的插件优先级排列（远程管理「音源与插件」的顺序），
         // 配置里没提到的保持在末尾原次序；默认选中即配置里的第一个音源
         val order = com.tvmusic.config.SearchSettings.load(appContext).sourceOrder
+        val enabled = repository?.listEnabled()?.filter { it.info != null && it.loadError.isNullOrBlank() }
+            ?: emptyList()
         _availablePlugins.value = com.tvmusic.config.SearchSettings.ordered(
-            repository.listEnabled().filter { it.info != null && it.loadError.isNullOrBlank() },
+            enabled,
             order
         ) { it.info?.platform ?: it.name }
     }
@@ -105,8 +112,8 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
 
             // getTopLists：走并行引擎池（与搜索同路由），不被播放/搜索独占主引擎而挤成 busy
             try {
-                if (runtime.hasMethod(pf, "getTopLists")) {
-                    val top = runtime.callParallel(pf, "getTopLists", timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
+                if (runtime?.hasMethod(pf, "getTopLists") == true) {
+                    val top = runtime?.callParallel(pf, "getTopLists", timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
                     if (top !is NotImplementedError) {
                         val arr = top as? JSONArray
                         if (arr != null) {
@@ -134,8 +141,8 @@ class HomeViewModel(app: TvMusicApp) : ViewModel() {
 
             // getRecommendSheetTags：同走并行引擎池，避免主引擎队列空闲等待
             try {
-                if (runtime.hasMethod(pf, "getRecommendSheetTags")) {
-                    val tags = runtime.callParallel(pf, "getRecommendSheetTags", timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
+                if (runtime?.hasMethod(pf, "getRecommendSheetTags") == true) {
+                    val tags = runtime?.callParallel(pf, "getRecommendSheetTags", timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
                     if (tags !is NotImplementedError) {
                         val groups: JSONArray? = (tags as? JSONObject)?.optJSONArray("data")
                             ?: (tags as? JSONArray)

@@ -112,7 +112,7 @@ object ThemeManager {
             id = "blue", name = "深海蓝", accent = "4A7DFF", accent2 = "7AA5FF",
             bg = "0B0E14", card = "1A1D24", text = "F0F2F5", muted = "8B919C", line = "2E3540",
             radiusPx = 12,
-            tokens = ThemeTokens(radius = 12.dp, focusScale = 1.08f, focusBorder = Color.White, focusGlow = 12.dp),
+            tokens = ThemeTokens(radius = 12.dp, focusScale = 1.08f, focusBorder = Color(0xFF4A7DFF), focusGlow = 12.dp),
             scheme = tvScheme(
                 primary = Color(0xFF4A7DFF), onPrimary = Color(0xFF06122E),
                 primaryContainer = Color(0xFF182A4D), onPrimaryContainer = Color(0xFFC9D9FF),
@@ -169,7 +169,7 @@ object ThemeManager {
             id = "glass", name = "玻璃拟态", accent = "8AB4F8", accent2 = "C3E8FF",
             bg = "0A101C", card = "16243A", text = "E8EEF7", muted = "93A7C4", line = "2C4363",
             radiusPx = 20,
-            tokens = ThemeTokens(radius = 20.dp, focusScale = 1.06f, focusBorder = Color.White, focusGlow = 22.dp, translucentCard = true),
+            tokens = ThemeTokens(radius = 20.dp, focusScale = 1.06f, focusBorder = Color(0xFF8AB4F8), focusGlow = 22.dp, translucentCard = true),
             scheme = tvScheme(
                 primary = Color(0xFF8AB4F8), onPrimary = Color(0xFF0A1A33),
                 primaryContainer = Color(0xFF1E3A5F), onPrimaryContainer = Color(0xFFD6E6FF),
