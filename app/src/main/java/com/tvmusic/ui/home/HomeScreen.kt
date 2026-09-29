@@ -74,6 +74,21 @@ fun HomeScreen(
     // 本次会话内用户取消后不再打扰（rememberSaveable 随导航返回栈保留）。
     val resumeAvailable by PlayerManager.resumeAvailable.collectAsState()
     var resumeDismissed by rememberSaveable { mutableStateOf(false) }
+    // 弹框关闭后焦点归位：Compose 会在弹框移除的同一帧把焦点重定向到"几何最近的可聚焦
+    // 节点"（实测落在音源 chip 上），抢在 200ms 焦点观察器之前——观察器看到整树有焦点
+    // 就不再干预，导致焦点不再归当前页签（GlassButton 链尾 padding 修复后按钮 bounds
+    // 变大触发的回归，2026-09-29 真机实测）。这里在弹框移除后延迟一拍，
+    // 主动把焦点送回当前页面注册的兜底目标（主页=当前页签）。
+    val resumeFallbackTarget = com.tvmusic.ui.components.LocalFocusFallback.current?.value
+    androidx.compose.runtime.LaunchedEffect(resumeDismissed) {
+        if (resumeDismissed) {
+            kotlinx.coroutines.delay(150)
+            try {
+                resumeFallbackTarget?.requestFocus()
+            } catch (_: IllegalStateException) {
+            }
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
     Row(Modifier.fillMaxSize()) {
@@ -474,9 +489,9 @@ private fun SectionWithMore(title: String, onMore: () -> Unit) {
         )
         GlassButton(
             onClick = onMore,
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp)
+            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 12.dp)
         ) { _ ->
-            Text("更多 ›", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+            Text("更多 ›", fontSize = 19.sp, color = MaterialTheme.colorScheme.primary)
         }
     }
 }

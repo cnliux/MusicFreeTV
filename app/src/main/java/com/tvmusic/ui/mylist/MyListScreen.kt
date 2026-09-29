@@ -135,12 +135,12 @@ fun MyListScreen(
                 if (!batchMode) {
                     GlassButton(
                         onClick = { playAll(list, currentList?.name ?: "播放记录") },
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 15.dp)
                     ) { _ ->
                         Text(
                             "▶ 播放全部 (${list.size})",
                             color = MaterialTheme.colorScheme.primary,
-                            fontSize = 14.sp
+                            fontSize = 19.sp
                         )
                     }
                 }
@@ -296,13 +296,13 @@ private const val QUEUE_ID = "__queue__"
 private fun SmallAction(label: String, danger: Boolean = false, onClick: () -> Unit) {
     GlassButton(
         onClick = onClick,
-        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 9.dp)
     ) { _ ->
         Text(
             label,
             color = if (danger) androidx.compose.ui.graphics.Color(0xFFFF5A5A)
             else MaterialTheme.colorScheme.primary,
-            fontSize = 13.sp
+            fontSize = 17.sp
         )
     }
 }
@@ -459,9 +459,9 @@ private fun HistoryRow(
         if (showRemove) {
             GlassButton(
                 onClick = onRemove,
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 11.dp)
             ) { _ ->
-                Text("移除", color = MaterialTheme.colorScheme.error, fontSize = 13.sp)
+                Text("移除", color = MaterialTheme.colorScheme.error, fontSize = 17.sp)
             }
         }
     }

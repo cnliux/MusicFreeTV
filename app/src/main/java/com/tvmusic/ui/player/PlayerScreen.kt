@@ -642,8 +642,8 @@ private fun EqStepButton(label: String, desc: String, onClick: () -> Unit) {
     GlassButton(
         onClick = onClick,
         modifier = Modifier.semantics { contentDescription = desc },
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
-    ) { _ -> Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp) }
+        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 13.dp)
+    ) { _ -> Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp) }
 }
 
 /** 控制按钮：玻璃胶囊（无底色符号+玻璃底座），filled=主色符号（播放/暂停）；焦点样式走统一 tvFocus。

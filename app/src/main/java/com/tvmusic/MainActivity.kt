@@ -518,14 +518,14 @@ private fun MiniPlayerBar(
                 onClick = onToggle,
                 modifier = Modifier
                     .padding(horizontal = 10.dp)
-                    .size(52.dp)
+                    .size(74.dp)
                     .semantics { contentDescription = if (isPlaying) "暂停" else "播放" },
                 contentPadding = PaddingValues(0.dp)
             ) { _ ->
                 Text(
                     if (isPlaying) "⏸" else "▶",
                     color = MaterialTheme.colorScheme.primary,
-                    fontSize = 22.sp
+                    fontSize = 30.sp
                 )
             }
             MiniControl("⏭", desc = "下一首", onClick = onNext)
@@ -538,9 +538,9 @@ private fun MiniControl(symbol: String, desc: String, onClick: () -> Unit) {
     GlassButton(
         onClick = onClick,
         modifier = Modifier
-            .size(44.dp)
+            .size(62.dp)
             .semantics { contentDescription = desc },
         contentPadding = PaddingValues(0.dp)
-    ) { _ -> Text(symbol, color = androidx.compose.ui.graphics.Color.White, fontSize = 22.sp) }
+    ) { _ -> Text(symbol, color = androidx.compose.ui.graphics.Color.White, fontSize = 30.sp) }
 }
 }

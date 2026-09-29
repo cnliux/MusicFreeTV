@@ -257,12 +257,12 @@ private fun ColumnScope.ResultsPanel(
             GlassButton(
                 onClick = { showCollectAll = true },
                 modifier = Modifier.padding(top = 6.dp),
-                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 9.dp)
+                contentPadding = PaddingValues(horizontal = 34.dp, vertical = 15.dp)
             ) { _ ->
                 Text(
                     "♡ 全部收藏（${visibleSongs.size}）",
                     color = MaterialTheme.colorScheme.primary,
-                    fontSize = 15.sp
+                    fontSize = 20.sp
                 )
             }
         }
@@ -582,13 +582,13 @@ private sealed interface ResultRow {
 private fun KtvPrimaryButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     GlassButton(
         onClick = onClick,
-        modifier = modifier.height(44.dp),
-        contentPadding = PaddingValues(horizontal = 20.dp)
+        modifier = modifier.height(60.dp),
+        contentPadding = PaddingValues(horizontal = 36.dp)
     ) { _ ->
         Text(
             label,
             color = MaterialTheme.colorScheme.primary,
-            fontSize = 16.sp,
+            fontSize = 21.sp,
             fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
         )
     }
@@ -611,8 +611,8 @@ private fun KtvSecondaryButton(label: String, modifier: Modifier = Modifier, onC
     GlassButton(
         onClick = onClick,
         modifier = modifier,
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 10.dp)
-    ) { _ -> Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp) }
+        contentPadding = PaddingValues(horizontal = 38.dp, vertical = 15.dp)
+    ) { _ -> Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp) }
 }
 
 @Composable
@@ -631,8 +631,8 @@ private fun HistoryPanel(
                 GlassButton(
                     onClick = viewModel::clearHistory,
                     modifier = Modifier.padding(start = 16.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
-                ) { _ -> Text("清空", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp) }
+                    contentPadding = PaddingValues(horizontal = 24.dp, vertical = 11.dp)
+                ) { _ -> Text("清空", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 18.sp) }
             }
         }
         if (history.isEmpty()) {

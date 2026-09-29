@@ -594,12 +594,12 @@ fun ActionButton(label: String, onClick: () -> Unit) {
     GlassButton(
         onClick = onClick,
         modifier = Modifier.semantics { contentDescription = label },
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 9.dp)
+        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 15.dp)
     ) { _ ->
         Text(
             label,
             color = MaterialTheme.colorScheme.primary,
-            fontSize = 14.sp
+            fontSize = 19.sp
         )
     }
 }
@@ -611,9 +611,9 @@ private fun StepperButton(label: String, onClick: () -> Unit) {
         onClick = onClick,
         modifier = Modifier
             .semantics { contentDescription = label }
-            .size(38.dp),
+            .size(56.dp),
         contentPadding = PaddingValues(0.dp)
     ) { _ ->
-        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp)
+        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 26.sp)
     }
 }

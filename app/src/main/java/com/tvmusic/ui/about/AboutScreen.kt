@@ -251,9 +251,9 @@ private fun UpdateButton(state: UpdateState, onClick: () -> Unit) {
     GlassButton(
         onClick = onClick,
         modifier = Modifier.padding(top = 18.dp),
-        contentPadding = PaddingValues(horizontal = 26.dp, vertical = 10.dp)
+        contentPadding = PaddingValues(horizontal = 42.dp, vertical = 16.dp)
     ) { _ ->
-        Text(label, color = MaterialTheme.colorScheme.primary, fontSize = 15.sp)
+        Text(label, color = MaterialTheme.colorScheme.primary, fontSize = 20.sp)
     }
 }
 
