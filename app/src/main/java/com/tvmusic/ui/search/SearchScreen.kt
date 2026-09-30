@@ -1,10 +1,5 @@
 package com.tvmusic.ui.search
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -50,7 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.tvmusic.config.SearchSettings
-import com.tvmusic.data.SearchEntry
+import com.tvmusic.model.SearchEntry
 import com.tvmusic.ui.components.EmptyState
 import com.tvmusic.ui.components.FilterChip
 import com.tvmusic.ui.components.GlassButton
@@ -59,7 +54,10 @@ import com.tvmusic.ui.components.MediaCard
 import com.tvmusic.ui.components.SectionHeader
 import com.tvmusic.ui.components.tvFocus
 import com.tvmusic.ui.components.withPlatform
-import com.tvmusic.ui.sheet.DetailTarget
+import com.tvmusic.model.DetailTarget
+import com.tvmusic.ui.components.TvTextField
+import com.tvmusic.ui.components.FavoriteButton
+import com.tvmusic.ui.components.ModalVisibility
 
 /** M14：热门搜索占位词（产品决策的静态推荐位）。
  *  后续可改为 SearchSettings 远程配置驱动（远程管理后台已有配置下发通道）。 */
@@ -98,21 +96,12 @@ fun SearchScreen(
                 .padding(end = 20.dp, top = 20.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            OutlinedTextField(
+            TvTextField(
                 value = query,
                 onValueChange = viewModel::setQuery,
-                placeholder = { Text("输入歌名 / 歌手", fontSize = 15.sp) },
-                singleLine = true,
-                shape = RoundedCornerShape(10.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp)
-                    .tvFocus(shapeOverride = RoundedCornerShape(10.dp)),
-                textStyle = MaterialTheme.typography.bodyLarge,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    cursorColor = MaterialTheme.colorScheme.primary
-                )
+                modifier = Modifier.fillMaxWidth().height(50.dp),
+                placeholder = "输入歌名 / 歌手",
+                textStyle = MaterialTheme.typography.bodyLarge
             )
             KtvPrimaryButton("搜 索", modifier = Modifier.fillMaxWidth().height(44.dp)) { viewModel.submit() }
 
@@ -257,12 +246,12 @@ private fun ColumnScope.ResultsPanel(
             GlassButton(
                 onClick = { showCollectAll = true },
                 modifier = Modifier.padding(top = 6.dp),
-                contentPadding = PaddingValues(horizontal = 34.dp, vertical = 15.dp)
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp)
             ) { _ ->
                 Text(
                     "♡ 全部收藏（${visibleSongs.size}）",
                     color = MaterialTheme.colorScheme.primary,
-                    fontSize = 20.sp
+                    fontSize = 18.sp
                 )
             }
         }
@@ -279,22 +268,14 @@ private fun ColumnScope.ResultsPanel(
         )
     }
 
-    AnimatedVisibility(
-        visible = showCollectAll,
-        enter = fadeIn() + scaleIn(initialScale = 0.96f),
-        exit = fadeOut() + scaleOut(targetScale = 0.96f)
-    ) {
+    ModalVisibility(showCollectAll) {
         com.tvmusic.ui.components.CollectSongsDialog(
             entries = visibleSongs,
             playback = playback,
             onDismiss = { showCollectAll = false }
         )
     }
-    AnimatedVisibility(
-        visible = pickFavItem != null,
-        enter = fadeIn() + scaleIn(initialScale = 0.96f),
-        exit = fadeOut() + scaleOut(targetScale = 0.96f)
-    ) {
+    ModalVisibility(pickFavItem != null) {
         pickFavItem?.let { item ->
             com.tvmusic.ui.components.PickFavDialog(
                 item = item,
@@ -420,20 +401,12 @@ private fun KtvResultList(
                         plugin = entry.plugin,
                         onClick = { onPlay(entry) },
                         trailing = {
-                            val fav = favKey in favKeys
-                            Box(
-                                modifier = Modifier
-                                    .tvFocus()
-                                    .clickable { onPickFav(favRaw) }
-                                    .padding(horizontal = 12.dp, vertical = 6.dp)
-                            ) {
-                                Text(
-                                    if (fav) "♥" else "♡",
-                                    fontSize = 22.sp,
-                                    color = if (fav) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                            FavoriteButton(
+                                favorited = favKey in favKeys,
+                                onClick = { onPickFav(favRaw) },
+                                iconSize = 22.sp,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            )
                         }
                     )
                 }
@@ -577,18 +550,18 @@ private sealed interface ResultRow {
     data class End(override val key: String, val count: Int) : ResultRow
 }
 
-/** KTV 主按钮：搜索 / 提交（44dp 高玻璃胶囊，padding 缩小防溢出）。 */
+/** KTV 主按钮：搜索 / 提交（52dp 高玻璃胶囊，padding 缩小防溢出）。 */
 @Composable
 private fun KtvPrimaryButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
     GlassButton(
         onClick = onClick,
-        modifier = modifier.height(60.dp),
-        contentPadding = PaddingValues(horizontal = 36.dp)
+        modifier = modifier.height(48.dp),
+        contentPadding = PaddingValues(horizontal = 18.dp)
     ) { _ ->
         Text(
             label,
             color = MaterialTheme.colorScheme.primary,
-            fontSize = 21.sp,
+            fontSize = 19.sp,
             fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
         )
     }
@@ -611,8 +584,8 @@ private fun KtvSecondaryButton(label: String, modifier: Modifier = Modifier, onC
     GlassButton(
         onClick = onClick,
         modifier = modifier,
-        contentPadding = PaddingValues(horizontal = 38.dp, vertical = 15.dp)
-    ) { _ -> Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp) }
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 7.dp)
+    ) { _ -> Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp) }
 }
 
 @Composable
@@ -631,8 +604,8 @@ private fun HistoryPanel(
                 GlassButton(
                     onClick = viewModel::clearHistory,
                     modifier = Modifier.padding(start = 16.dp),
-                    contentPadding = PaddingValues(horizontal = 24.dp, vertical = 11.dp)
-                ) { _ -> Text("清空", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 18.sp) }
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 5.dp)
+                ) { _ -> Text("清空", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 16.sp) }
             }
         }
         if (history.isEmpty()) {

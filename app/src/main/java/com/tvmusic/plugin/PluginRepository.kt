@@ -2,10 +2,10 @@ package com.tvmusic.plugin
 
 import android.content.Context
 import android.util.Log
-import com.tvmusic.data.PluginInfo
-import com.tvmusic.data.PluginRecord
+import com.tvmusic.model.PluginInfo
+import com.tvmusic.model.PluginRecord
 import com.tvmusic.data.PluginStore
-import com.tvmusic.data.UserVarDef
+import com.tvmusic.model.UserVarDef
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

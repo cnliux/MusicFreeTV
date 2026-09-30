@@ -3,9 +3,9 @@ package com.tvmusic.ui.recommend
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tvmusic.core.TvMusicApp
-import com.tvmusic.data.PluginRecord
-import com.tvmusic.data.RecommendTag
-import com.tvmusic.data.SheetEntry
+import com.tvmusic.model.PluginRecord
+import com.tvmusic.model.RecommendTag
+import com.tvmusic.model.SheetEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import com.tvmusic.constants.PluginMethod
 
 /**
  * 推荐歌单页 VM。对齐 RN recommendSheets：
@@ -84,7 +85,7 @@ class RecommendViewModel(
         val able = com.tvmusic.config.SearchSettings.ordered(
             repository?.listEnabled()?.filter { rec ->
                 rec.info != null && rec.loadError == null &&
-                    (runtime?.hasMethod(rec.info.platform, "getRecommendSheetsByTag") == true)
+                    (runtime?.hasMethod(rec.info.platform, PluginMethod.RECOMMEND_SHEETS) == true)
             } ?: emptyList(),
             cfg.sourceOrder
         ) { it.info?.platform ?: it.name }
@@ -181,7 +182,7 @@ class RecommendViewModel(
         // 插件方法内部抛错（如某些音源的 getRecommendSheetsByTag 未实现/网络失败）
         // 会以 PluginCallException 冒泡，必须在这里兜住，否则 viewModelScope 未捕获异常直接杀进程。
         val res = try {
-            runtime?.callAsync(platform, "getRecommendSheetsByTag", tag.toJson(), pageNo)
+            runtime?.callAsync(platform, PluginMethod.RECOMMEND_SHEETS, tag.toJson(), pageNo)
         } catch (e: Exception) {
             android.util.Log.w("RecommendVM", "getRecommendSheetsByTag $platform p$pageNo failed: ${e.message}")
             return null
@@ -202,11 +203,11 @@ class RecommendViewModel(
     private suspend fun loadTags(platform: String): List<RecommendTag> {
         val out = linkedMapOf<String, RecommendTag>()
         out[DEFAULT_TAG.id] = DEFAULT_TAG
-        if (runtime?.hasMethod(platform, "getRecommendSheetTags") != true) {
+        if (runtime?.hasMethod(platform, PluginMethod.RECOMMEND_TAGS) != true) {
             return out.values.toList()
         }
         return try {
-            val res = runtime?.callAsync(platform, "getRecommendSheetTags")
+            val res = runtime?.callAsync(platform, PluginMethod.RECOMMEND_TAGS)
             if (res is NotImplementedError) return out.values.toList()
             val root = res as? JSONObject ?: return out.values.toList()
             root.optJSONArray("pinned")?.let { pinned ->

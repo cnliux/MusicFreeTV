@@ -3,11 +3,6 @@ package com.tvmusic.ui.about
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.FileProvider
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -52,6 +47,7 @@ import okhttp3.Request
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
+import com.tvmusic.ui.components.ModalVisibility
 
 /** 关于页：开源声明、免责声明与检查更新。 */
 @Composable
@@ -159,11 +155,7 @@ fun AboutScreen() {
         // ModalCard 回退到不可点击的容器，OK 键无反应）
         val updateDialogFocus = remember { androidx.compose.ui.focus.FocusRequester() }
 
-        AnimatedVisibility(
-            visible = found != null && dialogVisible,
-            enter = fadeIn() + scaleIn(initialScale = 0.96f),
-            exit = fadeOut() + scaleOut(targetScale = 0.96f)
-        ) {
+        ModalVisibility(found != null && dialogVisible) {
             ModalCard(
                 title = "发现新版本",
                 subtitle = "v${found?.version}（当前 v${BuildConfig.VERSION_NAME}）",
@@ -187,11 +179,7 @@ fun AboutScreen() {
                 }
             ) {}
         }
-        AnimatedVisibility(
-            visible = dlFailed != null && dialogVisible,
-            enter = fadeIn() + scaleIn(initialScale = 0.96f),
-            exit = fadeOut() + scaleOut(targetScale = 0.96f)
-        ) {
+        ModalVisibility(dlFailed != null && dialogVisible) {
             ModalCard(
                 title = "正在下载更新",
                 subtitle = "v${downloading?.version} · ${downloading?.progress ?: 0}%",
@@ -207,11 +195,7 @@ fun AboutScreen() {
                 }
             ) {}
         }
-        AnimatedVisibility(
-            visible = dlFailed != null && dialogVisible,
-            enter = fadeIn() + scaleIn(initialScale = 0.96f),
-            exit = fadeOut() + scaleOut(targetScale = 0.96f)
-        ) {
+        ModalVisibility(dlFailed != null && dialogVisible) {
             ModalCard(
                 title = "下载失败",
                 subtitle = dlFailed?.message,
@@ -251,9 +235,9 @@ private fun UpdateButton(state: UpdateState, onClick: () -> Unit) {
     GlassButton(
         onClick = onClick,
         modifier = Modifier.padding(top = 18.dp),
-        contentPadding = PaddingValues(horizontal = 42.dp, vertical = 16.dp)
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp)
     ) { _ ->
-        Text(label, color = MaterialTheme.colorScheme.primary, fontSize = 20.sp)
+        Text(label, color = MaterialTheme.colorScheme.primary, fontSize = 18.sp)
     }
 }
 

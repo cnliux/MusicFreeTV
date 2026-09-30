@@ -44,6 +44,7 @@ import com.tvmusic.ui.components.ErrorBox
 import com.tvmusic.ui.components.GlassButton
 import com.tvmusic.ui.components.SectionHeader
 import com.tvmusic.ui.components.tvFocus
+import com.tvmusic.ui.components.TvTextField
 
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
@@ -212,13 +213,11 @@ Box(
                         ActionButton("移除") { viewModel.removeSubscription(url) }
                     }
                 }
-                OutlinedTextField(
+                TvTextField(
                     value = subUrl,
                     onValueChange = { subUrl = it },
-                    label = { Text("粘贴订阅 URL（plugins.json）") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp).tvFocus(shapeOverride = RoundedCornerShape(10.dp))
+                    label = "粘贴订阅 URL（plugins.json）",
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp)
                 )
                 Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     ActionButton("添加订阅并同步") { viewModel.addSubscription(subUrl) }
@@ -323,13 +322,12 @@ Box(
                             info.userVariables.forEach { v ->
                                 val pk = info.platform
                                 val draftVal = (drafts[pk] ?: emptyMap())[v.key] ?: ""
-                                OutlinedTextField(
+                                TvTextField(
                                     value = draftVal,
                                     onValueChange = { viewModel.setDraft(pk, v.key, it) },
-                                    label = { Text("${v.name}（${v.key}）") },
-                                    singleLine = true,
-                                    shape = RoundedCornerShape(8.dp),
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                                    label = "${v.name}（${v.key}）",
+                                    corner = 8,
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
                                 )
                             }
                             Row(Modifier.padding(top = 8.dp)) {
@@ -343,13 +341,11 @@ Box(
 
         item(key = "plugins-import") {
             SettingsCard {
-                OutlinedTextField(
+                TvTextField(
                     value = pluginUrl,
                     onValueChange = { pluginUrl = it },
-                    label = { Text("粘贴单个插件 JS 地址（导入）") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp).tvFocus(shapeOverride = RoundedCornerShape(10.dp))
+                    label = "粘贴单个插件 JS 地址（导入）",
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp)
                 )
                 Row(Modifier.padding(top = 8.dp)) {
                     ActionButton("导入插件") { viewModel.importSingle(pluginUrl) }
@@ -594,12 +590,12 @@ fun ActionButton(label: String, onClick: () -> Unit) {
     GlassButton(
         onClick = onClick,
         modifier = Modifier.semantics { contentDescription = label },
-        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 15.dp)
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp)
     ) { _ ->
         Text(
             label,
             color = MaterialTheme.colorScheme.primary,
-            fontSize = 19.sp
+            fontSize = 17.sp
         )
     }
 }
@@ -611,9 +607,9 @@ private fun StepperButton(label: String, onClick: () -> Unit) {
         onClick = onClick,
         modifier = Modifier
             .semantics { contentDescription = label }
-            .size(56.dp),
+            .size(40.dp),
         contentPadding = PaddingValues(0.dp)
     ) { _ ->
-        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 26.sp)
+        Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp)
     }
 }

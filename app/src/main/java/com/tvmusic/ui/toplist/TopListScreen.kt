@@ -24,9 +24,10 @@ import com.tvmusic.ui.components.ErrorBox
 import com.tvmusic.ui.components.FilterChip
 import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
-import com.tvmusic.ui.sheet.DetailKind
-import com.tvmusic.ui.sheet.DetailTarget
+import com.tvmusic.model.DetailKind
+import com.tvmusic.model.DetailTarget
 import org.json.JSONObject
+import com.tvmusic.ui.components.PluginTabRow
 
 @Composable
 fun TopListScreen(
@@ -53,20 +54,11 @@ fun TopListScreen(
         }
 
         // 插件页签
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 28.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            // key 拼插件名：不同插件可能声明同一 platform，裸 platform 会重复 key 闪退
-            items(plugins, key = { "${it.info?.platform ?: "null"}_${it.name}" }) { rec ->
-                val platform = rec.info?.platform ?: return@items
-                FilterChip(
-                    label = rec.name,
-                    selected = platform == selectedPlatform,
-                    onClick = { viewModel.selectPlugin(platform) }
-                )
-            }
-        }
+        PluginTabRow(
+            plugins = plugins,
+            selectedPlatform = selectedPlatform,
+            onSelect = viewModel::selectPlugin
+        )
 
         when {
             loading && groups.isEmpty() -> LoadingBox()

@@ -3,8 +3,8 @@ package com.tvmusic.ui.toplist
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tvmusic.core.TvMusicApp
-import com.tvmusic.data.PluginRecord
-import com.tvmusic.data.TopListEntry
+import com.tvmusic.model.PluginRecord
+import com.tvmusic.model.TopListEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.json.JSONArray
+import com.tvmusic.constants.PluginMethod
 
 /**
  * 排行榜页 VM。对齐 RN topList：
@@ -71,7 +72,7 @@ class TopListViewModel(
         val able = com.tvmusic.config.SearchSettings.ordered(
             (repository?.listEnabled() ?: emptyList()).filter { rec ->
                 rec.info != null && rec.loadError == null &&
-                    (runtime?.hasMethod(rec.info.platform, "getTopLists") == true)
+                    (runtime?.hasMethod(rec.info.platform, PluginMethod.TOP_LISTS) == true)
             },
             cfg.sourceOrder
         ) { it.info?.platform ?: "" }
@@ -108,7 +109,7 @@ class TopListViewModel(
             _error.value = null
             _groups.value = emptyList()
             try {
-                val res = runtime?.callAsync(platform, "getTopLists")
+                val res = runtime?.callAsync(platform, PluginMethod.TOP_LISTS)
                 if (mySession != session) return@launch
                 if (res is NotImplementedError) {
                     _error.value = "该插件不提供排行榜"

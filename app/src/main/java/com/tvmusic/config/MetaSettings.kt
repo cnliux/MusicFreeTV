@@ -1,6 +1,7 @@
 package com.tvmusic.config
 
 import android.content.Context
+import com.tvmusic.utils.PrefsHolder
 import java.net.URLEncoder
 
 /**
@@ -33,7 +34,8 @@ object MetaSettings {
     private val minPlay = java.util.concurrent.atomic.AtomicInteger(90)
     @Volatile
     private var preferPlugin: String = ""
-    private var appContext: Context? = null
+    /** 共享偏好句柄：init() 时绑定，避免每个 setter 重复 getSharedPreferences(...).edit() 样板。 */
+    private val prefs = PrefsHolder(PREFS)
 
     val isEnabled: Boolean get() = enabled.get()
 
@@ -134,51 +136,46 @@ object MetaSettings {
     val playerCoverSpinDir: String get() = coverSpinDir
 
     fun init(context: Context) {
-        appContext = context.applicationContext
-        val sp = appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        enabled.set(sp?.getBoolean(KEY_ENABLED, true) ?: true)
-        fallbackSrc.set(sp?.getBoolean(KEY_FALLBACK_SRC, true) ?: true)
-        minPlay.set((sp?.getInt(KEY_MIN_PLAY, 90) ?: 90).coerceIn(0, 300))
-        preferPlugin = sp?.getString(KEY_PREFER_PLUGIN, "") ?: ""
-        _fallbackMode = sp?.getString(KEY_FALLBACK_MODE, MODE_CURRENT) ?: MODE_CURRENT
-        fastBatch = (sp?.getInt(KEY_FAST_BATCH, DEFAULT_FAST_BATCH) ?: DEFAULT_FAST_BATCH).coerceIn(1, 6)
-        healthWeight = (sp?.getInt(KEY_HEALTH_WEIGHT, DEFAULT_HEALTH_WEIGHT) ?: DEFAULT_HEALTH_WEIGHT).coerceIn(0, 300)
-        specPreload = sp?.getBoolean(KEY_SPEC_PRELOAD, DEFAULT_SPEC_PRELOAD) ?: DEFAULT_SPEC_PRELOAD
-        _fallbackStrategy = sp?.getString(KEY_FALLBACK_STRATEGY, STRATEGY_STAGGERED) ?: STRATEGY_STAGGERED
-        coverShape = sp?.getString(KEY_COVER_SHAPE, DEFAULT_COVER_SHAPE) ?: DEFAULT_COVER_SHAPE
+        prefs.attach(context)
+        enabled.set(prefs.bool(KEY_ENABLED, true))
+        fallbackSrc.set(prefs.bool(KEY_FALLBACK_SRC, true))
+        minPlay.set(prefs.int(KEY_MIN_PLAY, 90).coerceIn(0, 300))
+        preferPlugin = prefs.str(KEY_PREFER_PLUGIN, "")
+        _fallbackMode = prefs.str(KEY_FALLBACK_MODE, MODE_CURRENT)
+        fastBatch = prefs.int(KEY_FAST_BATCH, DEFAULT_FAST_BATCH).coerceIn(1, 6)
+        healthWeight = prefs.int(KEY_HEALTH_WEIGHT, DEFAULT_HEALTH_WEIGHT).coerceIn(0, 300)
+        specPreload = prefs.bool(KEY_SPEC_PRELOAD, DEFAULT_SPEC_PRELOAD)
+        _fallbackStrategy = prefs.str(KEY_FALLBACK_STRATEGY, STRATEGY_STAGGERED)
+        coverShape = prefs.str(KEY_COVER_SHAPE, DEFAULT_COVER_SHAPE)
         coverShapeState.value = coverShape
-        val spin = (sp?.getInt(KEY_COVER_SPIN_MS, DEFAULT_COVER_SPIN_MS) ?: DEFAULT_COVER_SPIN_MS).coerceIn(0, 120_000)
+        val spin = prefs.int(KEY_COVER_SPIN_MS, DEFAULT_COVER_SPIN_MS).coerceIn(0, 120_000)
         coverSpinMs.set(spin)
         coverSpinMsState.value = spin
-        coverSpinDir = sp?.getString(KEY_COVER_SPIN_DIR, DEFAULT_COVER_SPIN_DIR) ?: DEFAULT_COVER_SPIN_DIR
+        coverSpinDir = prefs.str(KEY_COVER_SPIN_DIR, DEFAULT_COVER_SPIN_DIR)
         coverSpinDirState.value = coverSpinDir
     }
 
     fun setFallbackMode(mode: String) {
         val v = mode.trim()
         _fallbackMode = v
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putString(KEY_FALLBACK_MODE, v)?.apply()
+        prefs.putString(KEY_FALLBACK_MODE, v)
     }
 
     fun setFallbackFastBatch(count: Int) {
         val v = count.coerceIn(1, 6)
         fastBatch = v
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putInt(KEY_FAST_BATCH, v)?.apply()
+        prefs.putInt(KEY_FAST_BATCH, v)
     }
 
     fun setFallbackHealthWeight(percent: Int) {
         val v = percent.coerceIn(0, 300)
         healthWeight = v
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putInt(KEY_HEALTH_WEIGHT, v)?.apply()
+        prefs.putInt(KEY_HEALTH_WEIGHT, v)
     }
 
     fun setFallbackSpecPreload(on: Boolean) {
         specPreload = on
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putBoolean(KEY_SPEC_PRELOAD, on)?.apply()
+        prefs.putBoolean(KEY_SPEC_PRELOAD, on)
     }
 
     /**
@@ -191,24 +188,21 @@ object MetaSettings {
             v != STRATEGY_SEQUENTIAL && v != STRATEGY_PREFER_FIRST
         ) return
         _fallbackStrategy = v
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putString(KEY_FALLBACK_STRATEGY, v)?.apply()
+        prefs.putString(KEY_FALLBACK_STRATEGY, v)
     }
 
     fun setCoverShape(shape: String) {
         val v = if (shape == COVER_SHAPE_SQUARE) COVER_SHAPE_SQUARE else COVER_SHAPE_CIRCLE
         coverShape = v
         coverShapeState.value = v
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putString(KEY_COVER_SHAPE, v)?.apply()
+        prefs.putString(KEY_COVER_SHAPE, v)
     }
 
     fun setCoverSpinMs(ms: Int) {
         val v = ms.coerceIn(0, 120_000)
         coverSpinMs.set(v)
         coverSpinMsState.value = v
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putInt(KEY_COVER_SPIN_MS, v)?.apply()
+        prefs.putInt(KEY_COVER_SPIN_MS, v)
     }
 
     /** 封面旋转方向：仅接受 cw/ccw，其他值静默忽略（保留旧值）。 */
@@ -217,34 +211,29 @@ object MetaSettings {
         if (v != SPIN_DIR_CW && v != SPIN_DIR_CCW) return
         coverSpinDir = v
         coverSpinDirState.value = v
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putString(KEY_COVER_SPIN_DIR, v)?.apply()
+        prefs.putString(KEY_COVER_SPIN_DIR, v)
     }
 
     fun setEnabled(on: Boolean) {
         enabled.set(on)
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putBoolean(KEY_ENABLED, on)?.apply()
+        prefs.putBoolean(KEY_ENABLED, on)
     }
 
     fun setFallbackOtherSource(on: Boolean) {
         fallbackSrc.set(on)
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putBoolean(KEY_FALLBACK_SRC, on)?.apply()
+        prefs.putBoolean(KEY_FALLBACK_SRC, on)
     }
 
     fun setMinPlaySeconds(sec: Int) {
         val v = sec.coerceIn(0, 300)
         minPlay.set(v)
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putInt(KEY_MIN_PLAY, v)?.apply()
+        prefs.putInt(KEY_MIN_PLAY, v)
     }
 
     fun setFallbackPreferPlugin(name: String) {
         val v = name.trim()
         preferPlugin = v
-        appContext?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putString(KEY_PREFER_PLUGIN, v)?.apply()
+        prefs.putString(KEY_PREFER_PLUGIN, v)
     }
 
     private fun enc(s: String): String =

@@ -28,10 +28,11 @@ import com.tvmusic.ui.components.FilterChip
 import com.tvmusic.ui.components.LoadMoreFooter
 import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
-import com.tvmusic.ui.sheet.DetailKind
-import com.tvmusic.ui.sheet.DetailTarget
+import com.tvmusic.model.DetailKind
+import com.tvmusic.model.DetailTarget
 import kotlinx.coroutines.flow.distinctUntilChanged
 import org.json.JSONObject
+import com.tvmusic.ui.components.PluginTabRow
 
 @Composable
 fun RecommendScreen(
@@ -77,23 +78,11 @@ fun RecommendScreen(
         }
 
         // 插件页签（对应 RN recommendSheets/body 的 TabView）
-        LazyRow(
-            contentPadding = PaddingValues(horizontal = 28.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            items(
-                items = plugins,
-                // key 拼插件名：不同插件可能声明同一 platform，裸 platform 会重复 key 闪退
-                key = { "${it.info?.platform ?: "null"}_${it.name}" }
-            ) { rec ->
-                val platform = rec.info?.platform ?: return@items
-                FilterChip(
-                    label = rec.name,
-                    selected = platform == selectedPlatform,
-                    onClick = { viewModel.selectPlugin(platform) }
-                )
-            }
-        }
+        PluginTabRow(
+            plugins = plugins,
+            selectedPlatform = selectedPlatform,
+            onSelect = viewModel::selectPlugin
+        )
 
         // 标签行（pinned + 全部分组标签；默认标签 = { id: "", title: "默认" }）
         LazyRow(

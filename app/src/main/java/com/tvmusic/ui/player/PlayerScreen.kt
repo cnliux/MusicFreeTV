@@ -1,10 +1,5 @@
 package com.tvmusic.ui.player
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -80,6 +75,9 @@ import com.tvmusic.ui.components.tvFocusFallback
 import com.tvmusic.ui.components.tvInitialFocus
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import com.tvmusic.ui.components.ModalVisibility
+import com.tvmusic.ui.components.FadeVisibility
+import com.tvmusic.ui.components.FavListPickRow
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 @Composable
@@ -293,30 +291,30 @@ fun PlayerScreen(onBack: () -> Unit) {
                     // 状态组
                     RoundCtrlButton(
                         if (state.isFavorite) "♥" else "♡",
-                        size = 48.dp, iconSize = 20.sp, filled = false,
+                        size = 40.dp, iconSize = 20.sp, filled = false,
                         desc = "收藏",
                         onClick = { showFavDialog = true }
                     )
                     RoundCtrlButton(
-                        playModeIcon(state.playMode), size = 48.dp, iconSize = 18.sp, filled = false,
+                        playModeIcon(state.playMode), size = 40.dp, iconSize = 18.sp, filled = false,
                         desc = "循环模式"
                     ) {
                         PlayerManager.cyclePlayMode()
                     }
                     Spacer(Modifier.width(24.dp))
                     // 主控组
-                    RoundCtrlButton("⏪", size = 48.dp, iconSize = 18.sp, filled = false, desc = "快退30秒") {
+                    RoundCtrlButton("⏪", size = 40.dp, iconSize = 18.sp, filled = false, desc = "快退30秒") {
                         PlayerManager.seekRelative(-30_000)
                     }
-                    RoundCtrlButton("⏮", size = 56.dp, iconSize = 24.sp, filled = false, desc = "上一首") { PlayerManager.prev() }
+                    RoundCtrlButton("⏮", size = 48.dp, iconSize = 24.sp, filled = false, desc = "上一首") { PlayerManager.prev() }
                     RoundCtrlButton(
                         if (state.isPlaying) "⏸" else "▶",
-                        size = 72.dp, iconSize = 30.sp, filled = true,
+                        size = 60.dp, iconSize = 28.sp, filled = true,
                         desc = if (state.isPlaying) "暂停" else "播放",
                         initialFocus = true // H10：进入播放页焦点落在主按钮，遥控器立即可操作
                     ) { PlayerManager.playPause() }
-                    RoundCtrlButton("⏭", size = 56.dp, iconSize = 24.sp, filled = false, desc = "下一首") { PlayerManager.next() }
-                    RoundCtrlButton("⏩", size = 48.dp, iconSize = 18.sp, filled = false, desc = "快进30秒") {
+                    RoundCtrlButton("⏭", size = 48.dp, iconSize = 24.sp, filled = false, desc = "下一首") { PlayerManager.next() }
+                    RoundCtrlButton("⏩", size = 40.dp, iconSize = 18.sp, filled = false, desc = "快进30秒") {
                         PlayerManager.seekRelative(30_000)
                     }
                     Spacer(Modifier.width(24.dp))
@@ -324,7 +322,7 @@ fun PlayerScreen(onBack: () -> Unit) {
                     // 倍速：点击循环 0.75/1/1.25/1.5/2.0，非 1x 时高亮
                     RoundCtrlButton(
                         speedLabel(state.speed),
-                        size = 48.dp,
+                        size = 40.dp,
                         iconSize = 13.sp,
                         filled = state.speed != 1f,
                         desc = "倍速"
@@ -332,7 +330,7 @@ fun PlayerScreen(onBack: () -> Unit) {
                     // 定时关闭：启用时显示剩余分钟
                     RoundCtrlButton(
                         if (state.sleepRemainingMs > 0) "${state.sleepRemainingMs / 60_000}m" else "🌙",
-                        size = 48.dp,
+                        size = 40.dp,
                         iconSize = 15.sp,
                         filled = state.sleepRemainingMs > 0,
                         desc = "定时关闭"
@@ -340,23 +338,19 @@ fun PlayerScreen(onBack: () -> Unit) {
                     // 音效：均衡器 / 低音增强
                     RoundCtrlButton(
                         "音效",
-                        size = 48.dp,
+                        size = 40.dp,
                         iconSize = 13.sp,
                         filled = state.eqEnabled,
                         desc = "音效设置"
                     ) { showEqDialog = true }
-                    RoundCtrlButton("↩", size = 48.dp, iconSize = 20.sp, filled = false, desc = "返回", onClick = onBack)
+                    RoundCtrlButton("↩", size = 40.dp, iconSize = 20.sp, filled = false, desc = "返回", onClick = onBack)
                     }
                 }
             }
         }
 
         // 收藏到哪个专辑
-        AnimatedVisibility(
-            visible = showFavDialog,
-            enter = fadeIn() + scaleIn(initialScale = 0.96f),
-            exit = fadeOut() + scaleOut(targetScale = 0.96f)
-        ) {
+        ModalVisibility(showFavDialog) {
             val entry = state.current
             FavAlbumDialog(
                 lists = lists,
@@ -366,11 +360,7 @@ fun PlayerScreen(onBack: () -> Unit) {
                 onNewAlbum = { showNameDialog = true }
             )
         }
-        AnimatedVisibility(
-            visible = showSleepDialog,
-            enter = fadeIn() + scaleIn(initialScale = 0.96f),
-            exit = fadeOut() + scaleOut(targetScale = 0.96f)
-        ) {
+        ModalVisibility(showSleepDialog) {
             SleepTimerDialog(
                 currentMinutes = if (state.sleepRemainingMs > 0) {
                     ((state.sleepRemainingMs + 59_999) / 60_000).toInt()
@@ -382,18 +372,10 @@ fun PlayerScreen(onBack: () -> Unit) {
                 }
             )
         }
-        AnimatedVisibility(
-            visible = showEqDialog,
-            enter = fadeIn() + scaleIn(initialScale = 0.96f),
-            exit = fadeOut() + scaleOut(targetScale = 0.96f)
-        ) {
+        ModalVisibility(showEqDialog) {
             EqDialog(state = state, onDismiss = { showEqDialog = false })
         }
-        AnimatedVisibility(
-            visible = showNameDialog,
-            enter = fadeIn() + scaleIn(initialScale = 0.96f),
-            exit = fadeOut() + scaleOut(targetScale = 0.96f)
-        ) {
+        ModalVisibility(showNameDialog) {
             com.tvmusic.ui.mylist.AlbumNameDialog(
                 title = "新建收藏专辑",
                 initial = "",
@@ -414,11 +396,7 @@ fun PlayerScreen(onBack: () -> Unit) {
 /** 控制条左侧提示胶囊：歌词兜底与换源各占一行、互不覆盖；空文本不渲染不占位。 */
 @Composable
 private fun NoticePill(text: String?) {
-    AnimatedVisibility(
-        visible = !text.isNullOrBlank(),
-        enter = fadeIn(),
-        exit = fadeOut()
-    ) {
+    FadeVisibility(!text.isNullOrBlank()) {
         Text(
             text = text ?: "",
             fontSize = 12.sp,
@@ -495,21 +473,17 @@ private fun FavAlbumDialog(
         LazyColumn(modifier = Modifier.height(260.dp)) {
             itemsIndexed(lists, key = { _, it -> it.id }) { idx, fl ->
                 val inIt = fl.id in inLists
-                Row(
+                FavListPickRow(
+                    name = fl.name,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .let { if (idx == 0) it.focusRequester(firstListFocus) else it }
-                        .tvFocus()
-                        .clickable { onToggle(fl.id) }
-                        .padding(vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(if (inIt) "✓ " else "　", color = MaterialTheme.colorScheme.primary, fontSize = 16.sp)
-                    Text(fl.name, fontSize = 16.sp, color = MaterialTheme.colorScheme.onSurface)
-                    Text("（${fl.items.size}）", fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(start = 8.dp))
-                }
+                        .let { if (idx == 0) it.focusRequester(firstListFocus) else it },
+                    leading = if (inIt) "✓ " else "　",
+                    leadingActive = inIt,
+                    leadingFontSize = 16.sp,
+                    trailing = "（${fl.items.size}）",
+                    onClick = { onToggle(fl.id) }
+                )
             }
         }
     }
@@ -642,8 +616,8 @@ private fun EqStepButton(label: String, desc: String, onClick: () -> Unit) {
     GlassButton(
         onClick = onClick,
         modifier = Modifier.semantics { contentDescription = desc },
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 13.dp)
-    ) { _ -> Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 20.sp) }
+        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 7.dp)
+    ) { _ -> Text(label, color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp) }
 }
 
 /** 控制按钮：玻璃胶囊（无底色符号+玻璃底座），filled=主色符号（播放/暂停）；焦点样式走统一 tvFocus。

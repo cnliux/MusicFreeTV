@@ -3,7 +3,7 @@ package com.tvmusic.ui.setting
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tvmusic.core.TvMusicApp
-import com.tvmusic.data.PluginRecord
+import com.tvmusic.model.PluginRecord
 import com.tvmusic.plugin.PlatformHealth
 import com.tvmusic.plugin.PluginRepository
 import com.tvmusic.plugin.PluginRuntime

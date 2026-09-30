@@ -3,10 +3,10 @@ package com.tvmusic.ui.home
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tvmusic.core.TvMusicApp
-import com.tvmusic.data.HomeSection
-import com.tvmusic.data.SheetEntry
-import com.tvmusic.data.TopListEntry
-import com.tvmusic.data.PluginRecord
+import com.tvmusic.model.HomeSection
+import com.tvmusic.model.SheetEntry
+import com.tvmusic.model.TopListEntry
+import com.tvmusic.model.PluginRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import com.tvmusic.constants.PluginMethod
 
 /**
  * 首页：只加载「当前选中插件」的推荐歌单与排行榜，
@@ -112,8 +113,8 @@ class HomeViewModel(private val app: TvMusicApp) : ViewModel() {
 
             // getTopLists：走并行引擎池（与搜索同路由），不被播放/搜索独占主引擎而挤成 busy
             try {
-                if (runtime?.hasMethod(pf, "getTopLists") == true) {
-                    val top = runtime?.callParallel(pf, "getTopLists", timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
+                if (runtime?.hasMethod(pf, PluginMethod.TOP_LISTS) == true) {
+                    val top = runtime?.callParallel(pf, PluginMethod.TOP_LISTS, timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
                     if (top !is NotImplementedError) {
                         val arr = top as? JSONArray
                         if (arr != null) {
@@ -141,8 +142,8 @@ class HomeViewModel(private val app: TvMusicApp) : ViewModel() {
 
             // getRecommendSheetTags：同走并行引擎池，避免主引擎队列空闲等待
             try {
-                if (runtime?.hasMethod(pf, "getRecommendSheetTags") == true) {
-                    val tags = runtime?.callParallel(pf, "getRecommendSheetTags", timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
+                if (runtime?.hasMethod(pf, PluginMethod.RECOMMEND_TAGS) == true) {
+                    val tags = runtime?.callParallel(pf, PluginMethod.RECOMMEND_TAGS, timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
                     if (tags !is NotImplementedError) {
                         val groups: JSONArray? = (tags as? JSONObject)?.optJSONArray("data")
                             ?: (tags as? JSONArray)

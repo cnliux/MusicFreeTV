@@ -4,24 +4,13 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.tvmusic.model.FavList
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-
-/** 一个收藏专辑（歌单）。 */
-data class FavList(
-    val id: String,
-    val name: String,
-    val items: List<JSONObject>
-) {
-    fun toJson(): JSONObject = JSONObject()
-        .put("id", id)
-        .put("name", name)
-        .put("items", JSONArray().apply { items.forEach { put(it) } })
-}
 
 /**
  * 播放历史与收藏的本地 JSON 持久化。
