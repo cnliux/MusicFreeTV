@@ -40,8 +40,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.tvmusic.data.HomeSection
-import com.tvmusic.data.PluginRecord
+import com.tvmusic.model.HomeSection
+import com.tvmusic.model.PluginRecord
 import com.tvmusic.ui.common.fmtDuration
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.ui.components.Artwork
@@ -52,9 +52,11 @@ import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
 import com.tvmusic.ui.components.FilterChip
 import com.tvmusic.ui.components.tvFocus
-import com.tvmusic.ui.sheet.DetailKind
-import com.tvmusic.ui.sheet.DetailTarget
+import com.tvmusic.model.DetailKind
+import com.tvmusic.model.DetailTarget
 import org.json.JSONObject
+import com.tvmusic.ui.components.PluginTabRow
+import com.tvmusic.ui.components.SectionWithMore
 
 @Composable
 fun HomeScreen(
@@ -469,33 +471,6 @@ private fun ActionEntry(
     }
 }
 
-@Composable
-private fun SectionWithMore(title: String, onMore: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 28.dp, end = 20.dp, top = 14.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            Modifier
-                .size(width = 4.dp, height = 18.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(MaterialTheme.colorScheme.primary)
-        )
-        Text(
-            text = title,
-            fontSize = 19.sp,
-            color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.weight(1f).padding(start = 10.dp)
-        )
-        GlassButton(
-            onClick = onMore,
-            contentPadding = PaddingValues(horizontal = 32.dp, vertical = 12.dp)
-        ) { _ ->
-            Text("更多 ›", fontSize = 19.sp, color = MaterialTheme.colorScheme.primary)
-        }
-    }
-}
-
 /** 供各 Screen 获取 VM 的便捷入口（在 ViewModelStoreOwner 作用域内）。 */
 @Composable
 inline fun <reified VM : androidx.lifecycle.ViewModel> rememberVm(
@@ -505,25 +480,19 @@ inline fun <reified VM : androidx.lifecycle.ViewModel> rememberVm(
     return androidx.lifecycle.viewmodel.compose.viewModel(factory = factory)
 }
 
-/** 音源切换器：横向 FilterChip 列表，选中后只加载该插件首页数据。 */
+/** 音源切换器：横向 FilterChip 列表，选中后只加载该插件首页数据。
+ *  与排行榜/推荐页的插件页签行是同一件事（同一 key 规则 + 同一 chip 样式），
+ *  统一走 [PluginTabRow]，仅外层留白略有差异故用 modifier 传入。 */
 @Composable
 private fun PluginSwitcher(
     plugins: List<PluginRecord>,
     currentPlatform: String?,
     onSelect: (String) -> Unit
 ) {
-    LazyRow(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // key 加插件名兜底：两个插件声明同一 platform 时裸 platform key 会冲突闪退
-        items(plugins, key = { "${it.name}_${it.info?.platform ?: it.name}" }) { p ->
-            val platform = p.info?.platform ?: return@items
-            FilterChip(
-                label = p.name,
-                selected = platform == currentPlatform,
-                onClick = { onSelect(platform) }
-            )
-        }
-    }
+    PluginTabRow(
+        plugins = plugins,
+        selectedPlatform = currentPlatform.orEmpty(),
+        onSelect = onSelect,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+    )
 }

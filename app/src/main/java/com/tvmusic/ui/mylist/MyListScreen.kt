@@ -1,10 +1,5 @@
 package com.tvmusic.ui.mylist
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -55,6 +50,7 @@ import com.tvmusic.ui.components.GlassButton
 import com.tvmusic.ui.components.ModalCard
 import com.tvmusic.ui.components.tvFocus
 import org.json.JSONObject
+import com.tvmusic.ui.components.ModalVisibility
 
 /** rememberSaveable 用：进程重建/转屏后仍保持"勾选了哪些条目"。 */
 private val setStringSaver = Saver<Set<String>, List<String>>(
@@ -135,12 +131,12 @@ fun MyListScreen(
                 if (!batchMode) {
                     GlassButton(
                         onClick = { playAll(list, currentList?.name ?: "播放记录") },
-                        contentPadding = PaddingValues(horizontal = 32.dp, vertical = 15.dp)
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp)
                     ) { _ ->
                         Text(
                             "▶ 播放全部 (${list.size})",
                             color = MaterialTheme.colorScheme.primary,
-                            fontSize = 19.sp
+                            fontSize = 17.sp
                         )
                     }
                 }
@@ -263,11 +259,7 @@ key = { i, e ->
     }
 
     // 新建 / 重命名专辑对话框
-    AnimatedVisibility(
-        visible = showNameDialog != null,
-        enter = fadeIn() + scaleIn(initialScale = 0.96f),
-        exit = fadeOut() + scaleOut(targetScale = 0.96f)
-    ) {
+    ModalVisibility(showNameDialog != null) {
         showNameDialog?.let { initial ->
             AlbumNameDialog(
                 title = if (initial.isEmpty()) "新建收藏专辑" else "重命名专辑",
@@ -296,7 +288,7 @@ private const val QUEUE_ID = "__queue__"
 private fun SmallAction(label: String, danger: Boolean = false, onClick: () -> Unit) {
     GlassButton(
         onClick = onClick,
-        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 9.dp)
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
     ) { _ ->
         Text(
             label,
@@ -459,9 +451,9 @@ private fun HistoryRow(
         if (showRemove) {
             GlassButton(
                 onClick = onRemove,
-                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 11.dp)
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
             ) { _ ->
-                Text("移除", color = MaterialTheme.colorScheme.error, fontSize = 17.sp)
+                Text("移除", color = MaterialTheme.colorScheme.error, fontSize = 16.sp)
             }
         }
     }

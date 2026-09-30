@@ -1,10 +1,5 @@
 package com.tvmusic.ui.sheet
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.MaterialTheme
@@ -43,6 +39,9 @@ import com.tvmusic.ui.components.PickFavDialog
 import com.tvmusic.ui.components.tvFocus
 import com.tvmusic.ui.components.withPlatform
 import org.json.JSONObject
+import com.tvmusic.ui.components.FavoriteButton
+import com.tvmusic.ui.components.ModalVisibility
+import com.tvmusic.ui.components.FavListPickRow
 
 @Composable
 fun SheetScreen(
@@ -117,20 +116,13 @@ fun SheetScreen(
                             )
                         }
                         // 单曲收藏：弹出收藏夹选择（可加入任意自定义收藏夹）
-                        Box(
-                            modifier = Modifier
-                                .padding(end = 28.dp)
-                                .tvFocus()
-                                .clickable { pickFavItem = savableEntries[index] }
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                if (fav) "♥" else "♡",
-                                fontSize = 18.sp,
-                                color = if (fav) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                        FavoriteButton(
+                            favorited = fav,
+                            onClick = { pickFavItem = savableEntries[index] },
+                            modifier = Modifier.padding(end = 28.dp),
+                            iconSize = 18.sp,
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        )
                     }
                 }
                 item(key = "footer") {
@@ -146,11 +138,7 @@ fun SheetScreen(
         }
     }
 
-    AnimatedVisibility(
-        visible = showCollectAll,
-        enter = fadeIn() + scaleIn(initialScale = 0.96f),
-        exit = fadeOut() + scaleOut(targetScale = 0.96f)
-    ) {
+    ModalVisibility(showCollectAll) {
         CollectSongsDialog(
             entries = savableEntries,
             playback = playback,
@@ -158,11 +146,7 @@ fun SheetScreen(
             onDismiss = { showCollectAll = false }
         )
     }
-    AnimatedVisibility(
-        visible = pickFavItem != null,
-        enter = fadeIn() + scaleIn(initialScale = 0.96f),
-        exit = fadeOut() + scaleOut(targetScale = 0.96f)
-    ) {
+    ModalVisibility(pickFavItem != null) {
         pickFavItem?.let { item ->
             PickFavDialog(
                 item = item,

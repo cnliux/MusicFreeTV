@@ -4,11 +4,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tvmusic.config.SearchSettings
 import com.tvmusic.core.TvMusicApp
-import com.tvmusic.data.SearchEntry
+import com.tvmusic.model.DetailKind
+import com.tvmusic.model.DetailTarget
+import com.tvmusic.model.SearchEntry
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.player.QueueEntry
-import com.tvmusic.ui.sheet.DetailKind
-import com.tvmusic.ui.sheet.DetailTarget
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import com.tvmusic.constants.PluginMethod
 
 /**
  * 单个插件的一页搜索结果（参考 MusicFree 2.0 的 per-plugin 状态 + lx-music 的
@@ -252,7 +253,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
                             group = null
                         } else {
                             group = try {
-                                val res = runtime?.callParallel(platform, "search", listOf(q, "1", type))
+                                val res = runtime?.callParallel(platform, PluginMethod.SEARCH, listOf(q, "1", type))
                                 if (my != session) return@launch
                                 if (res is NotImplementedError) {
                                     null
@@ -323,7 +324,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             val my = session
             try {
                 // 粘性 home 引擎：与聚合搜索同路由，避免翻页请求长期占用 primary 拖慢播放解析
-                val res = runtime?.callParallel(group.plugin, "search", listOf(q, next.toString(), type))
+                val res = runtime?.callParallel(group.plugin, PluginMethod.SEARCH, listOf(q, next.toString(), type))
                 if (my != session) return@launch
                 val obj = res as? JSONObject
                 val arr = obj?.optJSONArray("data") ?: (res as? JSONArray)
@@ -355,7 +356,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             val my = session
             try {
                 // 粘性 home 引擎：与聚合搜索同路由，避免占用 primary 拖慢播放解析
-                val res = runtime?.callParallel(group.plugin, "search", listOf(q, "1", type))
+                val res = runtime?.callParallel(group.plugin, PluginMethod.SEARCH, listOf(q, "1", type))
                 if (my != session) return@launch
                 val obj = res as? JSONObject
                 val arr = obj?.optJSONArray("data") ?: (res as? JSONArray)

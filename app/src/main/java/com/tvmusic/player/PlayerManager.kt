@@ -36,6 +36,7 @@ import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.random.Random
+import com.tvmusic.constants.PluginMethod
 
 /** 播放模式：顺序 / 单曲循环 / 随机。 */
 enum class PlayMode { ORDER, LOOP_ONE, SHUFFLE }
@@ -1017,7 +1018,7 @@ object PlayerManager {
         rt: PluginRuntime, plugin: String, raw: JSONObject,
         timeoutMs: Long = 60_000L
     ): JSONObject? = try {
-        when (val result = rt.callParallel(plugin, "getMediaSource", listOf(raw.toString(), quality), timeoutMs = timeoutMs)) {
+        when (val result = rt.callParallel(plugin, PluginMethod.MEDIA_SOURCE, listOf(raw.toString(), quality), timeoutMs = timeoutMs)) {
             is JSONObject -> result
             is NotImplementedError -> JSONObject()
             else -> (result as? JSONArray)?.optJSONObject(0) ?: JSONObject()
@@ -1273,7 +1274,7 @@ object PlayerManager {
         rt: PluginRuntime, platform: String, query: String, want: String
     ): List<JSONObject>? {
         val res = try {
-            rt.callParallel(platform, "search", listOf(query, "1", "music"), timeoutMs = FALLBACK_CALL_TIMEOUT_MS)
+            rt.callParallel(platform, PluginMethod.SEARCH, listOf(query, "1", "music"), timeoutMs = FALLBACK_CALL_TIMEOUT_MS)
         } catch (e: Exception) {
             android.util.Log.w("PlayerManager", "fallback search failed on $platform ($query): ${e.message}")
             return null
@@ -1759,7 +1760,7 @@ object PlayerManager {
                 // 歌词不是关键路径：15s 超时足够，避免无响应的 getLyric 长期占住引擎串行队列
                 val result = try {
                     rt.callParallel(
-                        entry.plugin, "getLyric", listOf(entry.raw.toString()),
+                        entry.plugin, PluginMethod.LYRIC, listOf(entry.raw.toString()),
                         timeoutMs = 15_000
                     )
                 } catch (_: Exception) {

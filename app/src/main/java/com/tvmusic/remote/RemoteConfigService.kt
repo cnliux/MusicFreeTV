@@ -11,7 +11,7 @@ import android.os.IBinder
 import android.util.Log
 import com.tvmusic.BuildConfig
 import com.tvmusic.core.TvMusicApp
-import com.tvmusic.data.FavList
+import com.tvmusic.model.FavList
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -26,6 +26,9 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import com.tvmusic.constants.MediaKind
+import com.tvmusic.constants.PluginMethod
+import com.tvmusic.utils.matchKeyOf
 
 /**
  * 局域网远程管理服务。
@@ -400,8 +403,8 @@ class RemoteConfigService : Service() {
                             JSONObject()
                                 .put("platform", pf)
                                 .put("name", rec.name)
-                                .put("topLists", runCatching { runtime.hasMethod(pf, "getTopLists") }.getOrDefault(false))
-                                .put("recommend", runCatching { runtime.hasMethod(pf, "getRecommendSheetsByTag") }.getOrDefault(false))
+                                .put("topLists", runCatching { runtime.hasMethod(pf, PluginMethod.TOP_LISTS) }.getOrDefault(false))
+                                .put("recommend", runCatching { runtime.hasMethod(pf, PluginMethod.RECOMMEND_SHEETS) }.getOrDefault(false))
                         )
                     }
                 }
@@ -1218,20 +1221,20 @@ class RemoteConfigService : Service() {
         if (item.optString("platform").isBlank()) item.put("platform", platform)
         val pageArg = page.toString()
         val candidates: List<Pair<String, List<String>>> = when (kind) {
-            "TOPLIST" -> listOf(
-                "getTopListDetail" to listOf(item.toString(), pageArg),
-                "getMusicSheetInfo" to listOf(item.toString(), pageArg)
+            MediaKind.TOPLIST -> listOf(
+                PluginMethod.TOP_LIST_DETAIL to listOf(item.toString(), pageArg),
+                PluginMethod.MUSIC_SHEET_INFO to listOf(item.toString(), pageArg)
             )
-            "ALBUM" -> listOf("getAlbumInfo" to listOf(item.toString(), pageArg))
-            "ARTIST" -> listOf("getArtistWorks" to listOf(item.toString(), pageArg, "music"))
-            "IMPORT" -> listOf(
-                "importMusicSheet" to listOf(JSONArray().put(item.optString("url", "")).toString())
+            MediaKind.ALBUM -> listOf(PluginMethod.ALBUM_INFO to listOf(item.toString(), pageArg))
+            MediaKind.ARTIST -> listOf(PluginMethod.ARTIST_WORKS to listOf(item.toString(), pageArg, MediaKind.MUSIC))
+            MediaKind.IMPORT -> listOf(
+                PluginMethod.IMPORT_MUSIC_SHEET to listOf(JSONArray().put(item.optString("url", "")).toString())
             )
             else -> buildList {
-                add("getMusicSheetInfo" to listOf(item.toString(), pageArg))
-                add("getTopListDetail" to listOf(item.toString(), pageArg))
+                add(PluginMethod.MUSIC_SHEET_INFO to listOf(item.toString(), pageArg))
+                add(PluginMethod.TOP_LIST_DETAIL to listOf(item.toString(), pageArg))
                 if (page == 1) {
-                    add("importMusicSheet" to listOf(JSONArray().put(item.optString("url", "")).toString()))
+                    add(PluginMethod.IMPORT_MUSIC_SHEET to listOf(JSONArray().put(item.optString("url", "")).toString()))
                 }
             }
         }
@@ -1397,7 +1400,7 @@ class RemoteConfigService : Service() {
         val cached = favKeysCache
         if (cached != null && favKeysRef === cur) return cached
         val s = HashSet<String>()
-        cur.forEach { l -> l.items.forEach { it -> s.add(it.optString("title", "") + '\u0000' + it.optString("artist", "")) } }
+        cur.forEach { l -> l.items.forEach { it -> s.add(matchKeyOf(it.optString("title", ""), it.optString("artist", ""))) } }
         favKeysCache = s
         favKeysRef = cur
         return s
@@ -1415,7 +1418,7 @@ class RemoteConfigService : Service() {
                     .put("title", e.title)
                     .put("artist", e.artist)
                     .put("album", e.album)
-                    .put("faved", favKeys.contains(e.title + '\u0000' + e.artist))
+                    .put("faved", favKeys.contains(matchKeyOf(e.title, e.artist)))
             )
         }
         return JSONObject()
@@ -1658,7 +1661,7 @@ class RemoteConfigService : Service() {
                                     // 单个 invoke 45s（略低于 TV 端默认 60s），宁慢勿丢源（超时即整源无结果）
                                     withTimeoutOrNull(60_000) {
                                         app.runtime.callParallel(
-                                            platform, "search", listOf(keyword, page.toString(), "music"),
+                                            platform, PluginMethod.SEARCH, listOf(keyword, page.toString(), "music"),
                                             timeoutMs = 45_000
                                         )
                                     }?.let { res ->

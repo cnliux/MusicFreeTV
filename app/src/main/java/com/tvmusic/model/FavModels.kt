@@ -1,9 +1,22 @@
-package com.tvmusic.ui.sheet
+package com.tvmusic.model
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.getAndUpdate
+import org.json.JSONArray
 import org.json.JSONObject
+
+/** 一个收藏专辑（歌单）。 */
+data class FavList(
+    val id: String,
+    val name: String,
+    val items: List<JSONObject>
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("id", id)
+        .put("name", name)
+        .put("items", JSONArray().apply { items.forEach { put(it) } })
+}
 
 /**
  * 详情页类型，决定 SheetViewModel 调用哪个插件方法：
@@ -38,6 +51,7 @@ data class DetailTarget(
     }
 }
 
+/** 详情页跳转目标的单例中转站（原 ui/sheet/SheetTarget.kt，模型部分迁至 model 包）。 */
 object SheetTarget {
     private val _target = MutableStateFlow<DetailTarget?>(null)
 

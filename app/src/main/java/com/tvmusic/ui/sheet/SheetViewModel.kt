@@ -4,6 +4,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.tvmusic.core.TvMusicApp
 import com.tvmusic.data.PlaybackStore
+import com.tvmusic.constants.PluginMethod
+import com.tvmusic.model.DetailKind
+import com.tvmusic.model.SheetTarget
 import com.tvmusic.player.PlayerManager
 import com.tvmusic.player.QueueEntry
 import kotlinx.coroutines.Dispatchers
@@ -191,15 +194,15 @@ class SheetViewModel(private val app: TvMusicApp) : ViewModel() {
     private suspend fun fetchPage(page: Int): FetchedPage? {
         return when (kind) {
             DetailKind.SHEET -> {
-                callMusicListPage("getMusicSheetInfo", page, "sheetItem")
-                    ?: callMusicListPage("getTopListDetail", page, "topListItem")
+                callMusicListPage(PluginMethod.MUSIC_SHEET_INFO, page, "sheetItem")
+                    ?: callMusicListPage(PluginMethod.TOP_LIST_DETAIL, page, "topListItem")
                     ?: if (page == 1) callImport() else null
             }
             DetailKind.TOPLIST -> {
-                callMusicListPage("getTopListDetail", page, "topListItem")
-                    ?: callMusicListPage("getMusicSheetInfo", page, "sheetItem")
+                callMusicListPage(PluginMethod.TOP_LIST_DETAIL, page, "topListItem")
+                    ?: callMusicListPage(PluginMethod.MUSIC_SHEET_INFO, page, "sheetItem")
             }
-            DetailKind.ALBUM -> callMusicListPage("getAlbumInfo", page, "albumItem")
+            DetailKind.ALBUM -> callMusicListPage(PluginMethod.ALBUM_INFO, page, "albumItem")
             DetailKind.ARTIST -> callArtistWorks(page)
             DetailKind.IMPORT -> if (page == 1) callImport() else null
         }
@@ -238,7 +241,7 @@ class SheetViewModel(private val app: TvMusicApp) : ViewModel() {
 
     /** getArtistWorks(item, page, "music") -> { isEnd, data: IMusicItem[] }。 */
     private suspend fun callArtistWorks(page: Int): FetchedPage? {
-        val method = "getArtistWorks"
+        val method = PluginMethod.ARTIST_WORKS
         if (method in notImplemented) return null
         val res = try {
             runtime?.callAsync(plugin, method, item, page, "music")
@@ -260,7 +263,7 @@ class SheetViewModel(private val app: TvMusicApp) : ViewModel() {
     private suspend fun callImport(): FetchedPage? {
         val url = importUrl ?: item.optString("url", "")
         if (url.isBlank()) return null
-        val method = "importMusicSheet"
+        val method = PluginMethod.IMPORT_MUSIC_SHEET
         if (method in notImplemented) return null
         val res = try {
             runtime?.callAsync(plugin, method, listOf(url))
