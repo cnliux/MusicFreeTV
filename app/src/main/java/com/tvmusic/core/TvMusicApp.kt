@@ -64,6 +64,14 @@ class TvMusicApp : Application() {
         store = PluginStore(this)
         playback = PlaybackStore(this)
 
+        // 播放器轻量初始化必须同步完成：进程被系统拉起重建 PlaybackService（如崩溃后
+        // 自动重启前台媒体服务）时，服务 onCreate 会调 ensurePlayer——若 context 仍为
+        // null（原实现在 IO 协程里等插件引擎就绪后才 init，窗口可达数秒）会抛
+        // "PlayerManager not initialized" 造成二次崩溃（2026-10-01 真机 192.168.1.45 复现）。
+        // init 本身只赋 context + 读一份小 SharedPreferences，主线程开销可忽略；
+        // 重活（引擎/仓库 attach、恢复播放）仍在下方 IO 协程完成后进行。
+        PlayerManager.init(applicationContext)
+
         // H5/H9：JS 引擎创建（3 台 QuickJS runtime + 读 10+ assets JS）与插件 DB 查询/预热
         // 全部下沉到 IO 线程，不再压冷启动主线程。依赖它们的 PlayerManager 与 UI 通过
         // 懒初始化/异步通知拿到就绪后的实例（PluginRuntime/Repository 完成后才 attach）。
