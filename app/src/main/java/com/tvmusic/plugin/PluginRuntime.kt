@@ -48,15 +48,22 @@ data class PlatformHealth(
  * 其余能力（播放/详情/导入导出）仍走主引擎，避免跨引擎共享状态问题。
  */
 class PluginRuntime private constructor(
-    private val primary: JsEngine,
+    primary: JsEngine,
     extras: List<JsEngine>,
     private val appContext: Context?,
     private val variablesProvider: ((platform: String) -> Map<String, String>)?
 ) {
 
     /**
-     * 引擎池（下标即 lane 号），支持运行期懒扩容。
-     * 结构变更（追加引擎）都在 [laneLock] 内进行；读取走 COW 列表免锁。
+     * 主引擎（就是 [lanes] 的 0 号）。P0-7：引擎可能被判定 poisoned（插件死循环占死
+     * JS 线程），此时用新引擎整台替换，引用必须可变、对所有线程可见。
+     */
+    @Volatile
+    private var primary: JsEngine = primary
+
+    /**
+     * 引擎池（下标即 lane 号），支持运行期懒扩容与 poisoned 引擎重建。
+     * 结构变更（追加引擎、整台替换）都在 [laneLock] 内进行；读取走 COW 列表免锁。
      */
     private val lanes: CopyOnWriteArrayList<JsEngine> = CopyOnWriteArrayList<JsEngine>().apply {
         add(primary)
@@ -178,29 +185,106 @@ class PluginRuntime private constructor(
      * 取平台执行引擎并做在途计数（锁内完成）：
      * 已有 home 引擎则粘性返回；首次分配优先空闲引擎；全忙且未达上限则新建引擎接管，
      * 尽量减少"后来的音源排队等先前慢源"导致的整源饿死。
+     *
+     * P0-7：跳过 poisoned 引擎（JS 线程被插件死循环占死），粘性 lane 中毒时先尝试重建；
+     * 全池都中毒（设备极差/中断能力缺失）才退而复用 0 号，把错误如实报给调用方。
      */
     private fun acquireLane(platform: String): Int = synchronized(laneLock) {
         var lane = platformLane[platform]
+        if (lane != null && lanes.getOrNull(lane)?.poisoned == true) {
+            if (rebuildLaneLocked(lane)) {
+                Log.w(TAG, "lane $lane rebuilt after poisoned (platform=$platform)")
+            } else {
+                // 重建失败：解除粘性，让下面的分配逻辑另找一台
+                platformLane.remove(platform)
+                lane = null
+            }
+        }
         if (lane == null) {
             var idle = -1
-            var best = 0
+            var best = -1
+            var bestBusy = Int.MAX_VALUE
             for (i in lanes.indices) {
+                if (lanes[i].poisoned) continue
                 val busy = laneBusy.get(i)
                 if (busy == 0) { idle = i; break }
-                if (busy < laneBusy.get(best)) best = i
+                if (busy < bestBusy) { bestBusy = busy; best = i }
             }
-            lane = if (idle >= 0) {
-                idle
-            } else if (lanes.size < MAX_LANES) {
-                val created = createLaneLocked()
-                if (created >= 0) created else best
-            } else {
-                best
+            val allPoisoned = lanes.all { it.poisoned }
+            lane = when {
+                idle >= 0 -> idle
+                lanes.size < MAX_LANES && !allPoisoned -> {
+                    val created = createLaneLocked()
+                    if (created >= 0) created else best
+                }
+                best >= 0 -> best
+                // 全池中毒（中断能力缺失 + 插件普遍卡死）：退到 0 号，让错误如实上报
+                else -> 0
             }
             platformLane[platform] = lane
         }
         laneBusy.incrementAndGet(lane)
         lane
+    }
+
+    /** 锁内：新建一台引擎（不注册插件），失败返回 null。 */
+    private fun newEngineLocked(): JsEngine? {
+        val ctx = appContext ?: return null
+        val provider = variablesProvider ?: return null
+        return runCatching {
+            QuickJsEngine(ctx, provider).also { it.initialize() }
+        }.getOrNull()
+    }
+
+    /**
+     * 锁内：用新引擎整台替换指定 lane，并清空其已注册记录（下次调用经 [ensureRegistered]
+     * 从 [platformSources] 缓存补注册）。
+     *
+     * 故意不 close 被替换下来的引擎：它的 JS 线程正卡在死循环里，
+     * 跨线程 close 会在 native 层释放正在使用的 runtime 对象，极易 SIGSEGV。
+     * 丢弃引用让它随 GC 回收（线程泄漏换进程稳定，这是划算的取舍）。
+     * @return 替换是否成功
+     */
+    private fun rebuildLaneLocked(lane: Int): Boolean {
+        val fresh = newEngineLocked() ?: return false
+        replaceLaneLocked(lane, fresh)
+        return true
+    }
+
+    /** 锁内：整台替换 lane 上的引擎（主引擎同步更新引用）。 */
+    private fun replaceLaneLocked(lane: Int, fresh: JsEngine) {
+        if (lane >= lanes.size) return
+        lanes.set(lane, fresh)
+        if (lane < laneRegistered.size) laneRegistered[lane] = mutableSetOf()
+        if (lane == 0) primary = fresh
+    }
+
+    /**
+     * 取出可用的 lane 引擎；中毒则先尝试重建（锁内只做一次替换），
+     * 重建失败时返回 null 让调用方按"引擎不可用"处理，而不是把请求打进死线程。
+     */
+    private fun healthyLaneOrNull(lane: Int): JsEngine? {
+        val engine = lanes.getOrNull(lane) ?: return null
+        if (!engine.poisoned) return engine
+        synchronized(laneLock) {
+            val again = lanes.getOrNull(lane) ?: return null
+            if (!again.poisoned) return again
+            if (!rebuildLaneLocked(lane)) return null
+            Log.w(TAG, "lane $lane rebuilt on demand: ${again.poisonReason}")
+            return lanes.getOrNull(lane)
+        }
+    }
+
+    /** 主引擎版 [healthyLaneOrNull]（播放/详情/信息类调用走主引擎）。 */
+    private fun healthyPrimary(): JsEngine? {
+        if (!primary.poisoned) return primary
+        synchronized(laneLock) {
+            val again = primary
+            if (!again.poisoned) return again
+            if (!rebuildLaneLocked(0)) return null
+            Log.w(TAG, "primary engine rebuilt on demand: ${again.poisonReason}")
+            return primary
+        }
     }
 
     /**
@@ -211,11 +295,7 @@ class PluginRuntime private constructor(
      * @return 新引擎 lane 号；创建失败返回 -1（回退复用现有引擎）
      */
     private fun createLaneLocked(): Int {
-        val ctx = appContext ?: return -1
-        val provider = variablesProvider ?: return -1
-        val engine = runCatching {
-            QuickJsEngine(ctx, provider).also { it.initialize() }
-        }.getOrNull() ?: return -1
+        val engine = newEngineLocked() ?: return -1
         lanes.add(engine)
         laneRegistered.add(mutableSetOf())
         return lanes.size - 1
@@ -230,7 +310,8 @@ class PluginRuntime private constructor(
         if (lane >= laneRegistered.size) return
         if (synchronized(laneLock) { platform in laneRegistered[lane] }) return
         val source = synchronized(laneLock) { platformSources[platform] } ?: return
-        val engine = lanes.getOrNull(lane) ?: return
+        // 引擎可能在等待期间被 poisoned 重建，这里每次都取当前 lane 上的引擎
+        val engine = healthyLaneOrNull(lane) ?: return
         synchronized(laneRegisterLocks[lane]) {
             // 双重检查：同引擎同平台的并发调用只注册一次
             if (synchronized(laneLock) { platform in laneRegistered[lane] }) return
@@ -239,7 +320,13 @@ class PluginRuntime private constructor(
         }
     }
 
+    /** 引擎不可用（重建失败或全池中毒）时的统一报错，避免请求打进死线程白等预算。 */
+    private fun engineUnavailable(lane: Int): Nothing =
+        throw PluginCallException("js engine unavailable (lane $lane)")
+
     companion object {
+        private const val TAG = "PluginRuntime"
+
         /** 并行搜索的初始引擎总数。Amlogic p230 上 3 台足够，过大会推高 CPU/内存。 */
         private const val SEARCH_ENGINES = 3
 
@@ -255,8 +342,16 @@ class PluginRuntime private constructor(
                 if (platform.isBlank()) emptyMap()
                 else store.loadVariables(platform)
             }
-            val primary = QuickJsEngine(context.applicationContext, provider)
-            primary.initialize()
+            // P0-6：主引擎构造/initialize 原来在 runCatching 之外，ABI 不符（缺 x86 32 位等）
+            // 抛 UnsatisfiedLinkError 直接杀进程（开屏首页即崩）。这里显式收口并重抛成
+            // 带说明的异常，由 TvMusicApp 初始化协程统一记账成"初始化失败/可重试"。
+            // 故意 catch Throwable：UnsatisfiedLinkError 是 Error 不是 Exception。
+            val primary = try {
+                QuickJsEngine(context.applicationContext, provider).also { it.initialize() }
+            } catch (t: Throwable) {
+                Log.e("PluginRuntime", "primary JS engine init failed", t)
+                throw IllegalStateException("插件引擎初始化失败（当前设备可能不支持 QuickJS ABI）", t)
+            }
             val extras = ArrayList<JsEngine>()
             while (extras.size < SEARCH_ENGINES - 1) {
                 val e = runCatching {
@@ -284,9 +379,11 @@ class PluginRuntime private constructor(
      * 现在逐台独立注册并记账，未注册成功的 lane 交由 [ensureRegistered] 按需补注册。
      */
     suspend fun loadPlugin(platform: String, source: String): Boolean = withContext(Dispatchers.IO) {
-        val targets = lanes.toList()
-        val results = targets.mapIndexed { i, engine ->
-            val ok = runCatching { engine.registerPlugin(platform, source) }.getOrDefault(false)
+        val targets = lanes.indices.toList()
+        val results = targets.map { i ->
+            val engine = healthyLaneOrNull(i)
+            val ok = if (engine == null) false
+            else runCatching { engine.registerPlugin(platform, source) }.getOrDefault(false)
             if (ok) synchronized(laneLock) { laneRegistered.getOrNull(i)?.add(platform) }
             ok
         }
@@ -307,8 +404,15 @@ class PluginRuntime private constructor(
     }
 
     suspend fun hasPlugin(platform: String): Boolean = withContext(Dispatchers.IO) {
-        runCatching { primary.hasPlugin(platform) }.getOrDefault(false) ||
-            lanes.drop(1).any { runCatching { it.hasPlugin(platform) }.getOrDefault(false) }
+        // 逐 lane 探测（0 号即主引擎）：某台引擎 poisoned 时先重建再试，
+        // 避免"主引擎坏过一次就永远报插件没装上"。
+        for (i in lanes.indices) {
+            val engine = healthyLaneOrNull(i) ?: continue
+            if (runCatching { engine.hasPlugin(platform) }.getOrDefault(false)) {
+                return@withContext true
+            }
+        }
+        false
     }
 
     /**
@@ -321,7 +425,7 @@ class PluginRuntime private constructor(
     suspend fun hasMethod(platform: String, method: String): Boolean {
         val key = "$platform::$method"
         methodCache[key]?.let { return it }
-        return withContext(Dispatchers.IO) { primary.hasMethod(platform, method) }
+        return withContext(Dispatchers.IO) { healthyPrimary()?.hasMethod(platform, method) == true }
             .also { methodCache[key] = it }
     }
 
@@ -342,7 +446,7 @@ class PluginRuntime private constructor(
     }
 
     private fun readInfoFrom(lane: Int, platform: String): String? =
-        runCatching { lanes.getOrNull(lane)?.readPluginInfo(platform) }.getOrNull()
+        runCatching { healthyLaneOrNull(lane)?.readPluginInfo(platform) }.getOrNull()
 
     suspend fun callAsync(
         platform: String,
@@ -354,7 +458,8 @@ class PluginRuntime private constructor(
         return withContext(Dispatchers.IO) {
             try {
                 val argsJson = JSONArray(args).toString()
-                val result = primary.invoke(platform, method, argsJson, timeoutMs)
+                val engine = healthyPrimary() ?: throw PluginCallException("js engine unavailable (primary)")
+                val result = engine.invoke(platform, method, argsJson, timeoutMs)
                 val parsed = parseJsonResult(result)
                 recordHealth(platform, startedAt, null)
                 parsed
@@ -381,7 +486,8 @@ class PluginRuntime private constructor(
                         else -> arr.put(a.toString())
                     }
                 }
-                val result = primary.invoke(platform, method, arr.toString())
+                val engine = healthyPrimary() ?: throw PluginCallException("js engine unavailable (primary)")
+                val result = engine.invoke(platform, method, arr.toString())
                 val parsed = parseJsonResult(result)
                 recordHealth(platform, startedAt, null)
                 parsed
@@ -412,8 +518,9 @@ class PluginRuntime private constructor(
             return withContext(Dispatchers.IO) {
                 try {
                     ensureRegistered(lane, platform)
+                    val engine = healthyLaneOrNull(lane) ?: engineUnavailable(lane)
                     val argsJson = JSONArray(args).toString()
-                    val result = lanes[lane].invoke(platform, method, argsJson, timeoutMs)
+                    val result = engine.invoke(platform, method, argsJson, timeoutMs)
                     val parsed = parseJsonResult(result)
                     recordHealth(platform, startedAt, null)
                     parsed
@@ -428,7 +535,11 @@ class PluginRuntime private constructor(
     }
 
     suspend fun close() = withContext(Dispatchers.IO) {
-        lanes.forEach { runCatching { (it as? AutoCloseable)?.close() } }
+        // poisoned 引擎的 JS 线程还卡在死循环里，跨线程 close 会在 native 层释放
+        // 正在使用的 runtime 对象（极易 SIGSEGV），故只跳过不关。
+        lanes.forEach { engine ->
+            if (!engine.poisoned) runCatching { engine.close() }
+        }
     }
 
     private fun parseJsonResult(raw: String): Any {

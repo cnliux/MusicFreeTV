@@ -3,6 +3,7 @@ package com.tvmusic.runtime
 import android.content.Context
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Log
 import android.webkit.JavascriptInterface
 import com.quickjs.JSArray
@@ -60,14 +61,83 @@ class QuickJsEngine(
     private var pumpReady = false
     private var runtimePtr = 0L
 
+    /**
+     * P0-7：JS 执行中断能力是否可用（native 成功安装了 interrupt handler）。
+     * 不可用时退化为"超时就判定引擎已死"——由 [PluginRuntime] 重建该 lane。
+     */
+    @Volatile
+    private var interruptReady = false
+
     private external fun nativeInitPump(): Boolean
     private external fun nativePumpJobs(runtimePtr: Long): Int
+
+    /** 给 runtime 安装 JS 执行中断回调（解决插件死循环永久占用 JS 线程）。 */
+    private external fun nativeInstallInterrupt(runtimePtr: Long): Boolean
+
+    /**
+     * 设置当前线程的 JS 执行时限（绝对毫秒，<=0 不限）。
+     * 必须在真正执行 JS 的线程上调用（JS 线程或 EventQueue 线程），native 侧是线程局部变量。
+     */
+    private external fun nativeSetInterruptDeadline(deadlineMs: Long)
+
+    /**
+     * P0-7：引擎是否已被判定不可用。
+     *
+     * 两种来源：
+     *  1. 执行超时且中断不可用/未生效（脚本可能卡在 native 或中断没装上）→ JS 线程已被占死；
+     *  2. 执行确实被中断（脚本跑成死循环）→ runtime 里可能残留异常状态。
+     * 两种都由 [PluginRuntime] 用新引擎替换（注册表按需重建），不再让 lane 永久哑掉。
+     */
+    @Volatile
+    private var poisonedFlag = false
+
+    @Volatile
+    private var poisonedReason: String? = null
+
+    override val poisoned: Boolean get() = poisonedFlag
+
+    override val poisonReason: String? get() = poisonedReason
+
+    private fun markPoisoned(reason: String) {
+        if (poisonedFlag) return
+        poisonedFlag = true
+        poisonedReason = reason
+        Log.e(TAG, "engine poisoned: $reason")
+    }
+
+    /** QuickJS 中断后抛 InternalError: interrupted，据此判定为死循环脚本。 */
+    private fun isInterruptError(t: Throwable): Boolean {
+        val m = generateSequence<Throwable>(t) { it.cause }
+            .mapNotNull { it.message }
+            .firstOrNull { it.contains("interrupt", ignoreCase = true) }
+        return m != null
+    }
 
     companion object {
         private const val TAG = "QuickJsEngine"
 
         /** jsBlock 跨线程同步等待的超时（ms）：防 JS 线程挂死引发 ANR（H6）。 */
         private const val JS_BLOCK_TIMEOUT_MS = 5_000L
+
+        /**
+         * P0-7：JS 执行时限比调用方等待预算早到的余量（ms）。
+         * 提前中断，脚本能退栈并把 "interrupted" 异常抛回，而不是留下仍在跑的脚本。
+         */
+        private const val INTERRUPT_GRACE_MS = 300L
+
+        /** pump 结果：出错或被中断回调打断（job 不可能再有进展）。 */
+        private const val PUMP_ERROR = -1
+
+        /** pump 结果：单次 pump 超时，job 可能还在跑（慢 HTTP 等）。 */
+        private const val PUMP_TIMEOUT = -2
+
+        /**
+         * bootstrap 预算（ms）：桥垫片 + globals/moduleLoader + 8 个解析库（cheerio/
+         * big-integer/axios/webdav 等，合计数 MB 源码）要一次性求值，低配 TV 上
+         * 明显慢于通用 5s 预算。原来超时只是放弃等待（引擎照样初始化成功），
+         * 有了执行中断后必须给足预算，否则会把正常 bootstrap 中途打断。
+         */
+        private const val JS_BOOTSTRAP_TIMEOUT_MS = 60_000L
 
         /**
          * 插件注册专用预算（ms）：插件源码普遍 300KB~1.5MB，注册要把整段源码
@@ -104,11 +174,24 @@ class QuickJsEngine(
         // 解析 runtimePtr 并初始化 native job pump。
         runtimePtr = readRuntimePtr()
         pumpReady = runtimePtr != 0L && runCatching { nativeInitPump() }.getOrDefault(false)
-        Log.i(TAG, "job pump ready=$pumpReady runtimePtr=$runtimePtr")
-        jsBlock {
+        // P0-7：装 JS 执行中断回调（bootstrap 之前装上，插件注册等大脚本同样受保护）。
+        interruptReady = runCatching { nativeInstallInterrupt(runtimePtr) }.getOrDefault(false)
+        Log.i(TAG, "job pump ready=$pumpReady interrupt=$interruptReady runtimePtr=$runtimePtr")
+        jsBlock(timeoutMs = JS_BOOTSTRAP_TIMEOUT_MS) {
             registerNativeBridge()
             jsContext.executeVoidScript(buildBootstrap(), "bootstrap.js")
         }
+        // P0-7：只有 pump 与中断都可用时才让 JS 把插件方法体推迟到微任务执行
+        // （微任务跑在 job 路径上，是本版 quickjs 唯一会查 interrupt handler 的地方）。
+        // 任一能力缺失就保持原来的同步调用，避免"既不能被中断、又等不到结果"。
+        val defer = pumpReady && interruptReady
+        runCatching {
+            jsBlock(timeoutMs = JS_BLOCK_TIMEOUT_MS) {
+                jsContext.executeVoidScript(
+                    "globalThis.__deferInvoke = ${if (defer) "true" else "false"};", "deferFlag")
+            }
+        }.onFailure { Log.w(TAG, "set __deferInvoke failed: ${it.message}") }
+        Log.i(TAG, "__deferInvoke=$defer")
     }
 
     /**
@@ -174,29 +257,51 @@ class QuickJsEngine(
      * 同步等待：postEventQueue 是异步的，用 latch 等它执行完再返回，
      * 保证调用方拿到 future 前续体已推进。
      */
-    private fun pumpJobsSync(maxMs: Long): Boolean {
-        if (!pumpReady) return false
+    /**
+     * 在 QuickJS 的 EventQueue 线程上推进 job 队列（Promise/await 续体）。
+     * @return 执行掉的 job 数（>=0 正常）；[PUMP_ERROR] 执行出错或被中断回调打断；
+     *         [PUMP_TIMEOUT] 单次 pump 超时（job 还在跑）
+     */
+    private fun pumpJobsSync(maxMs: Long): Int {
+        if (!pumpReady) return PUMP_ERROR
         val latch = java.util.concurrent.CountDownLatch(1)
+        var ran = 0
         var ok = false
         try {
             quickJs.postEventQueue {
+                // 时限是 native 线程局部变量，必须在真正解释 JS 的这个线程上设置。
+                // 续体（Promise/await 之后）同样可能跑成死循环，这里给 maxMs + 余量作兜底：
+                // 故意晚于等待预算，不打断正常偏慢的续体，只拦真正的死循环。
+                armInterrupt(maxMs + INTERRUPT_GRACE_MS)
                 try {
-                    nativePumpJobs(runtimePtr)
-                    ok = true
+                    val n = nativePumpJobs(runtimePtr)
+                    if (n < 0) {
+                        // job 执行报错或被中断：JS_ExecutePendingJob 返回负值。
+                        // 续体被中断意味着这次的 promise 永远不会有结果了。
+                        Log.w(TAG, "pumpJobs aborted (n=$n)")
+                    } else {
+                        ran = n
+                        ok = true
+                    }
                 } catch (e: Throwable) {
                     Log.w(TAG, "pumpJobs: ${e.message}")
                 } finally {
+                    disarmInterrupt()
                     latch.countDown()
                 }
             }
         } catch (e: Throwable) {
             Log.w(TAG, "postEventQueue: ${e.message}")
-            return false
+            return PUMP_ERROR
         }
         return try {
-            if (latch.await(maxMs, TimeUnit.MILLISECONDS)) ok else false
+            if (latch.await(maxMs, TimeUnit.MILLISECONDS)) {
+                if (ok) ran else PUMP_ERROR
+            } else {
+                PUMP_TIMEOUT
+            }
         } catch (e: InterruptedException) {
-            false
+            PUMP_ERROR
         }
     }
 
@@ -303,9 +408,14 @@ class QuickJsEngine(
             if (pumpReady) {
                 // 在 QuickJS EventQueue 线程上推进 Promise/await 微任务队列。
                 // 每次 pumpJobsSync 把当前所有待处理 job 跑完（含插件续体与 .then 回吐）。
-                // 慢 HTTP 会让单次 pump 超时返回 false，属正常，继续轮询直到 future 完成或 deadline。
+                // 慢 HTTP 会让单次 pump 超时返回 PUMP_TIMEOUT，属正常，继续轮询；
+                // 但 PUMP_ERROR（含被中断回调打断）意味着这次调用的续体已经废了，
+                // 再等也只是空转到 deadline，不如立刻收场（P0-7：死循环插件不再占满预算）。
                 while (!future.isDone && System.currentTimeMillis() < deadline) {
-                    pumpJobsSync(3000)
+                    if (pumpJobsSync(3000) == PUMP_ERROR) {
+                        Log.w(TAG, "pump error, abort $platform.$method cb=$cbId")
+                        break
+                    }
                     Thread.sleep(2)
                 }
             } else {
@@ -388,8 +498,14 @@ class QuickJsEngine(
 
     /**
      * 在 JS 线程上执行，跨线程时同步等待结果。
+     *
+     * P0-7：真正给 JS 执行设上限，而不是"放弃等待"。跨线程提交任务时给执行线程装上
+     * 中断时限（JS 线程局部），脚本超时会被 QuickJS 中断抛回，JS 线程随即回到空闲，
+     * lane 可继续服务；同步等待超时且中断没生效说明线程已被占死，标记引擎不可用
+     * 交由 [PluginRuntime] 重建。
+     *
      * @param timeoutMs 等待预算，默认 [JS_BLOCK_TIMEOUT_MS]；插件注册等重活需显式放宽
-     *                  （超时只放弃等待，不中断 JS 线程，预算过小会留下仍占着线程的长任务）。
+     *                  （同步等待与执行时限同源，预算过小会中断尚未跑完的大脚本）。
      */
     private inline fun <T> jsBlock(
         timeoutMs: Long = JS_BLOCK_TIMEOUT_MS,
@@ -397,9 +513,28 @@ class QuickJsEngine(
     ): T {
         val handler = jsHandler ?: error("JsEngine not initialized")
         if (jsThreadName != null && Thread.currentThread().name == jsThreadName) {
-            return block()
+            // 已在 JS 线程内执行（如 pump 回调里再调用）：就地装时限，不重复排队。
+            armInterrupt(interruptBudget(timeoutMs))
+            try {
+                return block()
+            } catch (t: Throwable) {
+                if (isInterruptError(t)) markPoisoned("script interrupted after ${timeoutMs}ms")
+                throw t
+            } finally {
+                disarmInterrupt()
+            }
         }
-        val future = FutureTask<T> { block() }
+        val future = FutureTask<T> {
+            armInterrupt(interruptBudget(timeoutMs))
+            try {
+                block()
+            } catch (t: Throwable) {
+                if (isInterruptError(t)) markPoisoned("script interrupted after ${timeoutMs}ms")
+                throw t
+            } finally {
+                disarmInterrupt()
+            }
+        }
         handler.post(future)
         // H6 修复：future.get() 无超时会在 JS 线程挂死（插件死循环）时引发 ANR。
         // 与 invoke 的 5s 兜底对齐：超时抛出后由调用方按 PluginCallException 处理，
@@ -407,10 +542,34 @@ class QuickJsEngine(
         return try {
             future.get(timeoutMs, TimeUnit.MILLISECONDS)
         } catch (e: java.util.concurrent.TimeoutException) {
+            // 到点还没返回：中断要么不可用（symbol 缺失）、要么脚本卡在 native 调用里
+            // （桥 HTTP 有独立超时，但第三方 JNI/正则没有），两种情况 JS 线程都回不来。
+            markPoisoned("jsBlock timeout ${timeoutMs}ms (interrupt=$interruptReady)")
             throw PluginCallException("js engine busy/timeout (jsBlock)")
         } catch (e: java.util.concurrent.ExecutionException) {
             throw (e.cause ?: e)
         }
+    }
+
+    /**
+     * 执行时限比同步等待预算早 [INTERRUPT_GRACE_MS]：让脚本先被中断、干净退栈，
+     * 调用方拿到的是明确的 "interrupted" 异常，而不是"等待超时但脚本还在跑"。
+ */
+private fun interruptBudget(timeoutMs: Long): Long =
+        (timeoutMs - INTERRUPT_GRACE_MS).coerceAtLeast(1_000L)
+
+    /** 给当前线程装上 JS 执行时限（native 线程局部，需在执行 JS 的线程上调用）。 */
+    private fun armInterrupt(budgetMs: Long) {
+        if (!interruptReady) return
+        val deadline = SystemClock.elapsedRealtime() + budgetMs
+        runCatching { nativeSetInterruptDeadline(deadline) }
+            .onFailure { interruptReady = false }
+    }
+
+    /** 清除执行时限：脚本执行期间（含插件起的后台回调线程首次进入时）不限时。 */
+    private fun disarmInterrupt() {
+        if (!interruptReady) return
+        runCatching { nativeSetInterruptDeadline(0) }
     }
 
     private fun loadAssets(path: String): String {

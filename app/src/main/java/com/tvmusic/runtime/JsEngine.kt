@@ -37,6 +37,15 @@ interface JsEngine : AutoCloseable {
     /** 释放引擎。 */
     override fun close()
 
+    /**
+     * 引擎是否已被判定不可用（P0-7：插件死循环等导致 JS 线程被占死/状态脏）。
+     * 实现应在超时或被中断时置位，运行时据此重建该 lane，避免一个坏插件把整台引擎永久废掉。
+     */
+    val poisoned: Boolean get() = false
+
+    /** 判定不可用的原因（供日志/远程诊断），默认 null。 */
+    val poisonReason: String? get() = null
+
     val timeoutMillis: Long get() = TimeUnit.SECONDS.toMillis(60)
 }
 

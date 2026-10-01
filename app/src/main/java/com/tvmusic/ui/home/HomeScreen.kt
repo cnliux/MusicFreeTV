@@ -69,6 +69,7 @@ fun HomeScreen(
 ) {
     val sections by viewModel.sections.collectAsState()
     val loading by viewModel.loading.collectAsState()
+    val initError by viewModel.error.collectAsState()
     val availablePlugins by viewModel.availablePlugins.collectAsState()
     val currentPlatform by viewModel.currentPlatform.collectAsState()
 
@@ -108,7 +109,11 @@ fun HomeScreen(
                 )
             }
 
-            if (loading && sections.isEmpty()) {
+            if (initError != null && sections.isEmpty()) {
+                // P0-6：引擎初始化失败（ABI 不符/资源异常）此前是开屏直接崩，
+                // 现在降级成带重试的错误态。
+                ErrorBox(initError, onRetry = viewModel::retry)
+            } else if (loading && sections.isEmpty()) {
                 LoadingBox()
             } else if (sections.isEmpty()) {
                 EmptyState(

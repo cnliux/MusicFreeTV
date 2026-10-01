@@ -372,15 +372,19 @@ Box(
                         val selected = com.tvmusic.player.PlayerManager.quality == key
 Box(
                              modifier = Modifier
-                                 .clickable { com.tvmusic.player.PlayerManager.setQuality(key) }
                                  .background(
                                      if (selected) MaterialTheme.colorScheme.primaryContainer
                                      else MaterialTheme.colorScheme.surfaceVariant,
                                      RoundedCornerShape(8.dp)
                                  )
+                                 // P0-4：tvFocus 必须排在 clickable 之前。旧写法把 clickable 放在
+                                 // tvFocus 外层，tvFocus 内部的 onFocusChanged 只认自身与更内层的
+                                 // FocusTarget，焦点事件根本到不了它 → 遥控器能选中/切档但屏幕上
+                                 // 一点焦点视觉都没有（平台高亮又被 themes.xml 关了），看着像失灵。
                                  .tvFocus(shapeOverride = RoundedCornerShape(8.dp))
+                                 .clickable { com.tvmusic.player.PlayerManager.setQuality(key) }
                                  .padding(horizontal = 16.dp, vertical = 8.dp)
-                        ) {
+                    ) {
                             Text(
                                 label,
                                 color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer

@@ -11,6 +11,7 @@ import com.tvmusic.player.PlayerManager
 import com.tvmusic.plugin.PluginRepository
 import com.tvmusic.plugin.PluginRuntime
 import com.tvmusic.remote.RemoteConfigService
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,7 +29,12 @@ class TvMusicApp : Application() {
     lateinit var repository: PluginRepository
         private set
 
-    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val appScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Main.immediate +
+            // P0-6：初始化协程未捕获异常会直接杀进程（冷启动必崩）。这里兜底记账，
+            // 同时释放 awaitEngineReady 的等待者，避免它们各自再阻塞 30s。
+            CoroutineExceptionHandler { _, t -> recordStartupFailure("scope", t) }
+    )
 
     override fun onCreate() {
         super.onCreate()
@@ -63,34 +69,45 @@ class TvMusicApp : Application() {
         // 懒初始化/异步通知拿到就绪后的实例（PluginRuntime/Repository 完成后才 attach）。
         val appCtx = applicationContext
         appScope.launch(Dispatchers.IO) {
-            val rt = PluginRuntime.create(appCtx, store)
-            val repo = PluginRepository(rt, store, appScope, appCtx)
-            runtime = rt
-            repository = repo
-            // H7：插件目录扫描（外置存储多路径 readText）在 IO 线程执行
-            val sources = readPluginSourcesFromDevice().orEmpty()
-            val subscribed = store.listSubscriptions().map { it.url }.toSet()
-            sources.filter { it !in subscribed }.forEach { store.addSubscription(it) }
-            repo.refreshFromDb()
+            // P0-6：整段初始化包 try/catch。任一环节失败（QuickJS ABI 不符、assets 缺失、
+            // SQLite 打不开、外置存储异常）都必须"可降级地失败"：记账 + 释放等待者，
+            // 由各 ViewModel 显示"初始化失败/重试"，而不是开屏首页直接崩。
+            try {
+                val rt = PluginRuntime.create(appCtx, store)
+                val repo = PluginRepository(rt, store, appScope, appCtx)
+                runtime = rt
+                repository = repo
+                // H7：插件目录扫描（外置存储多路径 readText）在 IO 线程执行
+                val sources = readPluginSourcesFromDevice().orEmpty()
+                val subscribed = store.listSubscriptions().map { it.url }.toSet()
+                sources.filter { it !in subscribed }.forEach { store.addSubscription(it) }
+                repo.refreshFromDb()
 
-            // 引擎就绪后再挂到 PlayerManager（主线程只做轻量 attach）
-            kotlinx.coroutines.withContext(Dispatchers.Main) {
-                PlayerManager.init(appCtx)
-                PlayerManager.attach(rt)
-                PlayerManager.attachRepository(repo)
-                PlayerManager.attachPlaybackStore(playback)
-                PlayerManager.loadResumeAsync()
+                // 引擎就绪后再挂到 PlayerManager（主线程只做轻量 attach）
+                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                    PlayerManager.init(appCtx)
+                    PlayerManager.attach(rt)
+                    PlayerManager.attachRepository(repo)
+                    PlayerManager.attachPlaybackStore(playback)
+                    PlayerManager.loadResumeAsync()
+                }
+                // 标记引擎就绪：解除 awaitEngineReady 的等待（ViewModel/远程服务可安全访问）
+                markEngineReady()
+                // M20：冷启动关键路径（引擎+DB+warmup 前奏）完成打点
+                com.tvmusic.core.Metrics.markColdStartDone()
+
+                // 不内置任何插件/订阅源：音源一律由用户添加（订阅同步 / 设备 plugin_sources 文件 / 手动安装）。
+                repo.warmup()
+                // 自动同步由 warmup 完成后串行触发（带 4h 节流），避免启动时与插件注册抢 JS 引擎锁
+
+                RemoteConfigService.ensureStarted(appCtx)
+            } catch (t: Throwable) {
+                // 故意 catch Throwable：UnsatisfiedLinkError（ABI 不符）等是 Error 不是 Exception，
+                // 漏掉它们等于开屏必崩。错误已记账，不静默吞。
+                recordStartupFailure("init", t)
+                // 失败也要让等待者立刻返回 false，而不是各自阻塞满 30s
+                markEngineReady()
             }
-            // 标记引擎就绪：解除 awaitEngineReady 的等待（ViewModel/远程服务可安全访问）
-            markEngineReady()
-            // M20：冷启动关键路径（引擎+DB+warmup 前奏）完成打点
-            com.tvmusic.core.Metrics.markColdStartDone()
-
-            // 不内置任何插件/订阅源：音源一律由用户添加（订阅同步 / 设备 plugin_sources 文件 / 手动安装）。
-            repo.warmup()
-            // 自动同步由 warmup 完成后串行触发（带 4h 节流），避免启动时与插件注册抢 JS 引擎锁
-
-            RemoteConfigService.ensureStarted(appCtx)
         }
 
         // 应用退出钩子：Application 没有可靠的 onDestroy，改用"最后一个 Activity 停止"
@@ -187,6 +204,34 @@ class TvMusicApp : Application() {
     private fun markEngineReady() {
         engineReadyLatch.countDown()
     }
+
+    /**
+     * 初始化失败原因（P0-6）：非 null 表示引擎/仓库不可用，UI 应显示"初始化失败/重试"。
+     * 保留原始异常类名与首行消息便于定位（ABI 不符通常是 UnsatisfiedLinkError）。
+     */
+    @Volatile
+    var startupFailure: String? = null
+        private set
+
+    /** 引擎/仓库是否可安全访问。 */
+    val engineReady: Boolean
+        get() = startupFailure == null && ::runtime.isInitialized && ::repository.isInitialized
+
+    /** 失败记账：写日志 + Metrics（供 /api/metrics、/api/health 观察）。 */
+    private fun recordStartupFailure(stage: String, t: Throwable) {
+        val msg = "${t.javaClass.simpleName}: ${t.message ?: ""}".trim()
+        startupFailure = msg
+        Log.e("TvMusicApp", "startup failed at $stage: $msg", t)
+        runCatching { Metrics.recordStartupFailure(stage, msg) }
+    }
+
+    /**
+     * 安全取运行时（P0-6）：未就绪返回 null，而不是抛 UninitializedPropertyAccessException。
+     * 5 个 ViewModel 与远程服务都改走这里，初始化失败时降级为"显示错误"而非崩溃。
+     */
+    fun runtimeOrNull(): PluginRuntime? = if (::runtime.isInitialized) runtime else null
+
+    fun repositoryOrNull(): PluginRepository? = if (::repository.isInitialized) repository else null
 
     companion object {
         fun from(context: Context): TvMusicApp =

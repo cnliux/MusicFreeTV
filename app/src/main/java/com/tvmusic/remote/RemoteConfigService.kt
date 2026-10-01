@@ -354,6 +354,39 @@ class RemoteConfigService : Service() {
                     }.toString())
                     .toString())
             }
+            // P0-8：崩溃报告原来只写不读（listCrashes/hasCrash/clearAll 全仓零调用），
+            // 崩溃文件在 filesDir/crash 里，没 root/没 adb 谁都取不出来。
+            // 补两个接口：/api/crash 列摘要（先看有没有、看是哪次），/api/diag/export 打包下载。
+            method == "GET" && path == "/api/crash" -> {
+                val files = com.tvmusic.core.CrashReporter.listCrashes(app())
+                val arr = org.json.JSONArray()
+                files.forEach { f ->
+                    arr.put(JSONObject()
+                        .put("name", f.name)
+                        .put("size", f.length())
+                        .put("time", java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US)
+                            .format(java.util.Date(f.lastModified())))
+                        // 摘要只取开头 8 行（时间/线程/设备/异常首行），够判断是不是同一问题
+                        .put("head", runCatching {
+                            f.useLines { it.take(8).joinToString("\n") }.take(1200)
+                        }.getOrElse { "(读取失败: ${it.message})" }))
+                }
+                respond(socket, 200, JSONObject()
+                    .put("ok", true)
+                    .put("count", files.size)
+                    .put("files", arr)
+                    .toString())
+            }
+            method == "GET" && path == "/api/diag/export" -> {
+                val date = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                    .format(java.util.Date())
+                val bundle = com.tvmusic.core.CrashReporter.buildExportBundle(
+                    app(), com.tvmusic.core.Metrics.snapshotJson().toString())
+                respondDownload(
+                    socket, bundle, "musicfreetv-diag-$date.txt",
+                    "text/plain; charset=utf-8"
+                )
+            }
             // 用户变量（Cookie/SESSDATA 等）：一套通用接口服务所有插件，
             // 读写均由插件头部的 userVariables 声明驱动，新增插件无需改这里。
             method == "GET" && path == "/api/plugins/vars" -> {
@@ -1910,10 +1943,15 @@ class RemoteConfigService : Service() {
         }
     }
 
-    private fun respondDownload(socket: Socket, body: String, filename: String) {
+    private fun respondDownload(
+        socket: Socket,
+        body: String,
+        filename: String,
+        contentType: String = "application/json; charset=utf-8"
+    ) {
         val bytes = body.toByteArray(Charsets.UTF_8)
         val head = "HTTP/1.1 200 OK\r\n" +
-            "Content-Type: application/json; charset=utf-8\r\n" +
+            "Content-Type: $contentType\r\n" +
             "Content-Disposition: attachment; filename=\"$filename\"\r\n" +
             "Content-Length: ${bytes.size}\r\n" +
             "Cache-Control: no-store\r\n" +

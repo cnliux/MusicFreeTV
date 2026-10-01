@@ -70,8 +70,13 @@ class SheetViewModel(private val app: TvMusicApp) : ViewModel() {
     init {
         // 引擎/仓库异步初始化：先在后台等待就绪，再获取引用并加载详情。
         viewModelScope.launch(Dispatchers.IO) {
-            app.awaitEngineReady()
-            runtime = app.runtime
+            // P0-6：等待失败/未就绪时降级为错误态（原来直接取 lateinit 的 app.runtime 会崩）
+            if (!app.awaitEngineReady() || app.runtimeOrNull() == null) {
+                _loading.value = false
+                _error.value = "引擎初始化失败，请重试或重启应用"
+                return@launch
+            }
+            runtime = app.runtimeOrNull()
             load()
         }
     }

@@ -115,9 +115,16 @@
         }
         pushPlatform(platform);
         try {
-            var ret = fn.apply(p, args.map(function (a) {
+            var callArgs = args.map(function (a) {
                 try { return typeof a === 'string' ? JSON.parse(a) : a; } catch (e2) { return a; }
-            }));
+            });
+            // P0-7：本版 quickjs 只在 job 执行路径（JS_ExecutePendingJob）上检查
+            // interrupt handler，JS_Eval 里同步跑的死循环完全查不到（实测 while(true) 永不中断）。
+            // 故在 pump 可用时把插件方法体推迟到微任务里执行——它就落在 job 路径上，
+            // 死循环会被 native 侧中断回调打断，引擎线程随即回到空闲。
+            // flag 由 Kotlin 在 pump+interrupt 都就绪时置 true（见 QuickJsEngine）。
+            var run = function () { return fn.apply(p, callArgs); };
+            var ret = global.__deferInvoke ? Promise.resolve().then(run) : run();
             Promise.resolve(ret).then(function (res) {
                 popPlatform();
                 var json;

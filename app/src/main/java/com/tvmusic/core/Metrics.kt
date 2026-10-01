@@ -46,6 +46,22 @@ object Metrics {
 
     fun recordPlayStart() = playStarts.incrementAndGet()
 
+    // ---------------- 启动失败（P0-6） ----------------
+
+    private val startupFailures = java.util.concurrent.atomic.AtomicLong()
+
+    @Volatile
+    private var startupFailureDetail: String = ""
+
+    /**
+     * 记录一次初始化失败（阶段 + 首行原因）。
+     * 冷启动失败此前完全静默：/api/metrics 只会显示 coldStartMs=-1，无人判读。
+     */
+    fun recordStartupFailure(stage: String, detail: String) {
+        startupFailures.incrementAndGet()
+        startupFailureDetail = "$stage: $detail"
+    }
+
     // ---------------- 慢事件环形缓冲 ----------------
     data class SlowEvent(val atMs: Long, val kind: String, val detail: String, val costMs: Long)
 
@@ -102,6 +118,8 @@ object Metrics {
             .put("pluginFails", pluginFails.get())
             .put("pluginTimeouts", pluginTimeouts.get())
             .put("playStarts", playStarts.get())
+            .put("startupFailures", startupFailures.get())
+            .put("startupFailure", startupFailureDetail)
             .put("avgPlayLatencyMs", avgLat)
             .put("uptimeMs", android.os.SystemClock.elapsedRealtime() - processStartMs)
             .put("slowEvents", slowJson)

@@ -140,6 +140,51 @@ object PlayerManager {
     /** 供服务/UI 获取播放器实例（不存在则创建）。 */
     fun ensurePlayer(): ExoPlayer = requirePlayer()
 
+    /**
+     * 进程内控制器与连接 future：作为 PlaybackService 会话的客户端。
+     * Media3 的 MediaSessionService 只有在**存在已连接 controller** 时才会显示媒体通知并
+     * 以前台服务运行（1.5.1 的 shouldRunInForeground/shouldShowNotification 都以连接
+     * controller 为前提）；单纯 startService 会话是孤儿，startForegroundService 则会因
+     * 5s 内无人 startForeground 被系统杀掉。所以由进程内 MediaController 充当客户端：
+     * buildAsync 即绑定并拉起服务，起播后 media3 自动前台 + 通知 + 系统媒体键路由。
+     */
+    private var sessionController: androidx.media3.session.MediaController? = null
+    private var sessionControllerFuture:
+        com.google.common.util.concurrent.ListenableFuture<androidx.media3.session.MediaController>? = null
+
+    /** 连接 PlaybackService 会话（幂等）：首次 play 提交时调用，绑定失败只记日志不影响播放。 */
+    private fun ensureSessionConnection(ctx: Context) {
+        if (sessionController != null || sessionControllerFuture != null) return
+        runCatching {
+            val token = androidx.media3.session.SessionToken(
+                ctx,
+                android.content.ComponentName(ctx, PlaybackService::class.java)
+            )
+            val future = androidx.media3.session.MediaController.Builder(ctx, token).buildAsync()
+            sessionControllerFuture = future
+            future.addListener({
+                sessionController = runCatching { future.get() }
+                    .onFailure {
+                        sessionControllerFuture = null
+                        android.util.Log.w("PlayerManager", "media session controller connect failed", it)
+                    }
+                    .getOrNull()
+            }, java.util.concurrent.Executor { ticker.post(it) })
+        }.onFailure {
+            sessionControllerFuture = null
+            android.util.Log.w("PlayerManager", "media session connect failed", it)
+        }
+    }
+
+    /** 解绑会话控制器（退出应用时调用）：否则 bound service 会保住进程不退出。 */
+    fun disconnectSession() {
+        sessionController = null
+        sessionControllerFuture?.let {
+            runCatching { androidx.media3.session.MediaController.releaseFuture(it) }
+        }
+        sessionControllerFuture = null
+    }
+
     /** 通知栏封面下载器：封面 URL 通常与音源同源，需带上 getMediaSource 返回的请求头才能加载。
      *  M1：从共享 strict 客户端派生，复用连接池/线程池。 */
     private val artworkLoader = com.tvmusic.net.HttpClients.derive(com.tvmusic.net.HttpClients.strict).build()
@@ -972,6 +1017,9 @@ object PlayerManager {
                     if (my != playSession.get()) return@withContext
                     // 每个音源可能带不同请求头：更新 DataSourceFactory（同一 DefaultMediaSourceFactory 实例）
                     val p = requirePlayer()
+                    // 首次提交前拉起 PlaybackService 并连接会话（P0-1）：
+                    // 否则播放态下没有 MediaSession/通知/前台服务，回桌面即被 LMK 回收
+                    context?.let { ensureSessionConnection(it) }
                     // 每首歌都重置默认请求头：上一首若带 Cookie/Authorization，
                     // 空 headers 时不重置会把鉴权头带到下一首公开直链上。
                     mediaSourceFactory?.setDataSourceFactory(
@@ -1685,6 +1733,7 @@ object PlayerManager {
     fun release() {
         // 释放前立即落盘恢复快照（此时队列/进度还有效），顺带清掉防抖任务
         flushResumeNow()
+        disconnectSession()
         ticker.removeCallbacksAndMessages(null)
         lyricJob?.cancel()
         lyricJob = null
