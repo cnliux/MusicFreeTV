@@ -3,6 +3,7 @@ package com.tvmusic.core
 import android.app.Application
 import android.os.Build
 import android.util.Log
+import com.tvmusic.BuildConfig
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -27,6 +28,12 @@ object CrashReporter {
     private const val TAG = "CrashReporter"
     private const val CRASH_DIR = "crash"
     private const val MAX_KEEP = 20 // 最多保留 20 份，避免占满存储
+
+    /** 提示确认标记（"用户已知晓这批崩溃"），有新崩溃才再提示。 */
+    private const val ACK_FILE = "crash_ack"
+
+    /** 单份崩溃在诊断包里的最大字符数（防极端堆栈撑爆 HTTP 响应）。 */
+    private const val MAX_TEXT_PER_FILE = 64 * 1024
 
     @Volatile
     private var installed = false
@@ -66,6 +73,56 @@ object CrashReporter {
     /** 清空崩溃报告（用户查看后或手动清理）。 */
     fun clearAll(app: Application) {
         listCrashes(app).forEach { runCatching { it.delete() } }
+    }
+
+    /**
+     * P0-8：是否需要在开屏提示一次"上次异常退出"。
+     *
+     * 原来 listCrashes/hasCrash/clearAll 全仓零调用——崩溃文件躺在 filesDir/crash 里，
+     * 用户没 root/没 adb 就永远拿不到，开发者只能靠口头描述定位。
+     * 加确认标记文件，保证"有新崩溃才提示一次"，不会每次开屏都弹。
+     */
+    fun pendingPrompt(app: Application): Boolean {
+        if (listCrashes(app).isEmpty()) return false
+        return !File(app.filesDir, ACK_FILE).exists()
+    }
+
+    /** 用户已处理（选择清除或保留待导出）→ 写标记，之后不再提示。 */
+    fun markPromptHandled(app: Application) {
+        runCatching {
+            File(app.filesDir, ACK_FILE).writeText(
+                SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date()),
+                Charsets.UTF_8
+            )
+        }.onFailure { Log.w(TAG, "write ack failed: ${it.message}") }
+    }
+
+    /**
+     * P0-8：诊断导出包（崩溃全文 + 设备/应用信息 + 运行指标）。
+     * 供远程管理 `GET /api/diag/export` 下载；单份崩溃截断上限 [MAX_TEXT_PER_FILE]
+     * 防止极端堆栈把响应撑爆。
+     */
+    fun buildExportBundle(app: Application, metricsJson: String? = null): String = buildString {
+        appendLine("# MusicFreeTV 诊断包")
+        appendLine("exported: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
+        appendLine("app: ${app.packageName} version=${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+        appendLine("device: ${Build.MANUFACTURER} ${Build.MODEL} sdk=${Build.VERSION.SDK_INT} abi=${Build.SUPPORTED_ABIS.joinToString(",")}")
+        val crashes = listCrashes(app)
+        appendLine("crash_count: ${crashes.size}")
+        if (crashes.isEmpty()) {
+            appendLine("(无崩溃记录)")
+        }
+        crashes.forEach { f ->
+            appendLine()
+            appendLine("===== ${f.name} (${f.length()} bytes) =====")
+            appendLine(runCatching { f.readText(Charsets.UTF_8) }.getOrElse { "(读取失败: ${it.message})" }
+                .take(MAX_TEXT_PER_FILE))
+        }
+        if (!metricsJson.isNullOrBlank()) {
+            appendLine()
+            appendLine("===== metrics =====")
+            appendLine(metricsJson)
+        }
     }
 
     private fun writeCrash(app: Application, thread: Thread, throwable: Throwable) {

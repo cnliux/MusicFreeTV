@@ -3,4 +3,8 @@
     <!-- 应用内检查更新下载的 APK（getExternalFilesDir/update） -->
     <external-files-path name="update_apk" path="update/" />
     <files-path name="internal_update" path="update/" />
+    <!-- P0-8：崩溃报告（filesDir/crash）与诊断导出（filesDir/diag）也要能被导出分享，
+         原来只声明 update/，崩溃日志出了 App 就没法取。 -->
+    <files-path name="internal_crash" path="crash/" />
+    <files-path name="internal_diag" path="diag/" />
 </paths>

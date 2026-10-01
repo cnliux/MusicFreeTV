@@ -67,9 +67,14 @@ class RecommendViewModel(
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            app.awaitEngineReady()
-            runtime = app.runtime
-            repository = app.repository
+            // P0-6：等待失败/未就绪要降级为错误态，不能直接取 lateinit 的 app.runtime 崩掉
+            if (!app.awaitEngineReady() || app.runtimeOrNull() == null) {
+                _error.value = "引擎初始化失败，请重试或重启应用"
+                _loading.value = false
+                return@launch
+            }
+            runtime = app.runtimeOrNull()
+            repository = app.repositoryOrNull()
             repository?.ready?.first { it }
             probePlugins()
             repository?.plugins?.collectLatest {

@@ -165,9 +165,12 @@ class MainActivity : ComponentActivity() {
         //   弹框关闭后有约 20ms"整树无焦点"窗口，期间事件回调里 outer=false，tick 永不
         //   触发——2026-09-29 实测焦点滞留根节点死区）②冷启动尚无焦点 ③弹框打开瞬间
         //   initialFocus 尚未挂上。真实内容节点（含弹框按钮）持有焦点时绝不抢占。
+        // P0-2：弹层现在是 Dialog 独立窗口，主窗口必然"整树无焦点"（焦点在弹层窗口），
+        // 此时观察器若继续抢焦点会把焦点从弹层拽回底页/顶栏页签（弹框开着 OK 却作用
+        // 在背后）。ModalWindows.anyOpen 为真时整段停手，由弹层自己的 initialFocus 负责。
         androidx.compose.runtime.LaunchedEffect(Unit) {
             while (true) {
-                if (!rootContentFocus.value) {
+                if (!com.tvmusic.ui.components.ModalWindows.anyOpen && !rootContentFocus.value) {
                     val target = focusFallback.value
                     if (target != null) {
                         try {
@@ -362,6 +365,36 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // P0-8：上次异常退出提示（崩溃日志只写不读 → 开发者永远拿不到）。
+        // 只在"有新崩溃且用户还没确认"时弹一次；且必须等页面无其它弹层（anyOpen）
+        // 才弹，避免和「继续播放」弹框叠在一起（P0-5 同类问题）。
+        val crashPrompt = androidx.compose.runtime.remember {
+            androidx.compose.runtime.mutableStateOf<List<String>>(emptyList())
+        }
+        val crashKeepFocus = androidx.compose.runtime.remember {
+            androidx.compose.ui.focus.FocusRequester()
+        }
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            val application = context.applicationContext as? android.app.Application ?: return@LaunchedEffect
+            var quiet = 0
+            while (crashPrompt.value.isEmpty()) {
+                val onHome = route == "home" || route == null
+                // 必须"连续两拍没有弹层"且"最近 1.5 秒没有弹层开过"才提示。只判 anyOpen
+                // 会被冷启动的时序坑骗到：首拍时 HomeScreen 还没组合、「继续播放」弹框尚未
+                // 创建，anyOpen=false → 崩溃提示先开，等弹框后开就把提示压在底下（实测
+                // dumpsys 里 #7=提示、#8=继续播放，遥控器先看到的是没反应的死弹框）。
+                val idle = !com.tvmusic.ui.components.ModalWindows.anyOpen &&
+                    System.currentTimeMillis() -
+                        com.tvmusic.ui.components.ModalWindows.lastOpenedAtMillis() > 1500L
+                quiet = if (onHome && idle) quiet + 1 else 0
+                if (quiet >= 2 && com.tvmusic.core.CrashReporter.pendingPrompt(application)) {
+                    crashPrompt.value = com.tvmusic.core.CrashReporter
+                        .listCrashes(application).map { it.name }
+                }
+                kotlinx.coroutines.delay(1200)
+            }
+        }
+
         // 退出确认对话框：全站统一 ModalCard 风格
         if (showExitDialog.value) {
             // 弹层打开时返回键先关弹层（后注册的 BackHandler 优先处理）
@@ -383,6 +416,8 @@ class MainActivity : ComponentActivity() {
                             // 先无条件暂停：ExoPlayer 由 PlayerManager 单例持有，
                             // 仅 stopService 不会停播，进程存活时音频会继续放（与提示文案矛盾）
                             com.tvmusic.player.PlayerManager.pause()
+                            // 先解绑会话控制器：bound service 不解绑会保住进程，stopService 也无效
+                            com.tvmusic.player.PlayerManager.disconnectSession()
                             context.stopService(
                                 android.content.Intent(context, com.tvmusic.player.PlaybackService::class.java)
                             )
@@ -393,6 +428,44 @@ class MainActivity : ComponentActivity() {
                         },
                         textColor = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.focusRequester(exitButtonFocus)
+                    )
+                }
+            ) {}
+        }
+
+        // P0-8：崩溃提示弹层。日志只留在本机 filesDir/crash，需用户选择"保留待导出"
+        // 或直接清除；确认后写 ack 标记，之后不再打扰。
+        if (crashPrompt.value.isNotEmpty()) {
+            androidx.activity.compose.BackHandler { crashPrompt.value = emptyList() }
+            com.tvmusic.ui.components.ModalCard(
+                title = "上次异常退出",
+                subtitle = "检测到 ${crashPrompt.value.size} 份崩溃记录（${crashPrompt.value.first()} 等）。" +
+                    "日志只保存在本机，可在「远程管理」用浏览器打开 /api/diag/export 下载。",
+                onDismiss = {
+                    com.tvmusic.core.CrashReporter.markPromptHandled(
+                        context.applicationContext as android.app.Application
+                    )
+                    crashPrompt.value = emptyList()
+                },
+                initialFocus = crashKeepFocus,
+                bottomBar = {
+                    Spacer(Modifier.weight(1f))
+                    com.tvmusic.ui.components.DialogTextButton("清除记录", {
+                        val application = context.applicationContext as android.app.Application
+                        com.tvmusic.core.CrashReporter.clearAll(application)
+                        com.tvmusic.core.CrashReporter.markPromptHandled(application)
+                        crashPrompt.value = emptyList()
+                    })
+                    com.tvmusic.ui.components.DialogTextButton(
+                        "保留待导出",
+                        onClick = {
+                            com.tvmusic.core.CrashReporter.markPromptHandled(
+                                context.applicationContext as android.app.Application
+                            )
+                            crashPrompt.value = emptyList()
+                        },
+                        textColor = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.focusRequester(crashKeepFocus)
                     )
                 }
             ) {}

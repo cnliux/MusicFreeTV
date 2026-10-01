@@ -120,9 +120,11 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
         // 插件列表变化（如远程启用/停用）时刷新：仅已在结果页时重建。
         // 引擎/仓库异步初始化：先在后台等待就绪，再获取引用并开始监听。
         viewModelScope.launch(Dispatchers.IO) {
-            app.awaitEngineReady()
-            runtime = app.runtime
-            repository = app.repository
+            // P0-6：等待失败/未就绪直接返回：原来无条件取 lateinit 的 app.runtime，
+            // 引擎未就绪（低配盒子 30s 超时/ABI 不符）会让搜索页开屏崩溃。
+            if (!app.awaitEngineReady() || app.repositoryOrNull() == null) return@launch
+            runtime = app.runtimeOrNull()
+            repository = app.repositoryOrNull()
             repository?.plugins?.collect {
                 _searchablePlatforms.value = repository?.listEnabled()
                     ?.mapNotNull { it.info }

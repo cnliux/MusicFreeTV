@@ -36,6 +36,10 @@ class HomeViewModel(private val app: TvMusicApp) : ViewModel() {
     private val _loading = MutableStateFlow(false)
     val loading: StateFlow<Boolean> = _loading.asStateFlow()
 
+    /** 初始化级错误（P0-6）：引擎就绪等待失败/未赋值时显示，用户可点"重试"。 */
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
     /** 当前选中的插件 platform；null 表示尚未选定。 */
     private val _currentPlatform = MutableStateFlow<String?>(null)
     val currentPlatform: StateFlow<String?> = _currentPlatform.asStateFlow()
@@ -50,27 +54,55 @@ class HomeViewModel(private val app: TvMusicApp) : ViewModel() {
     private var loadGeneration = 0
     private var loadJob: kotlinx.coroutines.Job? = null
 
+    /** 插件列表收集器只挂一次（retry 重入保护）。 */
+    private val pluginsCollectorStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
     init {
         // 引擎/仓库异步初始化：先在后台等待就绪，再获取引用并开始监听插件列表。
-        viewModelScope.launch(Dispatchers.IO) {
-            app.awaitEngineReady()
-            runtime = app.runtime
-            repository = app.repository
-            // 插件列表变化时刷新可选项（不重新加载当前插件）。
-            // 必须在 repository 赋值之后再挂收集器——原来放 init 顶层时 repository 还是 null，
-            // `repository?.plugins` 直接返回 null，收集器从未挂上，装新插件后首页音源
-            // 列表永远不刷新（要重启应用才可见）。
-            launch { repository!!.plugins.collect { refreshPlugins() } }
-            // 插件列表就绪后，选定第一个可用插件并加载；列表变化时刷新可选项。
-            repository?.ready?.collect { isReady ->
-                if (!isReady) return@collect
-                refreshPlugins()
-                // 首次选定第一个可用插件
-                if (_currentPlatform.value == null) {
-                    pickFirst()
-                }
+        viewModelScope.launch(Dispatchers.IO) { bootstrap() }
+    }
+
+    /** 等待引擎就绪并挂上插件监听；失败写 _error（由 UI 显示重试）。 */
+    private suspend fun bootstrap() {
+        // P0-6：awaitEngineReady 的返回值原来被忽略，初始化失败时下面直接取
+        // app.runtime（lateinit 未赋值）→ UninitializedPropertyAccessException 开屏即崩。
+        if (!app.awaitEngineReady() || app.runtimeOrNull() == null || app.repositoryOrNull() == null) {
+            _error.value = "引擎初始化失败，请重试或重启应用"
+            _loading.value = false
+            return
+        }
+        runtime = app.runtimeOrNull()
+        repository = app.repositoryOrNull()
+        // 插件列表变化时刷新可选项（不重新加载当前插件）。
+        // 必须在 repository 赋值之后再挂收集器——原来放 init 顶层时 repository 还是 null，
+        // `repository?.plugins` 直接返回 null，收集器从未挂上，装新插件后首页音源
+        // 列表永远不刷新（要重启应用才可见）。
+        // bootstrap 自己会一直挂在 ready.collect 上，故这里走 viewModelScope 起独立协程；
+        // retry() 会重入 bootstrap，用 CAS 保证收集器只挂一次。
+        if (pluginsCollectorStarted.compareAndSet(false, true)) {
+            viewModelScope.launch(Dispatchers.IO) {
+                repository?.plugins?.collect { refreshPlugins() }
             }
         }
+        // 插件列表就绪后，选定第一个可用插件并加载；列表变化时刷新可选项。
+        repository?.ready?.collect { isReady ->
+            if (!isReady) return@collect
+            refreshPlugins()
+            // 首次选定第一个可用插件
+            if (_currentPlatform.value == null) {
+                pickFirst()
+            }
+        }
+    }
+
+    /** 「重试」按钮（P0-6）：引擎可能只是瞬时失败，重试比让用户重启应用代价小。 */
+    fun retry() {
+        if (_error.value == null) {
+            load()
+            return
+        }
+        _error.value = null
+        viewModelScope.launch(Dispatchers.IO) { bootstrap() }
     }
 
     private fun refreshPlugins() {

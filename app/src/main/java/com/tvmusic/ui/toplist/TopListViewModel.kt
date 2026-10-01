@@ -55,9 +55,15 @@ class TopListViewModel(
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            app.awaitEngineReady()
-            runtime = app.runtime
-            repository = app.repository
+            // P0-6：awaitEngineReady 返回 false 立即降级为错误态，
+            // 否则下面直接取 lateinit 的 app.runtime 会抛异常把开屏打崩。
+            if (!app.awaitEngineReady() || app.runtimeOrNull() == null) {
+                _error.value = "引擎初始化失败，请重试或重启应用"
+                _loading.value = false
+                return@launch
+            }
+            runtime = app.runtimeOrNull()
+            repository = app.repositoryOrNull()
             repository?.ready?.first { it }
             probePlugins()
             repository?.plugins?.collectLatest {

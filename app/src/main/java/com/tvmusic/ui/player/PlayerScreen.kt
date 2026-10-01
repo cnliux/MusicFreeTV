@@ -689,7 +689,13 @@ private fun SeekBar(
     // 遥控快进退的本地基准：positionMs prop 最旧 1 秒一拍，1 秒内连按多键会都基于
     // 同一个旧值而互相覆盖。手动 seek 后以本地值累加，播放器状态追上后（prop 更新）清除
     var manualPos by remember { mutableStateOf<Long?>(null) }
-    androidx.compose.runtime.LaunchedEffect(positionMs, durationMs) { if (manualPos != null) return@LaunchedEffect; manualPos = null }
+    // 追上即清（P0-3）：旧写法 `if (manualPos != null) return` 把逻辑写反，本地值写入后
+    // 永不归空 → 进度条与手柄永久冻结在旧基准（下方时间数字仍在跳，看着像播放卡住）。
+    // 判据：播放器上报的位置与本地基准差 <1.5s 即视为已追上，本地值立即交还给 positionMs。
+    androidx.compose.runtime.LaunchedEffect(positionMs, durationMs) {
+        val local = manualPos
+        if (local != null && kotlin.math.abs(positionMs - local) < 1_500L) manualPos = null
+    }
     val effectivePos = manualPos ?: positionMs
     val fraction = dragFraction
         ?: if (durationMs > 0) (effectivePos.toFloat() / durationMs).coerceIn(0f, 1f) else 0f

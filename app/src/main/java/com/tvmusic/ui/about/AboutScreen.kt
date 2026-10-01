@@ -151,46 +151,51 @@ fun AboutScreen() {
         val found = update as? UpdateState.Found
         val downloading = update as? UpdateState.Downloading
         val dlFailed = update as? UpdateState.DownloadFailed
-        // 三个更新弹框互斥显示，共用一个初始焦点目标（不传 initialFocus 时
-        // ModalCard 回退到不可点击的容器，OK 键无反应）
-        val updateDialogFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+        // 三个更新弹框互斥显示；各自的初始焦点目标必须分开（P0-5：共用一个
+        // FocusRequester 会被最后挂载的节点抢走，焦点落到看不见的按钮上，
+        // 且同一节点双 fr 只有最后一个生效）
+        val foundDialogFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+        val downloadingDialogFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+        val failedDialogFocus = remember { androidx.compose.ui.focus.FocusRequester() }
 
         ModalVisibility(found != null && dialogVisible) {
             ModalCard(
                 title = "发现新版本",
                 subtitle = "v${found?.version}（当前 v${BuildConfig.VERSION_NAME}）",
                 onDismiss = { dialogVisible = false },
-                initialFocus = updateDialogFocus,
+                initialFocus = foundDialogFocus,
                 bottomBar = {
                     androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
                     DialogTextButton("取消", { dialogVisible = false })
                     DialogTextButton(
                         "下载更新",
                         onClick = {
-                            dialogVisible = false
+                            // 不关弹框：状态切到 Downloading 后由进度弹框接管（P0-5），
+                            // 旧写法先 dialogVisible=false 再启动下载，"正在下载"永远不出现，
+                            // 全程只剩按钮文案一个反馈点
                             found?.let {
                                 update = UpdateState.Downloading(it.version, 0)
                                 UpdateChecker.downloadApkAsync(scope, context, it.version, onState = { s -> update = s })
                             }
                         },
                         textColor = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.focusRequester(updateDialogFocus)
+                        modifier = Modifier.focusRequester(foundDialogFocus)
                     )
                 }
             ) {}
         }
-        ModalVisibility(dlFailed != null && dialogVisible) {
+        ModalVisibility(downloading != null && dialogVisible) {
             ModalCard(
                 title = "正在下载更新",
                 subtitle = "v${downloading?.version} · ${downloading?.progress ?: 0}%",
                 onDismiss = { dialogVisible = false },
-                initialFocus = updateDialogFocus,
+                initialFocus = downloadingDialogFocus,
                 bottomBar = {
                     androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
                     DialogTextButton(
                         "后台下载",
                         { dialogVisible = false },
-                        modifier = Modifier.focusRequester(updateDialogFocus)
+                        modifier = Modifier.focusRequester(downloadingDialogFocus)
                     )
                 }
             ) {}
@@ -200,21 +205,21 @@ fun AboutScreen() {
                 title = "下载失败",
                 subtitle = dlFailed?.message,
                 onDismiss = { dialogVisible = false },
-                initialFocus = updateDialogFocus,
+                initialFocus = failedDialogFocus,
                 bottomBar = {
                     androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
-                    DialogTextButton("取消", { update = UpdateState.Idle })
+                    DialogTextButton("取消", { dialogVisible = false; update = UpdateState.Idle })
                     DialogTextButton(
                         "重试",
                         onClick = {
-                            dialogVisible = false
+                            // 同「下载更新」：保持弹框可见，进度弹框立即接管
                             dlFailed?.let {
                                 update = UpdateState.Downloading(it.version, 0)
                                 UpdateChecker.downloadApkAsync(scope, context, it.version, onState = { s -> update = s })
                             }
                         },
                         textColor = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.focusRequester(updateDialogFocus)
+                        modifier = Modifier.focusRequester(failedDialogFocus)
                     )
                 }
             ) {}
