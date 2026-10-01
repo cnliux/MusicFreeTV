@@ -24,7 +24,17 @@ class PlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
-        val session = MediaSession.Builder(this, PlayerManager.ensurePlayer())
+        // 兜底：进程被系统拉起重建且 PlayerManager 尚未就绪时不要崩进程
+        // （窗口已通过 Application 同步 init 关闭，此处防御未来回归）——
+        // 停服务即可，用户下次播放时 PlayerManager 会重新绑定拉起本服务。
+        val player = try {
+            PlayerManager.ensurePlayer()
+        } catch (_: IllegalStateException) {
+            android.util.Log.w("PlaybackService", "PlayerManager not ready on service create; stopSelf")
+            stopSelf()
+            return
+        }
+        val session = MediaSession.Builder(this, player)
             .setBitmapLoader(bitmapLoader)
             .build()
         mediaSession = session

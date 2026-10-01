@@ -1448,7 +1448,14 @@ object PlayerManager {
         } else {
             shufflePos = (shufflePos + 1) % shuffleOrder.size
             // 播完一轮：重新洗牌，避免下一轮回播顺序与本轮相同
-            if (shufflePos == 0) rebuildShuffle(st.queue.size)
+            if (shufflePos == 0) {
+                rebuildShuffle(st.queue.size)
+                // rebuildShuffle 会把 shufflePos 重置为 -1（首曲未选定语义），
+                // 而此处紧接着就要取本分支确定好的目标——必须拉回 0，
+                // 否则 shuffleOrder[-1] 崩溃（ArrayIndexOutOfBoundsException，
+                // 2026-10-01 真机 192.168.1.45 随机模式播完一轮复现）。
+                shufflePos = 0
+            }
         }
         return shuffleOrder[shufflePos]
     }
