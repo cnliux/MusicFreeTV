@@ -597,23 +597,45 @@ private object UpdateChecker {
 
     /**
      * 校验下载 APK 的签名与当前应用签名是否一致（防止替换为不同签名的包）。
-     * API 28+ 用 GET_SIGNING_CERTIFICATES，旧版用 GET_SIGNATURES。
+     * API 28+ 用 GET_SIGNING_CERTIFICATES（signingInfo 字段），旧版用 GET_SIGNATURES
+     * （signatures 字段）——signingInfo 在 API<28 的 PackageInfo 上**不存在**，
+     * 直接访问抛 NoSuchFieldError（Error 不是 Exception），曾把 Android 7 盒子
+     * 在线升级流程整个崩掉（2026-10-05 真机 192.168.1.37 复现）。
      */
     fun signatureMatches(context: Context, apkFile: File): Boolean {
         return try {
             val pm = context.packageManager
-            val pkg = pm.getPackageArchiveInfo(
-                apkFile.absolutePath,
-                android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
-            ) ?: return false
-            val newSig = pkg.signingInfo?.apkContentsSigners?.firstOrNull()?.toByteArray() ?: return false
-            val cur = pm.getPackageInfo(
-                context.packageName,
-                android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
-            )
-            val curSig = cur.signingInfo?.apkContentsSigners?.firstOrNull()?.toByteArray() ?: return false
-            newSig.contentEquals(curSig)
-        } catch (e: Exception) {
+            val newSig: ByteArray?
+            val curSig: ByteArray?
+            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                val pkg = pm.getPackageArchiveInfo(
+                    apkFile.absolutePath,
+                    android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+                ) ?: return false
+                newSig = pkg.signingInfo?.apkContentsSigners?.firstOrNull()?.toByteArray()
+                val cur = pm.getPackageInfo(
+                    context.packageName,
+                    android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+                )
+                curSig = cur.signingInfo?.apkContentsSigners?.firstOrNull()?.toByteArray()
+            } else {
+                @Suppress("DEPRECATION")
+                val pkg = pm.getPackageArchiveInfo(
+                    apkFile.absolutePath,
+                    android.content.pm.PackageManager.GET_SIGNATURES
+                ) ?: return false
+                newSig = pkg.signatures?.firstOrNull()?.toByteArray()
+                @Suppress("DEPRECATION")
+                val cur = pm.getPackageInfo(
+                    context.packageName,
+                    android.content.pm.PackageManager.GET_SIGNATURES
+                )
+                curSig = cur.signatures?.firstOrNull()?.toByteArray()
+            }
+            newSig != null && curSig != null && newSig.contentEquals(curSig)
+        } catch (e: Throwable) {
+            // 必须捕 Throwable：签名类反射字段的 NoSuchFieldError 等 Error 不属于
+            // Exception，漏捕会让校验失败变成进程崩溃。校验失败一律视为不匹配。
             android.util.Log.w("AboutScreen", "signatureMatches: ${e.message}")
             false
         }
