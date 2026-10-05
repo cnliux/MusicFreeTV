@@ -8,6 +8,13 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
@@ -38,10 +45,23 @@ fun TvTextField(
     textStyle: TextStyle? = null
 ) {
     val shape = RoundedCornerShape(corner.dp)
+    val focusManager = LocalFocusManager.current
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        modifier = modifier.tvFocus(shapeOverride = shape),
+        modifier = modifier
+            // 真机坑（2026-10-05）：输入法激活时方向下键被 IME/文本框消费（光标移动），
+            // 焦点永远出不去输入框=遥控器死区。TV 上单行框的光标移动只需要左右键，
+            // 下键在预览链直接改走焦点导航（上键原生就能跳出，无需拦截）。
+            .onPreviewKeyEvent {
+                if (it.type == KeyEventType.KeyDown && it.key == Key.DirectionDown) {
+                    focusManager.moveFocus(FocusDirection.Down)
+                    true
+                } else {
+                    false
+                }
+            }
+            .tvFocus(shapeOverride = shape),
         placeholder = placeholder?.let { { Text(it, fontSize = placeholderFontSize) } },
         label = label?.let { { Text(it) } },
         singleLine = singleLine,

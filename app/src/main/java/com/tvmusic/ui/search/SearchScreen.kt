@@ -44,7 +44,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.tvmusic.config.SearchSettings
 import com.tvmusic.model.SearchEntry
 import com.tvmusic.ui.components.EmptyState
 import com.tvmusic.ui.components.FilterChip
@@ -52,6 +51,7 @@ import com.tvmusic.ui.components.GlassButton
 import com.tvmusic.ui.components.LoadingBox
 import com.tvmusic.ui.components.MediaCard
 import com.tvmusic.ui.components.SectionHeader
+import com.tvmusic.ui.components.TvKeyboard
 import com.tvmusic.ui.components.tvFocus
 import com.tvmusic.ui.components.withPlatform
 import com.tvmusic.model.DetailTarget
@@ -59,9 +59,8 @@ import com.tvmusic.ui.components.TvTextField
 import com.tvmusic.ui.components.FavoriteButton
 import com.tvmusic.ui.components.ModalVisibility
 
-/** M14：热门搜索占位词（产品决策的静态推荐位）。
- *  后续可改为 SearchSettings 远程配置驱动（远程管理后台已有配置下发通道）。 */
-private val HOT_SEARCHES = listOf("周杰伦", "林俊杰", "陈奕迅", "邓紫棋", "许嵩", "赵雷", "新歌榜", "纯音乐")
+/** M14：热门搜索占位词——取自 SearchViewModel.HOT_SEARCH_WORDS（同时是拼音联想的兜底语料）。 */
+private val HOT_SEARCHES get() = SearchViewModel.HOT_SEARCH_WORDS
 
 /**
  * KTV 点歌风格搜索页：
@@ -80,12 +79,9 @@ fun SearchScreen(
     val history by viewModel.history.collectAsState()
     val loadingMore by viewModel.loadingMore.collectAsState()
     val selectedType by viewModel.selectedType.collectAsState()
-    val selectedSources by viewModel.selectedSources.collectAsState()
-    val searchablePlatforms by viewModel.searchablePlatforms.collectAsState()
-    val durFilter by viewModel.durFilter.collectAsState()
-    val needArtwork by viewModel.needArtwork.collectAsState()
-    val sortBy by viewModel.sortBy.collectAsState()
-    val sortAsc by viewModel.sortAsc.collectAsState()
+    val suggestions by viewModel.suggestions.collectAsState()
+    val effectiveQuery by viewModel.effectiveQuery.collectAsState()
+    val pinyinHits by viewModel.pinyinHits.collectAsState()
 
     Row(Modifier.fillMaxSize().padding(horizontal = 28.dp)) {
         // ── 左栏：搜索框 + 简化筛选（窄栏，按钮缩小防溢出）──
@@ -100,46 +96,32 @@ fun SearchScreen(
                 value = query,
                 onValueChange = viewModel::setQuery,
                 modifier = Modifier.fillMaxWidth().height(50.dp),
-                placeholder = "输入歌名 / 歌手",
+                placeholder = "歌名 / 歌手 / 拼音首字母",
                 textStyle = MaterialTheme.typography.bodyLarge
             )
-            KtvPrimaryButton("搜 索", modifier = Modifier.fillMaxWidth().height(44.dp)) { viewModel.submit() }
 
-            if (phase !is SearchPhase.Idle) {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    item(key = "__types__") {
-                        KtvControlLabel("类型")
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(SearchViewModel.SEARCH_TYPES, key = { "t_${it.first}" }) { (key, label) ->
-                                FilterChip(label = label, selected = key == selectedType, onClick = { viewModel.setType(key) })
-                            }
-                        }
-                    }
-                    item(key = "__filter__") {
-                        KtvControlLabel("筛选")
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            items(DurationFilter.entries, key = { "d_${it.name}" }) { f ->
-                                FilterChip(label = f.label, selected = durFilter == f, onClick = { viewModel.setDurFilter(f) })
-                            }
-                        }
-                    }
-                    item(key = "__sort__") {
-                        KtvControlLabel("排序")
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            val sortLabels = linkedMapOf(
-                                SearchSettings.SORT_DEFAULT to "默认",
-                                SearchSettings.SORT_DURATION to "按时长",
-                                SearchSettings.SORT_TITLE to "按歌名"
-                            )
-                            sortLabels.forEach { (k, v) ->
-                                item(key = "o_$k") {
-                                    FilterChip(label = v, selected = sortBy == k, onClick = { viewModel.setSortBy(k) })
-                                }
-                            }
+            // 拼音联想：输入 zjl 立刻（零网络）列出本地命中的中文词，点一下即按该词搜。
+            // 固定预留高度：出现/消失时下方键盘不跳位，D-pad 肌肉记忆不被打断。
+            Box(Modifier.fillMaxWidth().height(40.dp), contentAlignment = Alignment.CenterStart) {
+                if (suggestions.isNotEmpty()) {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(suggestions, key = { "py_$it" }) { w ->
+                            KtvChip(label = w, onSelect = { viewModel.useHistory(w) })
                         }
                     }
                 }
             }
+
+            // 左栏固定为「搜索框 + 26 键字母盘」：搜索页所有时间都在输入，
+            // 类型/筛选类控件已全部移除（默认搜歌曲已覆盖 99% 场景），右侧留给内容。
+            TvKeyboard(
+                // 一律走 ViewModel 现值拼接，不闭包捕获 query：快速连按两键时
+                // 捕获旧值会丢字/重字（StateFlow 是唯一真相源）
+                onText = viewModel::appendText,
+                onBackspace = viewModel::backspace,
+                onClear = viewModel::clearQuery,
+                onSubmit = { viewModel.submit() }
+            )
         }
 
         // ── 右栏：结果区（占大头）──
@@ -149,21 +131,35 @@ fun SearchScreen(
                 .fillMaxHeight()
                 .padding(start = 20.dp)
         ) {
-            when (val p = phase) {
+            // 拼音输入期间的右侧实时内容：还没触发/没拿到插件结果时，用本地收藏 + 播放历史
+            // 里声母命中的条目填住右侧，避免用户敲 `zjl` 时右侧一片空白。
+            // 插件一旦返回结果就立刻让位给结果区；搜索中但一个音源都没回来时也继续显示，
+            // 这样"边敲边出内容"的实时感不会在 500ms 防抖之后突然断掉。
+            val p = phase
+            val localFirst = pinyinHits.isNotEmpty() &&
+                (p is SearchPhase.Idle || p is SearchPhase.NoResult ||
+                    (p is SearchPhase.Searching && groups.isEmpty()))
+            if (localFirst) {
+                PinyinRelatedPanel(query, pinyinHits)
+            } else when (val ph = phase) {
                 is SearchPhase.Idle -> HistoryPanel(viewModel, history, query)
-                is SearchPhase.NoResult -> EmptyState(p.message, actionLabel = "重试", onAction = { viewModel.submit() })
+                is SearchPhase.NoResult -> EmptyState(ph.message, actionLabel = "重试", onAction = { viewModel.submit() })
                 else -> {
-                    val s = p as? SearchPhase.Searching
+                    val s = ph as? SearchPhase.Searching
                     if (s != null && groups.isEmpty()) {
                         LoadingBox(Modifier.weight(1f).fillMaxWidth())
                     } else {
                         Column(Modifier.weight(1f)) {
                             if (s != null) {
+                                // 拼音展开时明确告诉用户"实际搜的是哪个词"，否则他会以为自己敲的
+                                // 那串字母真被插件认得了（展开错了他也能立刻看出来并改输入）
+                                val expanded = effectiveQuery.isNotBlank() && effectiveQuery != query.trim()
                                 Text(
-                                    if (s.done < s.total)
-                                        "正在搜索 ${s.done}/${s.total} 个音源…（结果边到边显示）"
-                                    else
-                                        "正在整理已返回的结果…",
+                                    (if (expanded) "拼音「$query」→ 已按「$effectiveQuery」搜索 · " else "") +
+                                        if (s.done < s.total)
+                                            "正在搜索 ${s.done}/${s.total} 个音源…（结果边到边显示）"
+                                        else
+                                            "正在整理已返回的结果…",
                                     fontSize = 13.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(top = 8.dp)
@@ -550,34 +546,6 @@ private sealed interface ResultRow {
     data class End(override val key: String, val count: Int) : ResultRow
 }
 
-/** KTV 主按钮：搜索 / 提交（52dp 高玻璃胶囊，padding 缩小防溢出）。 */
-@Composable
-private fun KtvPrimaryButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    GlassButton(
-        onClick = onClick,
-        modifier = modifier.height(48.dp),
-        contentPadding = PaddingValues(horizontal = 18.dp)
-    ) { _ ->
-        Text(
-            label,
-            color = MaterialTheme.colorScheme.primary,
-            fontSize = 19.sp,
-            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
-        )
-    }
-}
-
-/** 左栏分组小标题。 */
-@Composable
-private fun KtvControlLabel(text: String) {
-    Text(
-        text,
-        fontSize = 13.sp,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(top = 4.dp)
-    )
-}
-
 /** KTV 次按钮：加载更多 / 重试。玻璃胶囊。 */
 @Composable
 private fun KtvSecondaryButton(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
@@ -645,6 +613,48 @@ private fun HistoryPanel(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 28.dp).padding(top = 20.dp)
             )
+        }
+    }
+}
+
+/**
+ * 拼音输入期间的右侧实时面板：收藏 + 播放历史里声母命中的条目，点击即播。
+ *
+ * 存在的意义：用户敲 `zjl` 时插件往往还没返回（或本地根本没听过这串声母、压根没发请求），
+ * 右侧若一片空白会让人以为键盘没生效。这里用本地数据即时填内容，纯内存查找、零网络。
+ */
+@Composable
+private fun PinyinRelatedPanel(query: String, hits: List<org.json.JSONObject>) {
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("拼音「$query」的相关内容", fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)
+            Text(
+                "来自收藏与播放历史",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 12.dp)
+            )
+        }
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
+            items(hits, key = { "pyh_${it.optString("platform")}::${it.optString("id")}::${it.optString("title")}" }) { o ->
+                val plugin = o.optString("platform", "")
+                KtvSongRow(
+                    title = o.optString("title"),
+                    artist = o.optString("artist", ""),
+                    artwork = o.optString("artwork", ""),
+                    plugin = plugin,
+                    onClick = {
+                        if (plugin.isBlank()) return@KtvSongRow
+                        val qe = com.tvmusic.player.QueueEntry(plugin, o)
+                        com.tvmusic.player.PlayerManager.play(
+                            plugin, qe, listOf(qe), 0, source = "$plugin · 拼音相关"
+                        )
+                    }
+                )
+            }
         }
     }
 }

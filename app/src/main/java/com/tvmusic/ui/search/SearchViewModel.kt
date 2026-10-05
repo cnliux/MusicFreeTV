@@ -101,6 +101,38 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
     private val _history = MutableStateFlow<List<String>>(emptyList())
     val history: StateFlow<List<String>> = _history.asStateFlow()
 
+    /**
+     * 拼音联想候选词（输入 `zjl` → 周杰伦/张杰…）。纯本地计算、零网络，边打字边刷新，
+     * 点任意一个即以该中文词发起搜索。
+     */
+    private val _suggestions = MutableStateFlow<List<String>>(emptyList())
+    val suggestions: StateFlow<List<String>> = _suggestions.asStateFlow()
+
+    /**
+     * 本轮真正下发给插件的词。拼音命中时是展开后的中文词（`zjl` → 周杰伦），
+     * UI 用它提示「拼音 zjl → 周杰伦」，避免用户以为搜的是原始字母串。
+     */
+    private val _effectiveQuery = MutableStateFlow("")
+    val effectiveQuery: StateFlow<String> = _effectiveQuery.asStateFlow()
+
+    /**
+     * 本地拼音语料：`词 to 声母串`。收藏/播放历史可能上千条，故只在语料变化时整体重建
+     * 一次声母索引，此后每次按键只是纯字符串 `contains` 扫描（微秒级，主线程安全）。
+     */
+    @Volatile
+    private var corpus: List<Pair<String, String>> = emptyList()
+
+    /**
+     * 拼音输入期间，收藏 + 播放历史里声母命中的条目（可直接播放）。
+     * 每次按键后台重算（声母按字缓存，几千条微秒级），右侧「实时相关内容」用它。
+     */
+    private val _pinyinHits = MutableStateFlow<List<JSONObject>>(emptyList())
+    val pinyinHits: StateFlow<List<JSONObject>> = _pinyinHits.asStateFlow()
+    private var pinyinHitsJob: Job? = null
+
+    /** 拼音输入去抖：停手后才真正发起插件搜索，避免每个字母都惊动全部音源。 */
+    private var autoSearchJob: Job? = null
+
     /** 正在追加下一页的插件名。 */
     private val _loadingMore = MutableStateFlow<String?>(null)
     val loadingMore: StateFlow<String?> = _loadingMore.asStateFlow()
@@ -117,6 +149,13 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
         val cfg = SearchSettings.load(app)
         _sortBy.value = cfg.sortBy
         _sortAsc.value = cfg.asc
+        rebuildCorpus()
+        // 收藏/播放历史是拼音语料的大头（可能上千条），变化时在后台线程重建声母索引；
+        // 只取 title/artist 两个字段做首字母，不参与网络，绝不影响搜索时序。
+        viewModelScope.launch(Dispatchers.Default) {
+            kotlinx.coroutines.flow.combine(app.playback.favorites, app.playback.history) { f, h -> f.size + h.size }
+                .collect { rebuildCorpus() }
+        }
         // 插件列表变化（如远程启用/停用）时刷新：仅已在结果页时重建。
         // 引擎/仓库异步初始化：先在后台等待就绪，再获取引用并开始监听。
         viewModelScope.launch(Dispatchers.IO) {
@@ -152,12 +191,128 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
     }
 
     fun setQuery(text: String) {
-        if (_query.value != text) {
-            _query.value = text
-            if (text.isBlank() && _phase.value !is SearchPhase.Searching) {
-                _phase.value = SearchPhase.Idle
+        if (_query.value == text) return
+        _query.value = text
+        autoSearchJob?.cancel()
+        val q = text.trim()
+        if (q.isBlank()) {
+            _suggestions.value = emptyList()
+            pinyinHitsJob?.cancel()
+            if (_pinyinHits.value.isNotEmpty()) _pinyinHits.value = emptyList()
+            if (_phase.value !is SearchPhase.Searching) _phase.value = SearchPhase.Idle
+            return
+        }
+        if (com.tvmusic.utils.Pinyin.isPinyinQuery(q)) {
+            // 拼音输入：本地联想与右侧相关内容先出（零延迟、零网络）
+            _suggestions.value = suggestionsFor(q)
+            refreshPinyinHits(q)
+        } else {
+            _suggestions.value = emptyList()
+            pinyinHitsJob?.cancel()
+            if (_pinyinHits.value.isNotEmpty()) _pinyinHits.value = emptyList()
+        }
+        // 实时搜索：停手 400ms 自动提交，拼音和普通文本一视同仁，不需要按「搜索」键。
+        // 快速连按不会叠加请求——submit() 第一步就取消上一次未完成的搜索。
+        // 本地完全没听过的声母也照样搜：不能替用户武断地判定"这串字母搜不到东西"。
+        autoSearchJob = viewModelScope.launch(Dispatchers.Default) {
+            kotlinx.coroutines.delay(PINYIN_DEBOUNCE_MS)
+            if (_query.value.trim() != q) return@launch
+            submit(q)
+        }
+    }
+
+    /**
+     * 拼音输入期间的「实时相关内容」：每次按键都重算（声母按字缓存，几千条候选是微秒级），
+     * 但赋值收口到主线程（StateFlow.value 必须在稳定线程写）。
+     * 收藏优先于播放历史——用户自己的歌更可能是他想找的。
+     */
+    private fun refreshPinyinHits(q: String) {
+        pinyinHitsJob?.cancel()
+        val query = q.lowercase(java.util.Locale.ROOT)
+        pinyinHitsJob = viewModelScope.launch(Dispatchers.Default) {
+            val store = runCatching { application.playback }.getOrNull()
+            val hits = if (store == null) emptyList() else buildList {
+                // 同一首歌常同时存在于收藏与历史；不去重会在 UI 侧撞上重复 LazyColumn key（崩溃）
+                val seen = HashSet<String>(PINYIN_HITS_MAX * 2)
+                fun scan(list: List<JSONObject>) {
+                    for (o in list) {
+                        if (size >= PINYIN_HITS_MAX) return
+                        val name = o.optString("title")
+                        if (name.isBlank()) continue
+                        if (com.tvmusic.utils.Pinyin.matches(query, name) ||
+                            com.tvmusic.utils.Pinyin.matches(query, o.optString("artist"))
+                        ) {
+                            val key = o.optString("platform") + "::" + o.optString("id") + "::" + name
+                            if (seen.add(key)) add(o)
+                        }
+                    }
+                }
+                scan(store.favorites.value)
+                scan(store.history.value)
+            }
+            launch(Dispatchers.Main.immediate) {
+                // 期间用户又敲了字/清空的，本次结果作废
+                if (_query.value.trim().lowercase(java.util.Locale.ROOT) == query) {
+                    _pinyinHits.value = hits
+                }
             }
         }
+    }
+
+    /** 内置键盘追加字符：直接在 StateFlow 现值上改，避免 UI 闭包捕获旧 query 而丢字/重字。 */
+    fun appendText(t: String) = setQuery(_query.value + t)
+
+    fun backspace() {
+        val q = _query.value
+        if (q.isNotEmpty()) setQuery(q.dropLast(1))
+    }
+
+    fun clearQuery() = setQuery("")
+
+    /**
+     * 收集拼音语料：搜索历史 + 热门搜索 + 收藏条目 + 播放历史的歌名/歌手，
+     * 一次性算好声母串缓存起来（后台线程调用，见 init 与 onCreate）。
+     */
+    private fun rebuildCorpus() {
+        val words = LinkedHashSet<String>()
+        words += _history.value
+        words += HOT_SEARCH_WORDS
+        runCatching {
+            val store = application.playback
+            (store.favorites.value + store.history.value).forEach { o ->
+                o.optString("title").trim().let { if (it.isNotBlank()) words += it }
+                o.optString("artist").trim().let { if (it.isNotBlank() && it.length <= 20) words += it }
+            }
+        }
+        corpus = words.asSequence()
+            .filter { it.any { c -> c.code in 0x4E00..0x9FFF } }
+            .map { it to com.tvmusic.utils.Pinyin.initialsOf(it) }
+            .toList()
+    }
+
+    /** 从已缓存的声母索引里挑联想词：前缀命中优先，其次串中命中，最多 8 条。 */
+    private fun suggestionsFor(q: String): List<String> {
+        val query = q.lowercase(java.util.Locale.ROOT)
+        val prefix = ArrayList<String>(4)
+        val inner = ArrayList<String>(4)
+        for ((word, initials) in corpus) {
+            if (prefix.size >= 8 && inner.size >= 8) break
+            when {
+                initials.startsWith(query) -> if (prefix.size < 8) prefix += word
+                initials.contains(query) -> if (inner.size < 8) inner += word
+            }
+        }
+        return (prefix + inner).take(8)
+    }
+
+    /**
+     * 拼音展开：整串声母**完整相等**命中的中文词（`zjl` → 周杰伦）。
+     * 只认完整相等，不做前缀——前缀匹配容易把 `zj` 展开成「张杰」而用户其实想搜「张韶涵」，
+     * 展开错误的代价是搜出完全无关的结果，不如把选择权交给联想条让用户点。
+     */
+    private fun expandPinyin(q: String): List<String> {
+        val query = q.lowercase(java.util.Locale.ROOT)
+        return corpus.filter { it.second == query }.map { it.first }.distinct().take(PINYIN_EXPAND_MAX)
     }
 
     /** 切换结果类型；若当前已有搜索词，立即按新类型重搜。 */
@@ -207,10 +362,15 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
         if (currentQuery.isNotBlank()) submit(currentQuery, _selectedType.value)
     }
 
-    fun submit(phrase: String = _query.value, type: String = _selectedType.value) {
-        val q = phrase.trim()
-        if (q.isEmpty()) return
+    fun submit(phrase: String = _query.value, type: String = _selectedType.value, expandPinyin: Boolean = true) {
+        val typed = phrase.trim()
+        if (typed.isEmpty()) return
+        // 拼音展开：整串声母完整命中的中文词优先作为实际搜索词（zjl → 周杰伦）。
+        // 输入框仍显示用户敲的 zjl（不改写），右侧结果按中文词加载并提示展开关系。
+        val expanded = if (expandPinyin) expandPinyin(typed) else emptyList()
+        val q = expanded.firstOrNull() ?: typed
         searchJob?.cancel()
+        autoSearchJob?.cancel()
         searchJob = viewModelScope.launch(Dispatchers.Default) {
             // 并发发起各音源搜索请求；QuickJS 引擎内部路由串行消化，不会真并发执行 JS。
             // session 计数仍保留：与 Job 取消配合，双重防止旧结果覆盖新结果。
@@ -220,7 +380,8 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
                 _sortBy.value = cfg.sortBy
                 _sortAsc.value = cfg.asc
             }
-            _query.value = q
+            if (_query.value != typed) _query.value = typed
+            _effectiveQuery.value = q
             _selectedType.value = type
             _groups.value = emptyList()
             _loadingMore.value = null
@@ -489,10 +650,19 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             TYPE_SHEET to "歌单"
         )
 
+        /** M14：热门搜索占位词（产品决策的静态推荐位），同时是拼音联想的兜底语料。 */
+        val HOT_SEARCH_WORDS = listOf("周杰伦", "林俊杰", "陈奕迅", "邓紫棋", "许嵩", "赵雷", "新歌榜", "纯音乐")
+
         private const val KEY_HISTORY = "history"
         private const val MAX_HISTORY = 15
         /** 首批立即搜索的音源数；其余源短暂错峰，降低低配 TV 瞬时争抢。 */
         private const val SEARCH_FAST_BATCH = 3
         private const val SEARCH_STAGGER_MS = 350L
+        /** 拼音输入停顿多久后才惊动全部音源（每键都搜会打满 JS lane 与网络）。 */
+        private const val PINYIN_DEBOUNCE_MS = 400L
+        /** 一次拼音最多展开几个候选词。 */
+        private const val PINYIN_EXPAND_MAX = 3
+        /** 拼音实时相关内容（收藏+历史）最多展示多少条。 */
+        private const val PINYIN_HITS_MAX = 30
     }
 }
