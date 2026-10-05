@@ -23,10 +23,9 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -41,6 +40,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -83,6 +83,15 @@ fun SearchScreen(
     val effectiveQuery by viewModel.effectiveQuery.collectAsState()
     val pinyinHits by viewModel.pinyinHits.collectAsState()
 
+    // 页面级保险：搜索页输入只走内置 26 键字母盘，系统软键盘一律不出现。
+    // 输入框已用 readOnly 让系统不弹，这里只负责清掉"从别的页面带过来"的残留键盘
+    // （设置页订阅 URL / 新建收藏夹弹框都会拉起输入法），否则半屏被占、方向键被 IME 吃掉。
+    val ime = LocalSoftwareKeyboardController.current
+    DisposableEffect(Unit) {
+        ime?.hide()
+        onDispose { ime?.hide() }
+    }
+
     Row(Modifier.fillMaxSize().padding(horizontal = 28.dp)) {
         // ── 左栏：搜索框 + 简化筛选（窄栏，按钮缩小防溢出）──
         Column(
@@ -97,18 +106,30 @@ fun SearchScreen(
                 onValueChange = viewModel::setQuery,
                 modifier = Modifier.fillMaxWidth().height(50.dp),
                 placeholder = "歌名 / 歌手 / 拼音首字母",
+                // 淡色提示：必须明显弱于真实输入，否则用户会以为框里已经有内容
+                placeholderColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                placeholderFontSize = 14.sp,
+                // 搜索页自带 26 键字母盘，系统软键盘（真机是搜狗）会吃掉半屏 + 抢方向键，一律禁用
+                imeEnabled = false,
                 textStyle = MaterialTheme.typography.bodyLarge
             )
 
             // 拼音联想：输入 zjl 立刻（零网络）列出本地命中的中文词，点一下即按该词搜。
             // 固定预留高度：出现/消失时下方键盘不跳位，D-pad 肌肉记忆不被打断。
             Box(Modifier.fillMaxWidth().height(40.dp), contentAlignment = Alignment.CenterStart) {
-                if (suggestions.isNotEmpty()) {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                when {
+                    suggestions.isNotEmpty() -> LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         items(suggestions, key = { "py_$it" }) { w ->
                             KtvChip(label = w, onSelect = { viewModel.useHistory(w) })
                         }
                     }
+                    // 空态填一句淡色说明（常驻可见，比只在空框里出现的 placeholder 更容易被读到）：
+                    // 盘面只有 26 个字母，用户不点一下是不知道能这么搜的。
+                    else -> Text(
+                        "支持拼音首字母搜索，如 zjl → 周杰伦",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                    )
                 }
             }
 
