@@ -116,11 +116,20 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
     val effectiveQuery: StateFlow<String> = _effectiveQuery.asStateFlow()
 
     /**
-     * 本地拼音语料：`词 to 声母串`。收藏/播放历史可能上千条，故只在语料变化时整体重建
-     * 一次声母索引，此后每次按键只是纯字符串 `contains` 扫描（微秒级，主线程安全）。
+     * 本地拼音语料。收藏/播放历史可能上千条，故只在语料变化时整体重建一次声母索引。
+     * kind 区分歌名/歌手，联想条优先出歌名，避免热门歌手占满 8 格。
      */
+    private data class CorpusEntry(
+        val word: String,
+        val initials: String,
+        val kind: Kind,
+        val artistInitials: String = ""
+    ) {
+        enum class Kind { TITLE, ARTIST, OTHER }
+    }
+
     @Volatile
-    private var corpus: List<Pair<String, String>> = emptyList()
+    private var corpus: List<CorpusEntry> = emptyList()
 
     /**
      * 拼音输入期间，收藏 + 播放历史里声母命中的条目（可直接播放）。
@@ -270,39 +279,58 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
     fun clearQuery() = setQuery("")
 
     /**
-     * 收集拼音语料：搜索历史 + 热门搜索 + 收藏条目 + 播放历史的歌名/歌手，
-     * 一次性算好声母串缓存起来（后台线程调用，见 init 与 onCreate）。
+     * 收集拼音语料：收藏/播放历史歌名优先，再歌手、搜索历史、热门。
+     * 歌名条目额外记下歌手声母，输入 zjl 时联想条能出「晴天」而不是只出「周杰伦」。
      */
     private fun rebuildCorpus() {
-        val words = LinkedHashSet<String>()
-        words += _history.value
-        words += HOT_SEARCH_WORDS
+        val out = ArrayList<CorpusEntry>(256)
+        val seen = HashSet<String>()
+        fun add(word: String, kind: CorpusEntry.Kind, artistInitials: String = "") {
+            val w = word.trim()
+            if (w.isBlank() || !w.any { c -> c.code in 0x4E00..0x9FFF }) return
+            val key = kind.name + ":" + w
+            if (!seen.add(key)) return
+            out += CorpusEntry(w, com.tvmusic.utils.Pinyin.initialsOf(w), kind, artistInitials)
+        }
         runCatching {
             val store = application.playback
             (store.favorites.value + store.history.value).forEach { o ->
-                o.optString("title").trim().let { if (it.isNotBlank()) words += it }
-                o.optString("artist").trim().let { if (it.isNotBlank() && it.length <= 20) words += it }
+                val title = o.optString("title").trim()
+                val artist = o.optString("artist").trim()
+                val ai = if (artist.isNotBlank()) com.tvmusic.utils.Pinyin.initialsOf(artist) else ""
+                if (title.isNotBlank()) add(title, CorpusEntry.Kind.TITLE, ai)
+                if (artist.isNotBlank() && artist.length <= 20) add(artist, CorpusEntry.Kind.ARTIST)
             }
         }
-        corpus = words.asSequence()
-            .filter { it.any { c -> c.code in 0x4E00..0x9FFF } }
-            .map { it to com.tvmusic.utils.Pinyin.initialsOf(it) }
-            .toList()
+        _history.value.forEach { add(it, CorpusEntry.Kind.OTHER) }
+        HOT_SEARCH_WORDS.forEach { add(it, CorpusEntry.Kind.OTHER) }
+        corpus = out
     }
 
-    /** 从已缓存的声母索引里挑联想词：前缀命中优先，其次串中命中，最多 8 条。 */
+    /** 从已缓存的声母索引里挑联想词：歌名优先（含「歌手声母命中该歌」），最多 8 条。 */
     private fun suggestionsFor(q: String): List<String> {
         val query = q.lowercase(java.util.Locale.ROOT)
-        val prefix = ArrayList<String>(4)
-        val inner = ArrayList<String>(4)
-        for ((word, initials) in corpus) {
-            if (prefix.size >= 8 && inner.size >= 8) break
-            when {
-                initials.startsWith(query) -> if (prefix.size < 8) prefix += word
-                initials.contains(query) -> if (inner.size < 8) inner += word
+        val titles = ArrayList<String>(8)
+        val others = ArrayList<String>(8)
+        for (e in corpus) {
+            if (titles.size >= 8 && others.size >= 8) break
+            when (e.kind) {
+                CorpusEntry.Kind.TITLE -> {
+                    if (titles.size < 8) {
+                        val hit = e.initials.startsWith(query) || e.initials.contains(query) ||
+                            e.artistInitials.startsWith(query) ||
+                            (e.artistInitials.isNotEmpty() && e.artistInitials.contains(query))
+                        if (hit) titles += e.word
+                    }
+                }
+                CorpusEntry.Kind.ARTIST, CorpusEntry.Kind.OTHER -> {
+                    if (others.size < 8 &&
+                        (e.initials.startsWith(query) || e.initials.contains(query))
+                    ) others += e.word
+                }
             }
         }
-        return (prefix + inner).take(8)
+        return (titles + others).distinct().take(8)
     }
 
     /**
@@ -312,7 +340,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
      */
     private fun expandPinyin(q: String): List<String> {
         val query = q.lowercase(java.util.Locale.ROOT)
-        return corpus.filter { it.second == query }.map { it.first }.distinct().take(PINYIN_EXPAND_MAX)
+        return corpus.filter { it.initials == query }.map { it.word }.distinct().take(PINYIN_EXPAND_MAX)
     }
 
     /** 切换结果类型；若当前已有搜索词，立即按新类型重搜。 */
