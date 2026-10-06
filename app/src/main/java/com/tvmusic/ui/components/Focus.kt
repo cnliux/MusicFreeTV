@@ -142,19 +142,40 @@ fun Modifier.tvFocus(scaleOverride: Float? = null, circle: Boolean = false, shap
                 val glowPx = tokens.focusGlow.toPx()
                 if (glowPx > 0f && !tokens.focusBrightnessOnly) {
                     val glowStroke = glowPx.coerceIn(2f, 14f)
-                    drawIntoCanvas { canvas ->
-                        val native = canvas.nativeCanvas
-                        val paint = android.graphics.Paint().apply {
-                            isAntiAlias = true
-                            color = glow.toArgb()
-                            style = android.graphics.Paint.Style.STROKE
-                            strokeWidth = glowStroke * 2f
-                            alpha = (0.45f * 255).toInt()
-                            maskFilter = android.graphics.BlurMaskFilter(
-                                glowPx, android.graphics.BlurMaskFilter.Blur.NORMAL
+                    if (android.os.Build.VERSION.SDK_INT < 26) {
+                        // Android 7（API<26）amlogic 盒子实测：BlurMaskFilter 对 radius 参数
+                        // 不敏感（blur 量被系统固化），且宽描边会向胶囊外扩散成大光斑。
+                        // 改用紧贴边框外侧的细描边环模拟外发光：矩形向外扩 o、描边宽 w，
+                        // 光晕只占边框外 ~10px，纯几何绘制跨设备一致、不会失控。
+                        val rings = listOf(
+                            5f to 7f to 0.30f,   // 外扩5px 环，宽7px，较亮
+                            10f to 9f to 0.12f  // 外扩10px 环，宽9px，淡出
+                        )
+                        for ((oa, a) in rings) {
+                            val (o, w) = oa
+                            drawRoundRect(
+                                color = glow.copy(alpha = a),
+                                topLeft = Offset(-o, -o),
+                                size = Size(size.width + o * 2f, size.height + o * 2f),
+                                style = Stroke(width = w),
+                                cornerRadius = CornerRadius(radius.x + o, radius.y + o)
                             )
                         }
-                        native.drawRoundRect(0f, 0f, size.width, size.height, radius.x, radius.y, paint)
+                    } else {
+                        drawIntoCanvas { canvas ->
+                            val native = canvas.nativeCanvas
+                            val paint = android.graphics.Paint().apply {
+                                isAntiAlias = true
+                                color = glow.toArgb()
+                                style = android.graphics.Paint.Style.STROKE
+                                strokeWidth = glowStroke * 2f
+                                alpha = (0.45f * 255).toInt()
+                                maskFilter = android.graphics.BlurMaskFilter(
+                                    glowPx, android.graphics.BlurMaskFilter.Blur.NORMAL
+                                )
+                            }
+                            native.drawRoundRect(0f, 0f, size.width, size.height, radius.x, radius.y, paint)
+                        }
                     }
                 }
                 // 边框画在自身 DrawModifier 上（不受上方 graphicsLayer 缩放影响），
