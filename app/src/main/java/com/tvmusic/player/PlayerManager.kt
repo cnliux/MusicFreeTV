@@ -276,6 +276,52 @@ object PlayerManager {
     /** 换源扫描中单个候选插件单次调用（search/getMediaSource）的超时：慢平台快速跳过。 */
     private const val FALLBACK_CALL_TIMEOUT_MS = 8_000L
 
+    /**
+     * 聚合搜索结果缓存（进程内静态，重启清零）：归一化「搜索词」→ 平台 → 命中条目 raw。
+     * 换源探测优先复用这里的命中，跳过每平台 2~5 秒的 search 调用——用户从搜索结果
+     * 点歌、主源不可播换源时，各平台候选条目其实已经搜好了。
+     * 上限 [AGG_CACHE_MAX] 条，超限清一半（与 fallbackSearchCache 同策略）。
+     */
+    private val aggregateCache =
+        java.util.concurrent.ConcurrentHashMap<String, Map<String, List<JSONObject>>>()
+    private const val AGG_CACHE_MAX = 64
+
+    /** 搜索页/远程搜索每源完成时写入命中条目（raw 为插件返回的裸 music 条目）。 */
+    fun registerAggregateResults(query: String, platform: String, items: List<JSONObject>) {
+        val key = normalizeName(query)
+        if (key.isEmpty() || platform.isBlank() || items.isEmpty()) return
+        if (aggregateCache.size >= AGG_CACHE_MAX) {
+            val it0 = aggregateCache.keys.iterator()
+            repeat(aggregateCache.size / 2) { if (it0.hasNext()) { it0.next(); it0.remove() } }
+        }
+        aggregateCache.merge(key, mapOf(platform to items)) { old, new -> old + new }
+    }
+
+    /**
+     * 从聚合缓存找 [platform] 上匹配「歌名」的候选条目；无命中返回 null（回退真实搜索）。
+     * 搜索词与歌名互为包含即视为同一轮搜索（搜「周杰伦」点《晴天》、搜「晴天」点《晴天》都能命中）。
+     */
+    private fun aggMatchesFor(title: String, platform: String): List<JSONObject>? {
+        if (aggregateCache.isEmpty()) return null
+        val want = normalizeName(title)
+        if (want.isEmpty()) return null
+        var best: Map<String, List<JSONObject>>? = null
+        for ((k, v) in aggregateCache) {
+            if (k == want || want.contains(k) || k.contains(want)) { best = v; break }
+        }
+        val entries = best?.get(platform) ?: return null
+        val out = ArrayList<JSONObject>(FALLBACK_MAX_MATCHES)
+        for (o in entries) {
+            val t = normalizeName(o.optString("title", ""))
+            if (t.isNotEmpty() && (t == want || t.contains(want) || want.contains(t))) {
+                if (o.optString("platform").isBlank()) o.put("platform", platform)
+                out.add(o)
+                if (out.size >= FALLBACK_MAX_MATCHES) break
+            }
+        }
+        return out.takeIf { it.isNotEmpty() }
+    }
+
     /** 换源竞速整链硬上限：到点仍无人产出可播 URL 即放弃本轮。 */
     private const val FALLBACK_RACE_MS = 18_000L
 
@@ -1222,10 +1268,12 @@ object PlayerManager {
         cacheKeyPrefix: String, artist: String, my: Int
     ): FallbackSource? {
         if (my != playSession.get()) return null
+        // 优先复用聚合搜索缓存的命中（跳过 search 的 2~5 秒）；未命中才真实搜索。
         // 连环换源重试时复用同一轮的搜索命中，省去 2-5 秒的重复搜索；
-        // 候选调用统一 12s 超时（含引擎排队），慢/卡平台快速跳过，不拖整条链。
+        // 候选调用统一 8s 超时（含引擎排队），慢/卡平台快速跳过，不拖整条链。
         // 空列表=确认无匹配（负缓存）；调用失败(null)不缓存，下一轮可重试。
-        val matches = fallbackSearchCache[cacheKeyPrefix + platform]
+        val matches = aggMatchesFor(item.title, platform)
+            ?: fallbackSearchCache[cacheKeyPrefix + platform]
             ?: searchMusicOn(rt, platform, item.title, artist)?.also {
                 // 超限时只清约一半旧条目，而非全清：保留近期热点，避免命中率骤降。
                 // ConcurrentHashMap 迭代顺序不稳定，"一半"是近似值，此处可接受。
@@ -1734,6 +1782,7 @@ object PlayerManager {
     fun onTrimMemory() {
         synchronized(preloadCache) { preloadCache.clear() }
         fallbackSearchCache.clear()
+        aggregateCache.clear()
         android.util.Log.i("PlayerManager", "onTrimMemory: preload/fallback caches cleared")
     }
 
@@ -1758,6 +1807,7 @@ object PlayerManager {
         synchronized(preloadCache) { preloadCache.clear() }
         preloadTriggeredFor = null
         fallbackSearchCache.clear()
+        aggregateCache.clear()
         shortPlayExclude.clear()
         _uiState.value = PlayerUiState()
     }

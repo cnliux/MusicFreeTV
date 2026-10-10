@@ -266,8 +266,9 @@ class PluginRuntime private constructor(
         lanes.set(lane, fresh)
         if (lane < laneRegistered.size) laneRegistered[lane] = mutableSetOf()
         if (lane == 0) primary = fresh
-        // 重建后引擎是空的：旧 hasMethod 缓存（尤其是「空引擎 → false」）会让
-        // 推荐/排行页直接显示「已启用的插件均不支持」，必须整表失效。
+        // 重建后该 lane 是空引擎：旧 hasMethod 缓存（尤其是「空引擎 → false」）会让
+        // 推荐/排行页直接显示「已启用的插件均不支持」。hasMethod 现已改为多 lane
+        // 探测且 false 不缓存，这里只需整表失效即可（保留缓存会漏报新能力）。
         methodCache.clear()
     }
 
@@ -439,10 +440,21 @@ class PluginRuntime private constructor(
         val key = "$platform::$method"
         methodCache[key]?.let { return it }
         return withContext(Dispatchers.IO) {
-            ensureRegistered(0, platform)
-            runCatching { healthyPrimary()?.hasMethod(platform, method) == true }.getOrDefault(false)
+            // 多 lane 探测（与 hasPlugin 同构）：推荐/排行调用经 callParallel 走平台
+            // home 引擎（lane≥1），若只在 primary 上探测，primary 注册失败/未注册
+            // （懒扩容引擎、poisoned 重建）时真实可用的插件会被误判「不支持」，
+            // 整页显示「已启用的插件均不支持…」。任一 lane 报 true 即缓存 true；
+            // 全 false 不缓存——可能是补注册尚未完成，下次调用重新探测。
+            for (i in lanes.indices) {
+                ensureRegistered(i, platform)
+                val yes = runCatching {
+                    healthyLaneOrNull(i)?.hasMethod(platform, method) == true
+                }.getOrDefault(false)
+                if (yes) return@withContext true
+            }
+            false
         }
-            .also { methodCache[key] = it }
+            .also { if (it) methodCache[key] = true }
     }
 
     /**

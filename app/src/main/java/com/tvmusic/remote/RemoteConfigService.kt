@@ -1705,6 +1705,19 @@ class RemoteConfigService : Service() {
                                 }
                                 val elapsed = android.os.SystemClock.elapsedRealtime() - sourceStarted
                                 Log.i("PerfSearch", "remote source=$platform elapsed=${elapsed}ms results=${arr.length()} strategy=staggered3")
+                                // 注册到换源聚合缓存：手机端点歌后主源不可播时，
+                                // APK 换源可直接复用命中，跳过每平台 2~5 秒的重复搜索
+                                if (arr.length() > 0) {
+                                    val raws = ArrayList<JSONObject>(arr.length())
+                                    for (i in 0 until arr.length()) {
+                                        arr.optJSONObject(i)?.let { raws.add(it) }
+                                    }
+                                    if (raws.isNotEmpty()) {
+                                        com.tvmusic.player.PlayerManager.registerAggregateResults(
+                                            keyword, platform, raws
+                                        )
+                                    }
+                                }
                                 synchronized(collected) {
                                     collected[idx] = arr
                                     session.done = completed.incrementAndGet()

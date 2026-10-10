@@ -455,6 +455,13 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
                                     if (arr == null) null
                                     else {
                                         val list = parseEntries(arr, type, platform).filter { passFilter(it) }
+                                        // 音乐类命中条目注册到换源聚合缓存：
+                                        // 从搜索结果点歌、主源不可播时换源可直接复用，免重复搜索
+                                        if (type == TYPE_MUSIC && list.isNotEmpty()) {
+                                            PlayerManager.registerAggregateResults(
+                                                q, platform, list.map { it.raw }
+                                            )
+                                        }
                                         if (list.isEmpty()) null
                                         else SearchGroup(platform, type, sortEntries(list), page = 1, isEnd = isEnd)
                                     }
