@@ -402,7 +402,11 @@ class QuickJsEngine(
                 JSONObject.quote(platform) + ", " +
                 JSONObject.quote(method) + ", " +
                 JSONObject.quote(argsJson) + ", " + cbId + ");"
-            jsBlock { jsContext.executeVoidScript(script, "invoke_$cbId") }
+            // 与本次 invoke 预算对齐：默认 5s jsBlock 会把慢搜索（网易云等同步 HTTP）
+            // 标成 poisoned，重建后的空引擎再被 hasMethod/callAsync 空跑。
+            jsBlock(timeoutMs = timeoutMs.coerceAtLeast(JS_BLOCK_TIMEOUT_MS)) {
+                jsContext.executeVoidScript(script, "invoke_$cbId")
+            }
 
             val deadline = System.currentTimeMillis() + timeoutMs
             if (pumpReady) {

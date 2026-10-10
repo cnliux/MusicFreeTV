@@ -257,6 +257,9 @@ class PluginRuntime private constructor(
         lanes.set(lane, fresh)
         if (lane < laneRegistered.size) laneRegistered[lane] = mutableSetOf()
         if (lane == 0) primary = fresh
+        // 重建后引擎是空的：旧 hasMethod 缓存（尤其是「空引擎 → false」）会让
+        // 推荐/排行页直接显示「已启用的插件均不支持」，必须整表失效。
+        methodCache.clear()
     }
 
     /**
@@ -310,11 +313,12 @@ class PluginRuntime private constructor(
         if (lane >= laneRegistered.size) return
         if (synchronized(laneLock) { platform in laneRegistered[lane] }) return
         val source = synchronized(laneLock) { platformSources[platform] } ?: return
-        // 引擎可能在等待期间被 poisoned 重建，这里每次都取当前 lane 上的引擎
-        val engine = healthyLaneOrNull(lane) ?: return
         synchronized(laneRegisterLocks[lane]) {
             // 双重检查：同引擎同平台的并发调用只注册一次
             if (synchronized(laneLock) { platform in laneRegistered[lane] }) return
+            // 锁内再取当前引擎：等待期间 lane 可能已被 poisoned 重建，
+            // 绝不能把 register 打进已丢弃的旧 runtime。
+            val engine = healthyLaneOrNull(lane) ?: return
             val ok = runCatching { engine.registerPlugin(platform, source) }.getOrDefault(false)
             if (ok) synchronized(laneLock) { laneRegistered[lane].add(platform) }
         }
@@ -425,7 +429,10 @@ class PluginRuntime private constructor(
     suspend fun hasMethod(platform: String, method: String): Boolean {
         val key = "$platform::$method"
         methodCache[key]?.let { return it }
-        return withContext(Dispatchers.IO) { healthyPrimary()?.hasMethod(platform, method) == true }
+        return withContext(Dispatchers.IO) {
+            ensureRegistered(0, platform)
+            runCatching { healthyPrimary()?.hasMethod(platform, method) }.getOrDefault(false)
+        }
             .also { methodCache[key] = it }
     }
 
@@ -446,7 +453,10 @@ class PluginRuntime private constructor(
     }
 
     private fun readInfoFrom(lane: Int, platform: String): String? =
-        runCatching { healthyLaneOrNull(lane)?.readPluginInfo(platform) }.getOrNull()
+        runCatching {
+            ensureRegistered(lane, platform)
+            healthyLaneOrNull(lane)?.readPluginInfo(platform)
+        }.getOrNull()
 
     suspend fun callAsync(
         platform: String,
@@ -458,6 +468,7 @@ class PluginRuntime private constructor(
         return withContext(Dispatchers.IO) {
             try {
                 val argsJson = JSONArray(args).toString()
+                ensureRegistered(0, platform)
                 val engine = healthyPrimary() ?: throw PluginCallException("js engine unavailable (primary)")
                 val result = engine.invoke(platform, method, argsJson, timeoutMs)
                 val parsed = parseJsonResult(result)
@@ -486,6 +497,7 @@ class PluginRuntime private constructor(
                         else -> arr.put(a.toString())
                     }
                 }
+                ensureRegistered(0, platform)
                 val engine = healthyPrimary() ?: throw PluginCallException("js engine unavailable (primary)")
                 val result = engine.invoke(platform, method, arr.toString())
                 val parsed = parseJsonResult(result)
