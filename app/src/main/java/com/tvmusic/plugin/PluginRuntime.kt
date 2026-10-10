@@ -45,7 +45,7 @@ data class PlatformHealth(
  * 都有在途调用且未达上限时，按需懒扩容至最多 [Companion.MAX_LANES] 台。
  * 新扩容引擎不做全量注册，只在调用时按需注册目标平台的插件
  * （源码取自 [loadPlugin] 的缓存，无网络）。
- * 其余能力（播放/详情/导入导出）仍走主引擎，避免跨引擎共享状态问题。
+ * 并行路径（搜索/排行/推荐）不占用 lane 0；播放/详情/导入导出仍走主引擎。
  */
 class PluginRuntime private constructor(
     primary: JsEngine,
@@ -191,35 +191,44 @@ class PluginRuntime private constructor(
      */
     private fun acquireLane(platform: String): Int = synchronized(laneLock) {
         var lane = platformLane[platform]
+        // 并行路径不占用主引擎：搜索中毒不能拖死播放/详情。仅一台引擎时才退回 0。
+        if (lane != null && lane == 0 && lanes.size > 1) {
+            platformLane.remove(platform)
+            lane = null
+        }
         if (lane != null && lanes.getOrNull(lane)?.poisoned == true) {
             if (rebuildLaneLocked(lane)) {
                 Log.w(TAG, "lane $lane rebuilt after poisoned (platform=$platform)")
             } else {
-                // 重建失败：解除粘性，让下面的分配逻辑另找一台
                 platformLane.remove(platform)
                 lane = null
             }
         }
         if (lane == null) {
+            val start = if (lanes.size > 1) 1 else 0
             var idle = -1
             var best = -1
             var bestBusy = Int.MAX_VALUE
-            for (i in lanes.indices) {
+            for (i in start until lanes.size) {
                 if (lanes[i].poisoned) continue
                 val busy = laneBusy.get(i)
                 if (busy == 0) { idle = i; break }
                 if (busy < bestBusy) { bestBusy = busy; best = i }
             }
-            val allPoisoned = lanes.all { it.poisoned }
             lane = when {
                 idle >= 0 -> idle
-                lanes.size < MAX_LANES && !allPoisoned -> {
-                    val created = createLaneLocked()
-                    if (created >= 0) created else best
+                else -> {
+                    var picked = -1
+                    if (lanes.size < MAX_LANES) {
+                        picked = createLaneLocked()
+                    }
+                    if (picked < 0) picked = best
+                    if (picked < 0 && lanes.size > 1) {
+                        rebuildLaneLocked(1)
+                        picked = 1
+                    }
+                    if (picked < 0) 0 else picked
                 }
-                best >= 0 -> best
-                // 全池中毒（中断能力缺失 + 插件普遍卡死）：退到 0 号，让错误如实上报
-                else -> 0
             }
             platformLane[platform] = lane
         }
@@ -522,8 +531,14 @@ class PluginRuntime private constructor(
         method: String,
         args: List<String> = emptyList(),
         timeoutMs: Long = primary.timeoutMillis
+    ): Any = callParallelJson(platform, method, JSONArray(args).toString(), timeoutMs)
+
+    private suspend fun callParallelJson(
+        platform: String,
+        method: String,
+        argsJson: String,
+        timeoutMs: Long
     ): Any {
-        // 计时从取 lane 开始：耗时含排队（lane 分配 + 引擎串行队列）与执行
         val startedAt = SystemClock.elapsedRealtime()
         val lane = acquireLane(platform)
         try {
@@ -531,7 +546,6 @@ class PluginRuntime private constructor(
                 try {
                     ensureRegistered(lane, platform)
                     val engine = healthyLaneOrNull(lane) ?: engineUnavailable(lane)
-                    val argsJson = JSONArray(args).toString()
                     val result = engine.invoke(platform, method, argsJson, timeoutMs)
                     val parsed = parseJsonResult(result)
                     recordHealth(platform, startedAt, null)

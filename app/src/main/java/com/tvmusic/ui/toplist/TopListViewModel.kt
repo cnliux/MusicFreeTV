@@ -115,7 +115,7 @@ class TopListViewModel(
             _error.value = null
             _groups.value = emptyList()
             try {
-                val res = runtime?.callAsync(platform, PluginMethod.TOP_LISTS)
+                val res = runtime?.callParallel(platform, PluginMethod.TOP_LISTS)
                 if (mySession != session) return@launch
                 if (res is NotImplementedError) {
                     _error.value = "该插件不提供排行榜"

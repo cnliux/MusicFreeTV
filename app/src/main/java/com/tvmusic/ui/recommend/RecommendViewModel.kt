@@ -187,7 +187,7 @@ class RecommendViewModel(
         // 插件方法内部抛错（如某些音源的 getRecommendSheetsByTag 未实现/网络失败）
         // 会以 PluginCallException 冒泡，必须在这里兜住，否则 viewModelScope 未捕获异常直接杀进程。
         val res = try {
-            runtime?.callAsync(platform, PluginMethod.RECOMMEND_SHEETS, tag.toJson(), pageNo)
+            runtime?.callParallel(platform, PluginMethod.RECOMMEND_SHEETS, listOf(tag.toJson().toString(), pageNo.toString()))
         } catch (e: Exception) {
             android.util.Log.w("RecommendVM", "getRecommendSheetsByTag $platform p$pageNo failed: ${e.message}")
             return null
@@ -212,7 +212,7 @@ class RecommendViewModel(
             return out.values.toList()
         }
         return try {
-            val res = runtime?.callAsync(platform, PluginMethod.RECOMMEND_TAGS)
+            val res = runtime?.callParallel(platform, PluginMethod.RECOMMEND_TAGS)
             if (res is NotImplementedError) return out.values.toList()
             val root = res as? JSONObject ?: return out.values.toList()
             root.optJSONArray("pinned")?.let { pinned ->
