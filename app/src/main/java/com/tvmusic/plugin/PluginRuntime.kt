@@ -440,7 +440,7 @@ class PluginRuntime private constructor(
         methodCache[key]?.let { return it }
         return withContext(Dispatchers.IO) {
             ensureRegistered(0, platform)
-            runCatching { healthyPrimary()?.hasMethod(platform, method) }.getOrDefault(false)
+            runCatching { healthyPrimary()?.hasMethod(platform, method) == true }.getOrDefault(false)
         }
             .also { methodCache[key] = it }
     }
