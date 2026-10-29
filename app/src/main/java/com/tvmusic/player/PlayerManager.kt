@@ -259,6 +259,16 @@ object PlayerManager {
     @Volatile
     private var pendingMediaId: String? = null
 
+    /**
+     * 手动切歌标记：用户在歌曲播放中途主动按了下一首/上一首。
+     * 此时旧曲目的 ENDED 事件可能延迟到达，必须忽略，否则：
+     * 1) 误触发 handleMediaEnded → 再切一首 → 停在更后面的歌
+     * 2) 若队列只有一首，还可能误调用 replayCurrent → 回到上一首
+     * 切歌后本会话的 play() 会重置此标记，ENDED 正常推进队列。
+     */
+    @Volatile
+    private var skipRequested = false
+
     // ---------------- 下一首预加载 ----------------
 
     /** 预解析结果缓存有效期：10 分钟（音源签名 URL 通常存活更久）。 */
@@ -274,7 +284,7 @@ object PlayerManager {
     private const val LRC_NEG_TTL_MS = 10 * 60_000L
 
     /** 换源扫描中单个候选插件单次调用（search/getMediaSource）的超时：慢平台快速跳过。 */
-    private const val FALLBACK_CALL_TIMEOUT_MS = 8_000L
+    private const val FALLBACK_CALL_TIMEOUT_MS = 5_000L
 
     /**
      * 聚合搜索结果缓存（进程内静态，重启清零）：归一化「搜索词」→ 平台 → 命中条目 raw。
@@ -323,14 +333,14 @@ object PlayerManager {
     }
 
     /** 换源竞速整链硬上限：到点仍无人产出可播 URL 即放弃本轮。 */
-    private const val FALLBACK_RACE_MS = 18_000L
+    private const val FALLBACK_RACE_MS = 8_000L
 
     /** 换源扫描每平台最多尝试的搜索命中条数：第一条可能是翻唱/伴奏，解析不可播时继续试后面的。 */
-    private const val FALLBACK_MAX_MATCHES = 3
+    private const val FALLBACK_MAX_MATCHES = 2
 
     /** 分批竞速：首批覆盖三条 QuickJS lane，其余候选错峰启动，避免低配 TV 瞬时争抢。 */
-    private const val FALLBACK_FAST_BATCH = 3
-    private const val FALLBACK_STAGGER_MS = 350L
+    private const val FALLBACK_FAST_BATCH = 2
+    private const val FALLBACK_STAGGER_MS = 100L
     private const val FALLBACK_FAST_BATCH_MIN = 1
     private const val FALLBACK_FAST_BATCH_MAX = 6
 
@@ -750,7 +760,21 @@ object PlayerManager {
             // 队列由应用层管理（每次只 setMediaItem 单曲），
             // 播完不会自动切歌，必须在此监听 ENDED 主动推进——这是歌单无法连续播放的根因。
             if (playbackState == Player.STATE_ENDED) {
-                handleMediaEnded()
+                val pm = player ?: return
+                val cur = pm.currentMediaItem?.mediaId
+                if (cur != null && pendingMediaId != null && cur != pendingMediaId) {
+                    // 切歌/连点时旧曲目的 ENDED 延迟到达，忽略，避免误触发切歌逻辑
+                    return
+                }
+                // 用户手动切歌后，旧曲目的 ENDED 事件不应推进队列（防误切）
+                if (skipRequested) {
+                    skipRequested = false
+                    return
+                }
+                // 播放完整首歌曲时，isPlaying 已为 false，但 playWhenReady 仍为 true，应推进队列
+                if (pm.playWhenReady) {
+                    handleMediaEnded()
+                }
             }
             // READY 即时间线就绪：命中「试听截断」特征立即提前换源，不等掐断段播完
             if (playbackState == Player.STATE_READY) {
@@ -764,6 +788,35 @@ object PlayerManager {
                     com.tvmusic.core.Metrics.recordPlayStart()
                 }
                 maybeEarlyCutoffSwitch(player?.duration ?: C.TIME_UNSET)
+                // 元数据时长已低于最低播放设定：提前换源（比等 ENDED 更快）
+                val minMsEarly = com.tvmusic.config.MetaSettings.minPlaySeconds * 1000L
+                if (minMsEarly > 0 && com.tvmusic.config.MetaSettings.fallbackOtherSource) {
+                    val st2 = _uiState.value
+                    val entry2 = st2.current
+                    val rawDur2 = entry2?.let { rawDurationMs(it.raw) } ?: 0L
+                    if (rawDur2 > 0 && rawDur2 < minMsEarly) {
+                        val key2 = entry2?.let { entryKeyOf(it) }
+                        val p2 = player
+                        if (key2 != null && key2 !in earlyCutoffFired && p2 != null && p2.currentMediaItem?.mediaId == pendingMediaId) {
+                            earlyCutoffFired.add(key2)
+                            if (shortPlayFor != key2) {
+                                shortPlayFor = key2
+                                shortPlayCount = 0
+                                shortPlayExclude.clear()
+                            }
+                            playingVia?.let { shortPlayExclude.add(it) }
+                            if (shortPlayCount < SHORT_PLAY_MAX_RETRY) {
+                                shortPlayCount++
+                                fallbackTriedFor = null
+                                fallbackTriedCount = 0
+                                android.util.Log.i("PlayerManager", "metadata too short [$key2] raw=${rawDur2}ms < ${minMsEarly}ms, early switch")
+                                showSourceNotice("时长不足，提前换源…")
+                                play(entry2.plugin, entry2, st2.queue, st2.queueIndex, forceFallback = true)
+                                return
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -907,6 +960,7 @@ object PlayerManager {
         val my = playSession.incrementAndGet()
         playStartMs = android.os.SystemClock.elapsedRealtime() // M20：起播耗时起点（含解析+缓冲）
         lastLyricKey = null // 新会话重置：重播/切歌后重试同一首歌时不再因旧 key 被跳过
+        skipRequested = false // 新会话开始：清除手动切歌标记，允许正常推进队列
         if (!forceFallback) {
             fallbackTriedFor = null // 用户主动播放：重新给换源机会
             fallbackTriedCount = 0
@@ -1110,7 +1164,7 @@ object PlayerManager {
      */
     private suspend fun resolveMediaSource(
         rt: PluginRuntime, plugin: String, raw: JSONObject,
-        timeoutMs: Long = 60_000L
+        timeoutMs: Long = 45_000L
     ): JSONObject? = try {
         when (val result = rt.callParallel(plugin, PluginMethod.MEDIA_SOURCE, listOf(raw.toString(), quality), timeoutMs = timeoutMs)) {
             is JSONObject -> result
@@ -1143,16 +1197,22 @@ object PlayerManager {
         val repo = repository ?: return null
         if (item.title.isBlank()) return null
         val order = com.tvmusic.config.SearchSettings.load(context ?: return null).sourceOrder
+        // 全部已启用插件的平台名，再用 isAvailable（hasPlugin+hasMethod，带30s缓存）做真正的
+        // 可用性预检：只保留已注册到引擎且实现 getMediaSource 的插件，替代 info/loadError 过滤
+        // 和健康度硬 cutoff（sc>=25 / sc>=20）——健康度只用于排序权重，不再作为入场券，
+        // 确保所有能用的插件都参与换源竞速。
+        val allPlatforms = repo.listEnabled()
+            .map { it.info?.platform ?: it.name }
+            .filter { it.isNotBlank() }
+            .distinct()
         val candidates = com.tvmusic.config.SearchSettings.ordered(
-            repo.listEnabled()
-                .filter { it.info != null && it.loadError == null }
-                .map { it.info?.platform ?: it.name }
+            rt.availablePlatforms(allPlatforms, PluginMethod.MEDIA_SOURCE)
                 .filter { includeSelf || it != item.plugin }
                 .filter { it !in exclude },
             order
         )
         // 发起顺序：远程配置的优先换源插件置顶抢跑，其余按平台健康分降序
-        // （死源/慢源垫底，不占竞速发起位）；同分保持 sourceOrder 次序。
+        // （健康度作为排序权重，不再是入场券，低分插件仍会参与竞速，只是靠后）
         val prefer = com.tvmusic.config.MetaSettings.fallbackPreferPlugin
         val ranked = if (candidates.isEmpty()) candidates else
             candidates
@@ -1166,7 +1226,7 @@ object PlayerManager {
         // 按 fallbackStrategy 分发到 4 种竞速策略。所有策略共享整链硬上限 FALLBACK_RACE_MS，
         // 到点仍未有 winner 就返回 null（不再分钟级空等）。
         val raceStarted = android.os.SystemClock.elapsedRealtime()
-        val fastBatch = com.tvmusic.config.MetaSettings.fallbackFastBatch
+        val fastBatch = minOf(com.tvmusic.config.MetaSettings.fallbackFastBatch, ranked.size)
         val strategy = com.tvmusic.config.MetaSettings.fallbackStrategy
         return coroutineScope {
             val winner = CompletableDeferred<FallbackSource>()
@@ -1235,10 +1295,10 @@ object PlayerManager {
                     }
                 }
                 else -> {
-                    // staggered（默认）：健康度前 fastBatch 名立即启动，其余错峰 350ms
+                    // staggered（默认）：健康度前 fastBatch 名立即启动，其余错峰启动
                     racers = ranked.mapIndexed { index, platform ->
                         launch(Dispatchers.Default) {
-                            if (index >= fastBatch) kotlinx.coroutines.delay(FALLBACK_STAGGER_MS)
+                            if (index >= fastBatch) kotlinx.coroutines.delay((index - fastBatch) * FALLBACK_STAGGER_MS)
                             val started = android.os.SystemClock.elapsedRealtime()
                             probeFallbackPlatform(rt, item, platform, cacheKeyPrefix, artist, my)?.let {
                                 android.util.Log.i(
@@ -1417,6 +1477,8 @@ object PlayerManager {
             _uiState.update { it.copy(queueIndex = index) }
             // 当前索引变化：调度防抖写入恢复快照（next/prev 最终都走到这里）
             scheduleResumeSave()
+            // 手动切歌标记：阻止旧曲目 ENDED 事件触发下一轮切歌
+            skipRequested = true
             play(entry.plugin, entry, st.queue, index)
         }
     }

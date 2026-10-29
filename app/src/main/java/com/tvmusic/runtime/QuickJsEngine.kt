@@ -372,14 +372,16 @@ class QuickJsEngine(
         // timeoutMs 预算覆盖「排队等待 + 执行」两段：拿不到锁就按超时抛错，调用方
         // （如换源扫描）可快速跳过被慢调用占住的引擎。旧逻辑超时从拿到锁后才起算，
         // 排队时长无限，一个 60s 慢调用能把整条换源链无声拖死。
-        val deadline = System.currentTimeMillis() + timeoutMs
-        if (!invokeLock.tryLock(deadline - System.currentTimeMillis(), TimeUnit.MILLISECONDS)) {
+        val effectiveTimeout = if (method == com.tvmusic.constants.PluginMethod.MEDIA_SOURCE) timeoutMs.coerceAtMost(45000L) else timeoutMs.coerceAtMost(60000L)
+        val deadline = System.currentTimeMillis() + effectiveTimeout
+        val queueWaitMs = (deadline - System.currentTimeMillis()).coerceAtMost(15000L)
+        if (!invokeLock.tryLock(queueWaitMs, TimeUnit.MILLISECONDS)) {
             Log.w(TAG, "invoke busy (queue timeout) $platform.$method")
             throw PluginCallException("plugin engine busy: $platform.$method")
         }
         try {
             val remaining = deadline - System.currentTimeMillis()
-            return doInvoke(platform, method, argsJson, remaining.coerceAtLeast(2_000L))
+            return doInvoke(platform, method, argsJson, remaining.coerceAtLeast(2000L).coerceAtMost(45000L))
         } finally {
             invokeLock.unlock()
         }
@@ -404,7 +406,7 @@ class QuickJsEngine(
                 JSONObject.quote(argsJson) + ", " + cbId + ");"
             // 与本次 invoke 预算对齐：默认 5s jsBlock 会把慢搜索（网易云等同步 HTTP）
             // 标成 poisoned，重建后的空引擎再被 hasMethod/callAsync 空跑。
-            jsBlock(timeoutMs = timeoutMs.coerceAtLeast(JS_BLOCK_TIMEOUT_MS)) {
+            jsBlock(timeoutMs = timeoutMs.coerceAtLeast(minOf(JS_BLOCK_TIMEOUT_MS, 8000L))) {
                 jsContext.executeVoidScript(script, "invoke_$cbId")
             }
 
@@ -416,7 +418,7 @@ class QuickJsEngine(
                 // 但 PUMP_ERROR（含被中断回调打断）意味着这次调用的续体已经废了，
                 // 再等也只是空转到 deadline，不如立刻收场（P0-7：死循环插件不再占满预算）。
                 while (!future.isDone && System.currentTimeMillis() < deadline) {
-                    if (pumpJobsSync(3000) == PUMP_ERROR) {
+                    if (pumpJobsSync(2000) == PUMP_ERROR) {
                         Log.w(TAG, "pump error, abort $platform.$method cb=$cbId")
                         break
                     }

@@ -1632,11 +1632,14 @@ class RemoteConfigService : Service() {
                     val asc = req.asc ?: settings.asc
                     val maxTotal = settings.maxTotal
                     // 并行搜索：多引擎池（callParallel）按最闲引擎分发，多个音源真正同时搜。
-                    val enabled = app.repository.listEnabled()
-                        .filter { it.info != null && it.loadError == null }
+                    // 先取全部已启用插件，再用 isAvailable（hasPlugin+hasMethod，带30s缓存）做真正的
+                    // 可用性预检，替代只读元数据的 info/loadError 过滤——info 为 null 但已注册成功的
+                    // 插件也能参与搜索，真正能跑通 search 方法的才入选。
+                    val allPlatforms = app.repository.listEnabled()
                         .map { it.info?.platform ?: it.name }
                         .filter { it.isNotBlank() }
                         .distinct()
+                    val enabled = app.runtime.availablePlatforms(allPlatforms, PluginMethod.SEARCH)
                         .filter { req.sources.isEmpty() || it in req.sources }
                         .let { com.tvmusic.config.SearchSettings.ordered(it, settings.sourceOrder) }
                     session.totalEnabled = enabled.size

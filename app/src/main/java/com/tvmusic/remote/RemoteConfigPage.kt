@@ -145,10 +145,11 @@ internal val PAGE_HTML = """<!DOCTYPE html>
   .varpanel .vrow { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
   .varpanel .vrow span { width: 148px; flex: none; color: var(--muted); font-size: 12px; }
   #toast {
-    position: fixed; left: 50%; bottom: calc(80px + env(safe-area-inset-bottom)); transform: translateX(-50%);
-    background: #262b36; color: var(--text); border: 1px solid var(--line);
-    padding: 9px 18px; border-radius: 22px; font-size: 13px; opacity: 0; transition: opacity .25s;
-    pointer-events: none; z-index: 30; max-width: 86vw;
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    background: rgba(38, 43, 54, 0.96); color: var(--text); border: 1px solid var(--line);
+    padding: 12px 28px; border-radius: 28px; font-size: 15px; font-weight: 600;
+    opacity: 0; transition: opacity .25s; text-align: center; white-space: nowrap;
+    pointer-events: none; z-index: 999; max-width: 90vw; box-shadow: 0 8px 32px rgba(0,0,0,.6);
   }
   #toast.show { opacity: 1; }
   #favModal, #collectModal {
@@ -1994,7 +1995,13 @@ function pgLoadSheets() {
     pgSheetEnd = !!d.isEnd;
     pgRawData = d.data;
     var got = d.sheets || [];
-    pgSheets = pgSheets.concat(got);
+    /* 跨页按 id 去重：网易云等插件的官方接口忽略 page/offset，每页原样重发同一批
+       且 isEnd=false，不去重会无限追加同一批卡片。整页全是重复 = 没有下一页。 */
+    var seen = {};
+    pgSheets.forEach(function (s) { seen[s.id != null ? s.id : s.title] = 1; });
+    var fresh = got.filter(function (s) { var k = s.id != null ? s.id : s.title; if (seen[k]) return false; seen[k] = 1; return true; });
+    if (!fresh.length && pgSheetPage > 1) pgSheetEnd = true;
+    pgSheets = pgSheets.concat(fresh);
     if (!pgSheets.length) {
       if (pgSheetPage === 1) el('pgBody').innerHTML = '<div class="empty">该分类下暂无歌单</div>';
       return;

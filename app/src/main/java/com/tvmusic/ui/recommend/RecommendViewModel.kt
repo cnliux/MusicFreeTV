@@ -144,7 +144,7 @@ class RecommendViewModel(
             if (fetched == null) {
                 _error.value = "歌单加载失败，换个标签或插件试试"
             } else {
-                _sheets.value = fetched.first
+                _sheets.value = distinctSheets(emptyList(), fetched.first)
                 _isEnd.value = fetched.second
                 if (!fetched.second) page = 2
             }
@@ -164,9 +164,15 @@ class RecommendViewModel(
                 val fetched = fetchPage(platform, tag, pageNo)
                 if (session != switchSession) return@launch
                 if (fetched != null) {
-                    _sheets.value = _sheets.value + fetched.first
-                    _isEnd.value = fetched.second
-                    if (!fetched.second) page = pageNo + 1
+                    // 部分插件（如网易云）的官方接口忽略 page/offset，每页原样重发第 1 页
+                    // 且 isEnd=false——不做 id 去重的话同一批卡片无限追加、永远 load 不完。
+                    // 整页去重后一条新的都没有 = 真终点，立即终止翻页。
+                    val prev = _sheets.value
+                    val newItems = distinctSheets(prev, fetched.first)
+                    val reallyEnd = fetched.second || newItems.isEmpty()
+                    _sheets.value = prev + newItems
+                    _isEnd.value = reallyEnd
+                    if (!reallyEnd) page = pageNo + 1
                     _error.value = null
                 } else {
                     _isEnd.value = true
@@ -178,6 +184,17 @@ class RecommendViewModel(
             }
         }
     }
+
+    /** 跨页去重：卡片主键 = 插件 + raw.id（缺失时退 title）。 */
+    private fun distinctSheets(existing: List<SheetEntry>, incoming: List<SheetEntry>): List<SheetEntry> {
+        if (existing.isEmpty()) return incoming
+        val seen = HashSet<String>(existing.size + incoming.size)
+        existing.forEach { seen.add(sheetKey(it)) }
+        return incoming.filter { seen.add(sheetKey(it)) }
+    }
+
+    private fun sheetKey(e: SheetEntry): String =
+        e.plugin + " " + (e.raw.optString("id").ifBlank { e.raw.optString("title") })
 
     private suspend fun fetchPage(
         platform: String,

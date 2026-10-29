@@ -46,7 +46,7 @@ interface JsEngine : AutoCloseable {
     /** 判定不可用的原因（供日志/远程诊断），默认 null。 */
     val poisonReason: String? get() = null
 
-    val timeoutMillis: Long get() = TimeUnit.SECONDS.toMillis(60)
+    val timeoutMillis: Long get() = TimeUnit.SECONDS.toMillis(45)
 }
 
 class PluginCallException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)

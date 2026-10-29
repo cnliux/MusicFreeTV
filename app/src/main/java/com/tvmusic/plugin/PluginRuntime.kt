@@ -102,6 +102,9 @@ class PluginRuntime private constructor(
     private class HealthStat {
         var calls = 0
         var fails = 0
+        var timeouts = 0
+        var consecutiveFails = 0
+        var lastFailAt: Long = 0L
         var lastError: String? = null
         var lastLatencyMs = 0L
         var lastSuccessAtElapsed: Long? = null
@@ -115,21 +118,28 @@ class PluginRuntime private constructor(
         val stat = healthStats.getOrPut(platform) { HealthStat() }
         val now = SystemClock.elapsedRealtime()
         val cost = now - startedAt
+        val isTimeout = error is com.tvmusic.runtime.PluginCallException &&
+            (error.message?.contains("timeout", ignoreCase = true) == true ||
+                error.message?.contains("busy", ignoreCase = true) == true)
         synchronized(stat) {
             stat.calls++
             stat.lastLatencyMs = cost
             if (error != null) {
                 stat.fails++
+                if (isTimeout) stat.timeouts++
+                stat.consecutiveFails++
+                stat.lastFailAt = now
                 stat.lastError = healthErrorText(error)
             } else {
                 stat.lastSuccessAtElapsed = now
+                stat.consecutiveFails = 0
+                stat.lastFailAt = 0L
             }
         }
         // M20：全局埋点——插件调用成功率/超时率 + 慢调用（>=2s）环形缓冲
         com.tvmusic.core.Metrics.recordPluginCall(
             success = error == null,
-            timeout = error is com.tvmusic.runtime.PluginCallException &&
-                (error.message?.contains("timeout") == true || error.message?.contains("busy") == true)
+            timeout = isTimeout
         )
         com.tvmusic.core.Metrics.recordSlow("plugin_call", platform, cost)
     }
@@ -161,10 +171,16 @@ class PluginRuntime private constructor(
         synchronized(s) {
             if (s.calls == 0) return 60
             val failRatio = s.fails.toFloat() / s.calls
+            val timeoutRatio = if (s.calls > 0) s.timeouts.toFloat() / s.calls else 0f
             val weight = weightPct.coerceIn(0, 300)
-            val latPenalty = (s.lastLatencyMs / 2500).toInt() * weight / 100
-            var score = 60 - (failRatio * 50).toInt() * weight / 100 - latPenalty
-            if (s.fails > 0 && s.lastSuccessAtElapsed == null) score -= 20
+            val latPenalty = (s.lastLatencyMs / 1000).toInt() * weight / 100
+            var score = 60 - (failRatio * 70).toInt() * weight / 100 - (timeoutRatio * 40).toInt() * weight / 100 - latPenalty
+            if (s.fails > 0 && s.lastSuccessAtElapsed == null) score -= 30
+            if (s.lastLatencyMs > 8000) score -= 20
+            if (s.lastLatencyMs > 15000) score -= 25
+            if (s.consecutiveFails >= 3) score -= 15
+            if (s.consecutiveFails >= 5) score -= 20
+            if (s.timeouts >= 3) score -= 10
             return score.coerceIn(0, 100)
         }
     }
@@ -347,6 +363,9 @@ class PluginRuntime private constructor(
         /** 引擎池上限：所有现有引擎都忙时按需懒扩容，最多 6 台。 */
         private const val MAX_LANES = 6
 
+        /** 插件可用性缓存 TTL（ms），过期后重新 hasPlugin+hasMethod 探测。 */
+        private const val AVAIL_CACHE_TTL_MS = 30_000L
+
         @Volatile private var INSTANCE: PluginRuntime? = null
 
         fun create(context: Context, store: com.tvmusic.data.PluginStore): PluginRuntime {
@@ -455,6 +474,47 @@ class PluginRuntime private constructor(
             false
         }
             .also { if (it) methodCache[key] = true }
+    }
+
+    /**
+     * 插件可用性缓存：避免每次搜索/换源都对全部插件逐一 hasPlugin+hasMethod 探测 JS 引擎。
+     * 缓存 30 秒，过期后重新探测；插件安装/卸载/切换启用时由调用方 invalidate 失效。
+     */
+    private val availCache = ConcurrentHashMap<String, AvailabilityEntry>()
+
+    private data class AvailabilityEntry(
+        val available: Boolean,
+        val checkedAt: Long
+    )
+
+    /**
+     * 判定某插件对某方法是否真正可用：已注册到引擎且该方法存在。
+     * 结果缓存 30 秒，过期后重探测。
+     */
+    suspend fun isAvailable(platform: String, method: String): Boolean = withContext(Dispatchers.IO) {
+        val key = "$platform::$method"
+        val now = System.currentTimeMillis()
+        val entry = availCache[key]
+        if (entry != null && now - entry.checkedAt < AVAIL_CACHE_TTL_MS) {
+            return@withContext entry.available
+        }
+        val ok = if (!runCatching { hasPlugin(platform) }.getOrDefault(false)) false
+        else runCatching { hasMethod(platform, method) }.getOrDefault(false)
+        availCache[key] = AvailabilityEntry(ok, now)
+        ok
+    }
+
+    /**
+     * 过滤出对 [method] 真正可用的平台列表（保持原列表顺序）。
+     * 适用于搜索/换源等需要“只选能用的插件”的场景，替代只读元数据的 info/loadError 过滤。
+     */
+    suspend fun availablePlatforms(platforms: List<String>, method: String): List<String> = withContext(Dispatchers.IO) {
+        platforms.filter { isAvailable(it, method) }
+    }
+
+    /** 清空可用性缓存（插件安装/卸载/启用状态变更时调用）。 */
+    fun invalidateAvailability() {
+        availCache.clear()
     }
 
     /**

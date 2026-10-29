@@ -130,6 +130,23 @@ class PluginStore(context: Context) {
     }
 
     /**
+     * 单插件源码查询：按 name 精确取 source 大字段（LIMIT 1）。
+     * 按需注册改造后引擎不再常驻全部源码，调用时按平台回查这一条即可；
+     * 不能用 [loadPlugins]（会把 50+ 插件源码全部物化，数十 MB 抖动）。
+     */
+    @Synchronized
+    fun sourceByName(name: String): String? {
+        if (name.isBlank()) return null
+        val db = helper.readableDatabase
+        db.query(
+            "plugins", arrayOf("source"), "name = ?", arrayOf(name),
+            null, null, null, "1"
+        ).use { c ->
+            return if (c.moveToFirst()) c.getString(0) else null
+        }
+    }
+
+    /**
      * 元数据轻量查询：不读 source 大字段（单个插件源码可达数百 KB~MB）。
      * 供列表展示 / 仓库 StateFlow / 远程管理使用——这些场景只看 name/info/enabled/
      * loadError/hash，从不碰源码。旧实现每次刷新都物化全部源码，多插件时造成

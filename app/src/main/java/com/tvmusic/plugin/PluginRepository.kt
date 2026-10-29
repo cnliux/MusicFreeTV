@@ -98,6 +98,10 @@ class PluginRepository(
         // 元数据轻量查询：StateFlow 常驻内存，不放源码（warmup 注册用全量查询，互不影响）
         _plugins.value = store.loadPluginMetas()
         _subscribed.value = store.listSubscriptions().map { it.url }
+        // 插件集合的任何变化（安装/卸载/启停）都会让引擎侧可用性探测结果过期，
+        // 必须立刻失效缓存；否则新装/重新启用的插件最长 30s 不出现在搜索与换源候选里，
+        // 表现为"插件明明装上了却搜不到/换不到它"。
+        runtime.invalidateAvailability()
     }
 
     /**
@@ -344,10 +348,22 @@ class PluginRepository(
 
     /** 内容识别安装：plugins.json 列表 → 逐个安装；否则按单个 .js 插件安装。 */
     private suspend fun installContent(url: String, body: String, fromSync: Boolean): String? {
-        val arr = runCatching { JSONObject(body).optJSONArray("plugins") }.getOrNull()
-        if (arr != null && arr.length() > 0) {
-            importListJson(body, fromSync)
+        val trimmed = body.trim()
+        // Try {"plugins": [...]}
+        val arr1 = runCatching { JSONObject(trimmed).optJSONArray("plugins") }.getOrNull()
+        if (arr1 != null && arr1.length() > 0) {
+            importListJsonObj(trimmed, fromSync)
             return null
+        }
+        // Try direct array [...]
+        val arr2 = runCatching { org.json.JSONArray(trimmed) }.getOrNull()
+        if (arr2 != null && arr2.length() > 0) {
+            // Check if it's array of plugin objects
+            val first = arr2.optJSONObject(0)
+            if (first != null && (first.has("url") || first.has("srcUrl") || first.has("scriptUrl"))) {
+                importListJsonArray(arr2, fromSync)
+                return null
+            }
         }
         syncSeenCount.incrementAndGet()
         return installFromBody(url, body, fromSync)
@@ -479,7 +495,12 @@ class PluginRepository(
             // 同名插件：指纹不同说明订阅源发布了更新，走更新路径（重新注册 + upsert，
             // 保留原启用状态与安装时间）。旧实现此处静默 return，订阅插件更新永远无法下发
             val oldRecord = existing.firstOrNull { it.name == name }
-            val platform = detectPlatform(js) ?: return@withContext "无法解析插件 platform"
+            val rawPlatform = detectPlatform(js)
+            // detectPlatform 对 Parcel/webpack 混淆产物可能返回 null（platform 值被加密为函数调用），
+            // 此时回退使用订阅条目中的 name 作为 platform（内部标识一致即可，readInfo 会覆盖为实际值）。
+            val platform = rawPlatform?.takeIf { it.isNotEmpty() } ?: name.ifEmpty { null }
+            if (platform == null) return@withContext "无法解析插件 platform"
+            val jsSource = js
             if (fromSync && platform in blockedNames) {
                 Log.i("PluginRepository", "skip uninstalled plugin: $platform")
                 return@withContext null
@@ -490,7 +511,7 @@ class PluginRepository(
             // 崩溃看门狗：写标记，若注册时 native crash，下次启动跳过该插件
             val marker = File(appContext.filesDir, "plugin_load_marker")
             marker.writeText(name.ifBlank { platform })
-            val loaded = runCatching { runtime.loadPlugin(platform, js) }.getOrDefault(false)
+            val loaded = runCatching { runtime.loadPlugin(platform, jsSource) }.getOrDefault(false)
             marker.delete()
             if (!loaded) return@withContext "插件注册失败: $platform"
             val infoRaw = runtime.readInfo(platform) ?: return@withContext "读取插件信息失败: $platform"
@@ -505,7 +526,7 @@ class PluginRepository(
                     version = version ?: info.version,
                     enabled = oldRecord?.enabled ?: keepEnabled,
                     installedAt = oldRecord?.installedAt ?: System.currentTimeMillis(),
-                    source = js,
+                    source = jsSource,
                     info = info,
                     loadError = null,
                     hash = hash
@@ -551,20 +572,29 @@ class PluginRepository(
      * 必须串行：并发安装会让"源码指纹去重"读到过期快照产生竞态，
      * 也会让崩溃看门狗 marker 文件互相覆盖，无法定位真正崩溃的插件。
      */
-    private suspend fun importListJson(body: String, fromSync: Boolean) {
+    private suspend fun importListJsonObj(body: String, fromSync: Boolean) {
         val arr = runCatching { JSONObject(body).optJSONArray("plugins") }.getOrNull() ?: return
+        importListJsonArray(arr, fromSync)
+    }
+
+    private suspend fun importListJsonArray(arr: org.json.JSONArray, fromSync: Boolean) {
         syncSeenCount.addAndGet(arr.length())
         for (i in 0 until arr.length()) {
             val item = arr.optJSONObject(i) ?: continue
             val name = item.optString("name")
-            val pluginUrl = item.optString("url")
+            val pluginUrl = optStr(item, "url") ?: optStr(item, "srcUrl") ?: optStr(item, "scriptUrl")
             val version = optStr(item, "version")
-            if (pluginUrl.isEmpty()) continue
+            if (pluginUrl.isNullOrEmpty()) continue
             // 不再使用白名单限制，否则订阅里绝大多数音源都会被静默丢弃，
             // 表现为"首页只装上一个插件"。崩溃防护由看门狗 + 永久黑名单负责。
             val err = install(name, pluginUrl, version = version, fromSync = fromSync)
             if (err != null) Log.w("PluginRepository", "install $name: $err")
         }
+    }
+
+    private suspend fun importListJson(body: String, fromSync: Boolean) {
+        val arr = runCatching { JSONObject(body).optJSONArray("plugins") }.getOrNull() ?: return
+        importListJsonArray(arr, fromSync)
     }
 
     /**
@@ -574,8 +604,8 @@ class PluginRepository(
      * 内层调用里的 platform（如 "yqq.json"、"WebFilter"）都出现在前面。
      */
     private fun detectPlatform(source: String): String? {
-        // 1) 字面量形式（优先）
-        val literal = Regex("""platform\s*[:=]\s*["']([^"']*)["']""").findAll(source).toList()
+        // 1) 字面量形式（优先）。键可能带引号：混淆产物常写成 'platform':'qq' / "platform":"x"
+        val literal = Regex("""["']?platform["']?\s*[:=]\s*["']([^"']*)["']""").findAll(source).toList()
             .map { it.groupValues[1].trim() }
             .filter { it.isNotEmpty() && it != "pc" && it != "web" && it != "WebFilter" && it != "H5" && it != "h5" && !it.endsWith(".json") }
         if (literal.isNotEmpty()) return literal.last()
@@ -586,7 +616,7 @@ class PluginRepository(
             .findAll(source).toList()
             .associate { it.groupValues[1] to it.groupValues[2].trim() }
         if (vars.isEmpty()) return null
-        val refs = Regex("""platform\s*[:=]\s*([A-Za-z_$][\w$]*)""").findAll(source).toList()
+        val refs = Regex("""["']?platform["']?\s*[:=]\s*([A-Za-z_$][\w$]*)""").findAll(source).toList()
         for (m in refs.reversed()) {
             val v = vars[m.groupValues[1]] ?: continue
             if (v.isNotEmpty() && v != "pc" && v != "web" && v != "WebFilter" && v != "H5" && v != "h5" && !v.endsWith(".json")) return v
@@ -596,6 +626,8 @@ class PluginRepository(
 
     /** 读取可选字符串字段：缺失/NULL/空串统一返回 null（避免 optString(key, null) 的类型不匹配警告）。 */
     private fun optStr(o: JSONObject, key: String): String? = o.optString(key).takeIf { it.isNotEmpty() }
+
+
 
     private fun parseInfo(json: JSONObject): PluginInfo {
         fun JSONArray.toStrings(): List<String> =
