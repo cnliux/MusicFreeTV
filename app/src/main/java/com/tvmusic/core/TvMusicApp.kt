@@ -29,7 +29,12 @@ class TvMusicApp : Application() {
     lateinit var repository: PluginRepository
         private set
 
-    private val appScope = CoroutineScope(
+    /**
+     * 应用级协程作用域（进程存活期间不取消）。除启动初始化外，在线升级的
+     * APK 下载也必须挂在这里——挂在页面 compositionScope 上时，用户离开
+     * "关于"页签协程就被取消，"后台下载"实际会中途夭折（2026-10-31 审计发现）。
+     */
+    val appScope = CoroutineScope(
         SupervisorJob() + Dispatchers.Main.immediate +
             // P0-6：初始化协程未捕获异常会直接杀进程（冷启动必崩）。这里兜底记账，
             // 同时释放 awaitEngineReady 的等待者，避免它们各自再阻塞 30s。

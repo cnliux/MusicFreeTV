@@ -54,6 +54,8 @@ import com.tvmusic.ui.components.ModalVisibility
 fun AboutScreen() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // 升级下载专用：应用级作用域，离开"关于"页不取消（compositionScope 会）
+    val appScope = (context.applicationContext as com.tvmusic.core.TvMusicApp).appScope
     var update by remember { mutableStateOf<UpdateState>(UpdateState.Idle) }
     var dialogVisible by remember { mutableStateOf(false) }
 
@@ -175,7 +177,8 @@ fun AboutScreen() {
                             // 全程只剩按钮文案一个反馈点
                             found?.let {
                                 update = UpdateState.Downloading(it.version, 0)
-                                UpdateChecker.downloadApkAsync(scope, context, it.version, onState = { s -> update = s })
+                                // 下载挂应用级作用域：离开本页协程不取消，"后台下载"才名副其实
+                                UpdateChecker.downloadApkAsync(appScope, context, it.version, onState = { s -> update = s })
                             }
                         },
                         textColor = MaterialTheme.colorScheme.primary,
@@ -215,7 +218,7 @@ fun AboutScreen() {
                             // 同「下载更新」：保持弹框可见，进度弹框立即接管
                             dlFailed?.let {
                                 update = UpdateState.Downloading(it.version, 0)
-                                UpdateChecker.downloadApkAsync(scope, context, it.version, onState = { s -> update = s })
+                                UpdateChecker.downloadApkAsync(appScope, context, it.version, onState = { s -> update = s })
                             }
                         },
                         textColor = MaterialTheme.colorScheme.primary,
@@ -386,9 +389,13 @@ private object UpdateChecker {
     private const val GRADLE_URL =
         "https://raw.githubusercontent.com/$REPO/main/app/build.gradle.kts"
 
-    /** jsDelivr 的 raw 代理走独立 URL 形态（/gh/user/repo@branch/path），不支持 releases 下载。 */
+    /**
+     * jsDelivr 的 raw 代理走独立 URL 形态（/gh/user/repo@branch/path），不支持 releases 下载。
+     * 注意 user 与 repo 之间必须是 "/"：曾写成 REPO.replace('/','@')（gh/cnliux@MusicFreeTV@main），
+     * jsDelivr 直接 400，首选线路永远失效、全靠后面的代理兜底（2026-10-31 实测）。
+     */
     private val jsdelivrRaw =
-        "https://fastly.jsdelivr.net/gh/${REPO.replace('/', '@')}@main/app/build.gradle.kts"
+        "https://fastly.jsdelivr.net/gh/$REPO@main/app/build.gradle.kts"
 
     /** 空前缀 = 直连。 */
     private val rawPrefixes = listOf(

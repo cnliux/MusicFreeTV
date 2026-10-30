@@ -154,38 +154,167 @@
         };
     }
 
-    // ---------- URL / URLSearchParams 垫片（QuickJS 自带） ----------
-    if (typeof global.URL === 'undefined') {
-        function URLSearchParams(query) {
-            this._map = {};
-            if (typeof query === 'string' && query.length) {
-                var parts = query.replace(/^[?#]/, '').split('&');
+    // ---------- URL / URLSearchParams 垫片 ----------
+    // QuickJS(2021) 完全没有 WHATWG URL（实测 typeof URL === 'undefined'），两个都得自实现。
+    // 【坑】URLSearchParams 必须支持「对象 / 键值对数组 / 另一个 URLSearchParams」入参：
+    // 插件里 36DJ、快音写 `new URLSearchParams({classid:1,keyboard:kw,show:'…'}).toString()`，
+    // 旧垫片只解析字符串 query，传对象得到空串 → POST body 为空 → 站点回"信息提示"页，
+    // 搜索永远 0 条（是垫片不足，不是插件问题）。空格按表单规范编码为 '+'。
+    function uspNeedsShim() {
+        if (typeof global.URLSearchParams === 'undefined') return true;
+        try { return String(new global.URLSearchParams({ a: 1 })) !== 'a=1'; } catch (e) { return true; }
+    }
+    if (typeof global.URL === 'undefined' || uspNeedsShim()) {
+        // application/x-www-form-urlencoded 编码：encodeURIComponent 基础上把空格转 +，
+        // 并按规范补转 ! ' ( ) *（encodeURIComponent 对这些不转义）。
+        function encForm(s) {
+            return encodeURIComponent(String(s)).replace(/%20/g, '+')
+                .replace(/[!'()*]/g, function (c) {
+                    return '%' + c.charCodeAt(0).toString(16).toUpperCase();
+                });
+        }
+        function decForm(s) {
+            var t = String(s).replace(/\+/g, ' ');
+            try { return decodeURIComponent(t); } catch (e) { return t; }
+        }
+        // 有序键值对列表（同名 key 允许重复，符合规范；旧垫片用","拼接同名值是错的）。
+        function URLSearchParams(init) {
+            this._list = [];
+            if (init === undefined || init === null) return;
+            if (typeof init === 'string') {
+                var q = init.replace(/^[?#]/, '');
+                if (!q.length) return;
+                var parts = q.split('&');
                 for (var i = 0; i < parts.length; i++) {
                     if (!parts[i]) continue;
-                    var kv = parts[i].split('=');
-                    var k = decodeURIComponent(kv[0]);
-                    var v = kv.length > 1 ? decodeURIComponent(kv.slice(1).join('=')) : '';
-                    this._map[k] = (this._map[k] === undefined) ? v : this._map[k] + ',' + v;
+                    var eq = parts[i].indexOf('=');
+                    if (eq < 0) this.append(decForm(parts[i]), '');
+                    else this.append(decForm(parts[i].slice(0, eq)), decForm(parts[i].slice(eq + 1)));
+                }
+                return;
+            }
+            if (init instanceof URLSearchParams) {
+                for (var a = 0; a < init._list.length; a++) {
+                    this.append(init._list[a][0], init._list[a][1]);
+                }
+                return;
+            }
+            var isSeq = Array.isArray(init) ||
+                (typeof Symbol !== 'undefined' && Symbol.iterator && typeof init[Symbol.iterator] === 'function');
+            if (isSeq) {
+                var pairs = Array.isArray(init) ? init : Array.from(init);
+                for (var j = 0; j < pairs.length; j++) {
+                    var pair = pairs[j];
+                    if (pair === undefined || pair === null) continue;
+                    this.append(String(pair[0]), String(pair[1]));
+                }
+                return;
+            }
+            if (typeof init === 'object') {
+                var keys = Object.keys(init);
+                for (var n = 0; n < keys.length; n++) {
+                    var val = init[keys[n]];
+                    if (Array.isArray(val)) {
+                        for (var m = 0; m < val.length; m++) this.append(keys[n], String(val[m]));
+                    } else {
+                        this.append(keys[n], String(val));
+                    }
                 }
             }
         }
-        URLSearchParams.prototype.append = function (k, v) {
-            this._map[k] = (this._map[k] === undefined) ? String(v) : this._map[k] + ',' + v;
+        URLSearchParams.prototype.append = function (k, v) { this._list.push([String(k), String(v)]); };
+        URLSearchParams.prototype.delete = function (k) {
+            k = String(k);
+            var keep = [];
+            for (var i = 0; i < this._list.length; i++) {
+                if (this._list[i][0] !== k) keep.push(this._list[i]);
+            }
+            this._list = keep;
         };
-        URLSearchParams.prototype.set = function (k, v) { this._map[k] = String(v); };
-        URLSearchParams.prototype.get = function (k) { return (k in this._map) ? this._map[k] : null; };
-        URLSearchParams.prototype.has = function (k) { return (k in this._map); };
+        URLSearchParams.prototype.set = function (k, v) {
+            k = String(k);
+            var first = -1;
+            var keep = [];
+            for (var i = 0; i < this._list.length; i++) {
+                if (this._list[i][0] === k) {
+                    if (first < 0) { first = keep.length; keep.push([k, String(v)]); }
+                } else {
+                    keep.push(this._list[i]);
+                }
+            }
+            if (first < 0) keep.push([k, String(v)]);
+            this._list = keep;
+        };
+        URLSearchParams.prototype.get = function (k) {
+            k = String(k);
+            for (var i = 0; i < this._list.length; i++) {
+                if (this._list[i][0] === k) return this._list[i][1];
+            }
+            return null;
+        };
+        URLSearchParams.prototype.getAll = function (k) {
+            k = String(k);
+            var out = [];
+            for (var i = 0; i < this._list.length; i++) {
+                if (this._list[i][0] === k) out.push(this._list[i][1]);
+            }
+            return out;
+        };
+        URLSearchParams.prototype.has = function (k) {
+            k = String(k);
+            for (var i = 0; i < this._list.length; i++) {
+                if (this._list[i][0] === k) return true;
+            }
+            return false;
+        };
+        URLSearchParams.prototype.sort = function () {
+            this._list.sort(function (x, y) {
+                if (x[0] < y[0]) return -1;
+                if (x[0] > y[0]) return 1;
+                if (x[1] < y[1]) return -1;
+                if (x[1] > y[1]) return 1;
+                return 0;
+            });
+        };
+        function makeIter(list) {
+            var i = 0;
+            var it = {
+                next: function () {
+                    return i < list.length
+                        ? { value: list[i++], done: false }
+                        : { value: undefined, done: true };
+                }
+            };
+            if (typeof Symbol !== 'undefined' && Symbol.iterator) it[Symbol.iterator] = function () { return it; };
+            return it;
+        }
+        URLSearchParams.prototype.entries = function () { return makeIter(this._list); };
+        URLSearchParams.prototype.keys = function () {
+            var arr = [];
+            for (var i = 0; i < this._list.length; i++) arr.push(this._list[i][0]);
+            return makeIter(arr);
+        };
+        URLSearchParams.prototype.values = function () {
+            var arr = [];
+            for (var i = 0; i < this._list.length; i++) arr.push(this._list[i][1]);
+            return makeIter(arr);
+        };
+        URLSearchParams.prototype.forEach = function (cb, thisArg) {
+            if (typeof cb !== 'function') return;
+            for (var i = 0; i < this._list.length; i++) {
+                cb.call(thisArg, this._list[i][1], this._list[i][0], this);
+            }
+        };
+        if (typeof Symbol !== 'undefined' && Symbol.iterator) {
+            URLSearchParams.prototype[Symbol.iterator] = function () { return this.entries(); };
+        }
+        Object.defineProperty(URLSearchParams.prototype, 'size', {
+            get: function () { return this._list.length; }
+        });
         URLSearchParams.prototype.toString = function () {
             var out = [];
-            for (var k in this._map) {
-                if (!Object.prototype.hasOwnProperty.call(this._map, k)) continue;
-                var v = this._map[k];
-                if (typeof v === 'string' && v.indexOf(',') >= 0 && !this._multiAdded) {
-                    var arr = v.split(',');
-                    for (var i = 0; i < arr.length; i++) out.push(encodeURIComponent(k) + '=' + encodeURIComponent(arr[i]));
-                } else {
-                    out.push(encodeURIComponent(k) + '=' + encodeURIComponent(v));
-                }
+            for (var i = 0; i < this._list.length; i++) {
+                out.push(encForm(this._list[i][0]) + '=' + encForm(this._list[i][1]));
             }
             return out.join('&');
         };
@@ -251,8 +380,69 @@
             if (this.hash) out += this.hash;
             return out;
         };
-        global.URL = URL;
-        global.URLSearchParams = URLSearchParams;
+        // 只在缺失时覆盖：某些引擎自带 URL 但 URLSearchParams 能力不全，
+        // 这种情况下只换掉 URLSearchParams，不能把原生 URL 覆盖成简化实现。
+        if (typeof global.URL === 'undefined') global.URL = URL;
+        if (typeof global.URLSearchParams === 'undefined' || uspNeedsShim()) {
+            global.URLSearchParams = URLSearchParams;
+        }
+    }
+
+    // ---------- TextEncoder / TextDecoder 垫片 ----------
+    // QuickJS(2021) 不带 WHATWG Encoding API，但插件常用 TextDecoder 解响应、
+    // TextEncoder 造请求体（如 73DJ 报 "TextDecoder is not defined"）。
+    // 复用上面的 utf8ToBytes / bytesToUtf8 实现 UTF-8 往返；其它编码标签（gbk 等）
+    // 无原生支持，按 UTF-8 处理——比直接 ReferenceError 崩掉更可用。
+    function bytesOf(input) {
+        if (input === undefined || input === null) return [];
+        if (typeof ArrayBuffer !== 'undefined' && input instanceof ArrayBuffer) {
+            var view = new Uint8Array(input);
+            var out = [];
+            for (var i = 0; i < view.length; i++) out.push(view[i]);
+            return out;
+        }
+        if (ArrayBuffer.isView && ArrayBuffer.isView(input)) {
+            var o2 = [];
+            for (var j = 0; j < input.length; j++) o2.push(input[j] & 0xFF);
+            return o2;
+        }
+        if (typeof input === 'string') return utf8ToBytes(input);
+        var o3 = [];
+        for (var k = 0; k < input.length; k++) o3.push(input[k] & 0xFF);
+        return o3;
+    }
+    if (typeof global.TextEncoder === 'undefined') {
+        var TextEncoder = function () {
+            this.encoding = 'utf-8';
+        };
+        TextEncoder.prototype.encode = function (str) {
+            var bytes = utf8ToBytes(str === undefined ? '' : String(str));
+            var arr = new Uint8Array(bytes.length);
+            for (var i = 0; i < bytes.length; i++) arr[i] = bytes[i];
+            return arr;
+        };
+        TextEncoder.prototype.encodeInto = function (str, dest) {
+            var bytes = utf8ToBytes(str === undefined ? '' : String(str));
+            var n = Math.min(bytes.length, dest.length);
+            for (var i = 0; i < n; i++) dest[i] = bytes[i];
+            return { read: n, written: n };
+        };
+        global.TextEncoder = TextEncoder;
+    }
+    if (typeof global.TextDecoder === 'undefined') {
+        var TextDecoder = function (label) {
+            this.encoding = (label ? String(label) : 'utf-8').toLowerCase();
+            this.fatal = false;
+            this.ignoreBOM = false;
+        };
+        TextDecoder.prototype.decode = function (input) {
+            if (input === undefined || input === null) return '';
+            var text = bytesToUtf8(bytesOf(input));
+            // UTF-8 BOM（EF BB BF）按规范默认剥掉
+            if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+            return text;
+        };
+        global.TextDecoder = TextDecoder;
     }
 
     // ---------- process 存根 ----------

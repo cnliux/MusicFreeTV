@@ -51,7 +51,9 @@ class PluginRuntime private constructor(
     primary: JsEngine,
     extras: List<JsEngine>,
     private val appContext: Context?,
-    private val variablesProvider: ((platform: String) -> Map<String, String>)?
+    private val variablesProvider: ((platform: String) -> Map<String, String>)?,
+    /** 引擎池上限：内存充裕的设备放宽（见 [Companion.create]），小内存 TV 盒保守。 */
+    private val maxLanes: Int = MAX_LANES
 ) {
 
     /**
@@ -71,7 +73,7 @@ class PluginRuntime private constructor(
     }
 
     /** 各引擎在途调用计数（取最小值做负载均衡；最小值 > 0 即“所有引擎都忙”）。 */
-    private val laneBusy = AtomicIntegerArray(MAX_LANES)
+    private val laneBusy = AtomicIntegerArray(maxLanes)
 
     /**
      * 每台引擎“已注册平台集合”。初始引擎经 [loadPlugin] 全量注册时同步记录；
@@ -82,7 +84,7 @@ class PluginRuntime private constructor(
     }
 
     /** 每台引擎的注册互斥锁（防止同引擎并发调用时对同一平台重复注册）。 */
-    private val laneRegisterLocks = Array(MAX_LANES) { Any() }
+    private val laneRegisterLocks = Array(maxLanes) { Any() }
 
     private val laneLock = Any()
 
@@ -235,7 +237,7 @@ class PluginRuntime private constructor(
                 idle >= 0 -> idle
                 else -> {
                     var picked = -1
-                    if (lanes.size < MAX_LANES) {
+                    if (lanes.size < maxLanes) {
                         picked = createLaneLocked()
                     }
                     if (picked < 0) picked = best
@@ -360,8 +362,18 @@ class PluginRuntime private constructor(
         /** 并行搜索的初始引擎总数。Amlogic p230 上 3 台足够，过大会推高 CPU/内存。 */
         private const val SEARCH_ENGINES = 3
 
-        /** 引擎池上限：所有现有引擎都忙时按需懒扩容，最多 6 台。 */
+        /** 引擎池默认上限：所有现有引擎都忙时按需懒扩容，最多 6 台（小内存 TV 盒）。 */
         private const val MAX_LANES = 6
+
+        /**
+         * 大内存设备（总 RAM ≥ 2.5GB）的引擎池上限。
+         *
+         * 聚合搜索的总耗时大致是「54 个源 ÷ lane 数 × 单源耗时」：6 条 lane 时每条约
+         * 9 个源串行，尾部源排队超过 queue wait 就被丢弃（实测设备 54 源只有 21 源
+         * 出结果）。lane 内大部分时间阻塞在 OkHttp 读，瓶颈是并发 I/O 而不是 CPU，
+         * 所以内存宽松时多开 2 条 lane 能直接换吞吐。
+         */
+        private const val MAX_LANES_BIG_MEM = 8
 
         /** 插件可用性缓存 TTL（ms），过期后重新 hasPlugin+hasMethod 探测。 */
         private const val AVAIL_CACHE_TTL_MS = 30_000L
@@ -394,7 +406,17 @@ class PluginRuntime private constructor(
                 if (e == null) break
                 extras.add(e)
             }
-            val rt = PluginRuntime(primary, extras, context.applicationContext, provider)
+            // 引擎池上限按总内存分档：每台 lane 独立 QuickJS runtime + 已注册插件源码，
+            // 小内存 TV 盒（1.8GB 实测）保持 6，避免挤掉音频解码/GC 空间；
+            // 大内存设备放宽到 8 提高聚合搜索吞吐。
+            val totalMemMb = runCatching {
+                val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+                val mi = android.app.ActivityManager.MemoryInfo()
+                am.getMemoryInfo(mi)
+                mi.totalMem / (1024L * 1024L)
+            }.getOrDefault(0L)
+            val laneCap = if (totalMemMb >= 2560L) MAX_LANES_BIG_MEM else MAX_LANES
+            val rt = PluginRuntime(primary, extras, context.applicationContext, provider, laneCap)
             INSTANCE = rt
             return rt
         }

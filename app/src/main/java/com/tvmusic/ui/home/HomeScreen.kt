@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -368,13 +369,18 @@ private fun OperationsRow(
     onOpenMyList: () -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 8.dp),
+        // 高度取本行最高子项（IntrinsicSize.Min）并让三个入口 fillMaxHeight：
+        // 副标题换行曾让「推荐歌单」比「排行榜」高出一截，三者必须等大等宽
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min)
+            .padding(horizontal = 28.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        ActionEntry("🔥", "推荐歌单", "按标签发现好歌单", Modifier.weight(1f).heightIn(min = 64.dp), onOpenRecommend)
-        ActionEntry("🏆", "排行榜", "各平台权威榜单", Modifier.weight(1f).heightIn(min = 64.dp), onOpenTopList)
-        ActionEntry("📻", "我的歌单", "历史 / 收藏", Modifier.weight(1f).heightIn(min = 64.dp), onOpenMyList)
+        ActionEntry("🔥", "推荐歌单", "按标签发现好歌单", Modifier.weight(1f).fillMaxHeight(), onOpenRecommend)
+        ActionEntry("🏆", "排行榜", "各平台权威榜单", Modifier.weight(1f).fillMaxHeight(), onOpenTopList)
+        ActionEntry("📻", "我的歌单", "历史 / 收藏", Modifier.weight(1f).fillMaxHeight(), onOpenMyList)
         // 刷新按钮：使用 GlassButton 统一风格
         GlassButton(
             onClick = onRefresh,
@@ -409,11 +415,11 @@ private fun ActionEntry(
         modifier = modifier
             .tvFocus(1.03f)
             .heightIn(min = 64.dp),
-        contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp)
+        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 12.dp)
     ) { _ ->
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(16.dp)
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Box(
                 modifier = Modifier
@@ -424,12 +430,24 @@ private fun ActionEntry(
             ) {
                 Text(icon, fontSize = 22.sp)
             }
+            // 标题/副标题都强制单行：副标题换行会把该卡片撑高，
+            // 造成「推荐歌单」比「排行榜」大一圈（文字宽度不够时宁可省略号）
             Column {
-                Text(title, fontSize = 17.sp, color = MaterialTheme.colorScheme.onSurface)
+                Text(
+                    title,
+                    fontSize = 17.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
                 Text(
                     subtitle,
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 3.dp)
                 )
             }

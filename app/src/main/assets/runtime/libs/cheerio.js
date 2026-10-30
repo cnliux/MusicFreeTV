@@ -69,7 +69,11 @@
                 if (tagM) {
                     var tag = tagM[1].toLowerCase();
                     var rest = tagM[2];
-                    var selfClose = /\/\s*$/.test(rest);
+                    // HTML 规范：非 void 元素上的自闭合斜杠会被忽略（浏览器/cheerio 都把
+                    // `<a href="x" />` 当开标签）。不少站点（如 73DJ，ASP.NET 输出）正是
+                    // 这么写，旧实现按 XHTML 语义自闭合，导致 <a/> 内的标题全被丢成兄弟
+                    // 文本节点，插件解析出 0 首（真实案例：73DJ 搜索 12 条只回 0 条）。
+                    var selfClose = VOID_TAGS[tag] === 1 && /\/\s*$/.test(rest);
                     var parent = stack.length ? stack[stack.length - 1] : root;
                     var el = new Element(tag, parseAttrs(rest), parent, false, null);
                     parent.children.push(el);
@@ -138,18 +142,24 @@
         }
         return tokens;
     }
+    // 关键：两个 simple token 之间没有显式组合符（既无空格也无 >）时必须并入
+    // 同一个复合选择器，而不是当成后代关系。旧实现把 `a[href]` 拆成 `a`（祖先）
+    // + `[href]`（后代），而 li.wq_8 / a[href*="/play/"] 这类写法在插件里极常见，
+    // 结果一律静默返回 0 条（真实案例：73DJ 搜 `a[href*="/play/"]` 命中 0 而
+    // 页面里有 20 条 <a href="/play/…">）。
     function buildSteps(tokens) {
         var steps = [];
         var cur = null;
-        var pendingComb = '';
+        var comb = '';
+        var explicit = false;
         for (var i = 0; i < tokens.length; i++) {
             var t = tokens[i];
-            if (t.type === 'comb') { pendingComb = t.value; }
-            else {
-                cur = { comb: pendingComb, simple: [t.value] };
-                pendingComb = '';
-                steps.push(cur);
-            }
+            if (t.type === 'comb') { comb = t.value; explicit = true; continue; }
+            if (cur && !explicit) { cur.simple.push(t.value); continue; }
+            cur = { comb: comb, simple: [t.value] };
+            steps.push(cur);
+            explicit = false;
+            comb = ' ';
         }
         return steps;
     }
@@ -236,6 +246,50 @@
         }
         return out;
     }
+    // 选择器列表（逗号分隔）：拆顶层逗号（跳过 [] 内与引号内的逗号）。
+    // 插件里 closest('li,tr')、find('a,b')、is('.a,.b') 很常见；旧实现只把逗号
+    // 拼进一个复合选择器（li AND tr），等于永不相中。
+    function selectorList(sel) {
+        var text = String(sel);
+        var parts = [];
+        var cur = '';
+        var depth = 0;
+        var quote = '';
+        for (var i = 0; i < text.length; i++) {
+            var ch = text.charAt(i);
+            if (quote) {
+                cur += ch;
+                if (ch === quote) quote = '';
+                continue;
+            }
+            if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
+            if (ch === '[') { depth++; cur += ch; continue; }
+            if (ch === ']') { if (depth > 0) depth--; cur += ch; continue; }
+            if (ch === ',' && depth === 0) {
+                if (cur.replace(/\s+/g, '')) parts.push(cur.trim());
+                cur = '';
+                continue;
+            }
+            cur += ch;
+        }
+        if (cur.replace(/\s+/g, '')) parts.push(cur.trim());
+        return parts.length ? parts : [text.trim()];
+    }
+    function queryAllList(sel, roots) {
+        var parts = selectorList(sel);
+        var out = [];
+        for (var i = 0; i < parts.length; i++) out = out.concat(queryAll(parts[i], roots));
+        return dedupe(out);
+    }
+    function matchesAny(el, sel) {
+        if (!el || el.isText) return false;
+        var parts = selectorList(sel);
+        for (var i = 0; i < parts.length; i++) {
+            var steps = buildSteps(tokenizeSelector(parts[i]));
+            if (steps.length && matchesSelector(el, steps, steps.length - 1)) return true;
+        }
+        return false;
+    }
 
     // ---------------- Cheerio 对象 ----------------
     function Cheerio(elements) {
@@ -285,12 +339,42 @@
     Cheerio.prototype.data = function (name) {
         return this.attr('data-' + name);
     };
+    // .val()：表单控件的值（真实 cheerio/jQuery 都有，插件常用 $(sel).val() 取输入框）。
+    // 缺它会让插件直接抛 "TypeError: not a function"（我是DJ 的搜索解析即栽在这里）。
+    Cheerio.prototype.val = function (value) {
+        if (value === undefined) {
+            var el = this.elements[0];
+            if (!el || el.isText) return undefined;
+            if (el.tag === 'textarea') {
+                var t = [];
+                for (var j = 0; j < el.children.length; j++) collectText(el.children[j], t);
+                return t.join('');
+            }
+            return el.attrs['value'] !== undefined ? el.attrs['value'] : '';
+        }
+        for (var i = 0; i < this.elements.length; i++) {
+            if (!this.elements[i].isText) this.elements[i].attrs['value'] = String(value);
+        }
+        return this;
+    };
+    Cheerio.prototype.hasClass = function (cls) {
+        for (var i = 0; i < this.elements.length; i++) {
+            if (!this.elements[i].isText && hasClass(this.elements[i], cls)) return true;
+        }
+        return false;
+    };
+    Cheerio.prototype.removeAttr = function (name) {
+        for (var i = 0; i < this.elements.length; i++) {
+            if (!this.elements[i].isText) delete this.elements[i].attrs[name];
+        }
+        return this;
+    };
     Cheerio.prototype.find = function (sel) {
         var roots = [];
         for (var i = 0; i < this.elements.length; i++) {
             roots.push(this.elements[i]);
         }
-        return new Cheerio(queryAll(sel, roots));
+        return new Cheerio(queryAllList(sel, roots));
     };
     Cheerio.prototype.children = function (sel) {
         var out = [];
@@ -301,10 +385,7 @@
                 if (!c.isText) out.push(c);
             }
         }
-        if (sel) {
-            var steps = buildSteps(tokenizeSelector(sel));
-            out = out.filter(function (el) { return matchesSelector(el, steps, steps.length - 1); });
-        }
+        if (sel) out = out.filter(function (el) { return matchesAny(el, sel); });
         return new Cheerio(dedupe(out));
     };
     Cheerio.prototype.parent = function () {
@@ -314,13 +395,46 @@
         }
         return new Cheerio(dedupe(out));
     };
-    Cheerio.prototype.parents = function () {
+    Cheerio.prototype.parents = function (sel) {
         var out = [];
         for (var i = 0; i < this.elements.length; i++) {
             var p = this.elements[i].parent;
             while (p && p.tag !== '#root') { out.push(p); p = p.parent; }
         }
+        out = dedupe(out);
+        if (sel) out = out.filter(function (el) { return matchesAny(el, sel); });
+        return new Cheerio(out);
+    };
+    // closest(sel)：从元素自身开始向上找第一个匹配的祖先（含自身）。
+    // 缺它是 36DJ 搜索必炸的点（TypeError: not a function）：插件写
+    //   $(input).parent().closest('li,tr').find('a[href*="/play/"]')...
+    // 旧垫片既没有 closest，也不支持逗号选择器列表。
+    Cheerio.prototype.closest = function (sel) {
+        var out = [];
+        for (var i = 0; i < this.elements.length; i++) {
+            var el = this.elements[i];
+            if (el.isText) continue;
+            var cur = el;
+            while (cur && cur.tag !== '#root') {
+                if (matchesAny(cur, sel)) { out.push(cur); break; }
+                cur = cur.parent;
+            }
+        }
         return new Cheerio(dedupe(out));
+    };
+    Cheerio.prototype.siblings = function (sel) {
+        var out = [];
+        for (var i = 0; i < this.elements.length; i++) {
+            var el = this.elements[i];
+            if (!el.parent) continue;
+            for (var j = 0; j < el.parent.children.length; j++) {
+                var sib = el.parent.children[j];
+                if (sib !== el && !sib.isText) out.push(sib);
+            }
+        }
+        out = dedupe(out);
+        if (sel) out = out.filter(function (el) { return matchesAny(el, sel); });
+        return new Cheerio(out);
     };
     Cheerio.prototype.next = function () {
         var out = [];
@@ -346,17 +460,37 @@
         }
         return new Cheerio(dedupe(out));
     };
-    Cheerio.prototype.filter = function (fn) {
+    Cheerio.prototype.filter = function (arg) {
+        var out = [];
+        if (typeof arg === 'function') {
+            for (var i = 0; i < this.elements.length; i++) {
+                if (arg.call(this.elements[i], i, this.elements[i])) out.push(this.elements[i]);
+            }
+        } else if (typeof arg === 'string') {
+            for (var j = 0; j < this.elements.length; j++) {
+                if (matchesAny(this.elements[j], arg)) out.push(this.elements[j]);
+            }
+        } else {
+            out = this.elements.slice();
+        }
+        return new Cheerio(out);
+    };
+    Cheerio.prototype.not = function (arg) {
         var out = [];
         for (var i = 0; i < this.elements.length; i++) {
-            if (fn.call(this.elements[i], i, this.elements[i])) out.push(this.elements[i]);
+            var el = this.elements[i];
+            var hit = typeof arg === 'string' ? matchesAny(el, arg) : (arg && typeof arg === 'function' ? arg.call(el, i, el) : false);
+            if (!hit) out.push(el);
         }
         return new Cheerio(out);
     };
     Cheerio.prototype.is = function (sel) {
         if (this.elements.length === 0) return false;
-        var steps = buildSteps(tokenizeSelector(sel));
-        return matchesSelector(this.elements[0], steps, steps.length - 1);
+        // jQuery 语义：任意一个元素命中即 true（旧实现只看第一个，插件解析易漏）。
+        for (var i = 0; i < this.elements.length; i++) {
+            if (matchesAny(this.elements[i], sel)) return true;
+        }
+        return false;
     };
     Cheerio.prototype.addClass = function (cls) {
         for (var i = 0; i < this.elements.length; i++) {
@@ -394,7 +528,7 @@
                 roots = [root];
             }
             if (sel === undefined || sel === null || sel === '') return new Cheerio([]);
-            var parts = String(sel).split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+            var parts = selectorList(sel);
             var out = [];
             for (var i = 0; i < parts.length; i++) {
                 out = out.concat(queryAll(parts[i], roots));

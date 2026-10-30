@@ -68,6 +68,17 @@ class QuickJsEngine(
     @Volatile
     private var interruptReady = false
 
+    /**
+     * 当前线程最近一次 [armInterrupt] 的预算（ms，0/缺省=未装时限）。
+     *
+     * 同步原生调用（插件 HTTP 走 [NativeBridge.httpRequest]）会把 JS 线程整段阻塞，
+     * 这段时间 JS 一条指令都没执行，却照样在消耗中断倒计时——慢 HTTP 一返回，
+     * 脚本下一条指令就撞上已过期的 deadline 抛 `InternalError: interrupted`
+     * （真实案例：相声评书/皮狗DJ/DJKK/MixDJ）。所以在原生阻塞返回后按原预算重新
+     * 起算，让"原生阻塞时长"从"JS 执行时限"里被扣除。线程局部，跟随 JS 执行线程。
+     */
+    private val armedBudgetMs = ThreadLocal<Long>()
+
     private external fun nativeInitPump(): Boolean
     private external fun nativePumpJobs(runtimePtr: Long): Int
 
@@ -147,6 +158,19 @@ class QuickJsEngine(
          * 故注册路径给足独立预算。
          */
         private const val JS_REGISTER_TIMEOUT_MS = 60_000L
+
+        /**
+         * 聚合搜索单平台的「执行」预算（ms）。搜索是延迟敏感路径（结果流式追加），
+         * 一条死源占住 lane 45s 会把同 lane 后面排队的源全部挤到 queue timeout。
+         * 20s 足够覆盖常态（read 超时 10s × 两个请求），超时即让位给下一个源。
+         */
+        private const val SEARCH_EXEC_CAP_MS = 20_000L
+
+        /** 聚合搜索排队等待上限（ms）：比通用 15s 略宽，减少「慢源挤掉后位源」的白丢结果。 */
+        private const val SEARCH_QUEUE_WAIT_MS = 20_000L
+
+        /** 通用（非搜索/取流）排队等待上限（ms）。 */
+        private const val DEFAULT_QUEUE_WAIT_MS = 15_000L
 
         private val parseLibsOrder = listOf(
             "crypto-js", "qs", "dayjs", "he", "big-integer", "cheerio", "webdav", "axios"
@@ -372,16 +396,24 @@ class QuickJsEngine(
         // timeoutMs 预算覆盖「排队等待 + 执行」两段：拿不到锁就按超时抛错，调用方
         // （如换源扫描）可快速跳过被慢调用占住的引擎。旧逻辑超时从拿到锁后才起算，
         // 排队时长无限，一个 60s 慢调用能把整条换源链无声拖死。
-        val effectiveTimeout = if (method == com.tvmusic.constants.PluginMethod.MEDIA_SOURCE) timeoutMs.coerceAtMost(45000L) else timeoutMs.coerceAtMost(60000L)
+        val isSearch = method == com.tvmusic.constants.PluginMethod.SEARCH
+        val effectiveTimeout = when {
+            method == com.tvmusic.constants.PluginMethod.MEDIA_SOURCE -> timeoutMs.coerceAtMost(45000L)
+            else -> timeoutMs.coerceAtMost(60000L)
+        }
         val deadline = System.currentTimeMillis() + effectiveTimeout
-        val queueWaitMs = (deadline - System.currentTimeMillis()).coerceAtMost(15000L)
+        val queueWaitCap = if (isSearch) SEARCH_QUEUE_WAIT_MS else DEFAULT_QUEUE_WAIT_MS
+        val queueWaitMs = (deadline - System.currentTimeMillis()).coerceAtMost(queueWaitCap)
         if (!invokeLock.tryLock(queueWaitMs, TimeUnit.MILLISECONDS)) {
             Log.w(TAG, "invoke busy (queue timeout) $platform.$method")
             throw PluginCallException("plugin engine busy: $platform.$method")
         }
         try {
             val remaining = deadline - System.currentTimeMillis()
-            return doInvoke(platform, method, argsJson, remaining.coerceAtLeast(2000L).coerceAtMost(45000L))
+            // 搜索单独收紧「执行」预算：排队等待不占 lane，实际占 lane 的只有这一段，
+            // 收紧后慢源/死源不能把同 lane 后续源全挤成 queue timeout。
+            val execCap = if (isSearch) SEARCH_EXEC_CAP_MS else 45_000L
+            return doInvoke(platform, method, argsJson, remaining.coerceAtLeast(2_000L).coerceAtMost(execCap))
         } finally {
             invokeLock.unlock()
         }
@@ -568,14 +600,27 @@ private fun interruptBudget(timeoutMs: Long): Long =
     private fun armInterrupt(budgetMs: Long) {
         if (!interruptReady) return
         val deadline = SystemClock.elapsedRealtime() + budgetMs
-        runCatching { nativeSetInterruptDeadline(deadline) }
+        val ok = runCatching { nativeSetInterruptDeadline(deadline) }
             .onFailure { interruptReady = false }
+            .isSuccess
+        if (ok) armedBudgetMs.set(budgetMs) else armedBudgetMs.remove()
     }
 
     /** 清除执行时限：脚本执行期间（含插件起的后台回调线程首次进入时）不限时。 */
     private fun disarmInterrupt() {
+        armedBudgetMs.remove()
         if (!interruptReady) return
         runCatching { nativeSetInterruptDeadline(0) }
+    }
+
+    /**
+     * 原生同步阻塞（插件 HTTP）返回后，把中断倒计时按原预算重新起算。
+     * 必须在 JS 执行线程上调用（与 [armInterrupt] 同一线程局部）。
+     */
+    private fun rearmAfterNativeBlock() {
+        val budget = armedBudgetMs.get() ?: return
+        if (budget <= 0L) return
+        armInterrupt(budget)
     }
 
     private fun loadAssets(path: String): String {
@@ -661,6 +706,22 @@ private fun interruptBudget(timeoutMs: Long): Long =
 
         fun httpRequest(method: String, url: String, headersJson: String, body: String): String {
             val t0 = System.currentTimeMillis()
+            // 这里的 OkHttp 调用是同步的，会整段阻塞 JS 执行线程；返回后必须把中断
+            // 倒计时重新起算，否则慢 HTTP 的耗时会被算进"JS 执行时限"，一返回就被中断。
+            try {
+                return doHttpRequest(method, url, headersJson, body, t0)
+            } finally {
+                rearmAfterNativeBlock()
+            }
+        }
+
+        private fun doHttpRequest(
+            method: String,
+            url: String,
+            headersJson: String,
+            body: String,
+            t0: Long
+        ): String {
             return try {
                 val headersObj = try {
                     JSONObject(headersJson)
@@ -687,7 +748,16 @@ private fun interruptBudget(timeoutMs: Long): Long =
                     for (i in 0 until resp.headers.size) {
                         val k = resp.headers.name(i)
                         val v = resp.headers.value(i)
-                        hh.put(k, if (hh.has(k)) hh.getString(k) + "," + v else v)
+                        // 同名多值（尤其是 Set-Cookie）必须保留成数组：真实 axios（Node）
+                        // 交给插件的就是数组，插件普遍写 `res.headers['set-cookie'].forEach(...)`。
+                        // 旧实现把多个值用逗号拼成一个字符串，插件拿到字符串后 .forEach
+                        // 直接 TypeError（真实案例：SpaceDJ challengeGet 的 Cookie 会话链路）。
+                        val prev = hh.opt(k)
+                        when {
+                            prev == null -> hh.put(k, v)
+                            prev is JSONArray -> prev.put(v)
+                            else -> hh.put(k, JSONArray().put(prev).put(v))
+                        }
                     }
                     JSONObject()
                         .put("status", resp.code)

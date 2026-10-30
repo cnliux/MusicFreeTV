@@ -97,6 +97,23 @@
     //   global.nativeBridge.onPluginError(cbId, message)
     global.__invokeSeq = 0;
 
+    // 错误文本：本版 QuickJS 的 err.stack 只有帧、不含 "TypeError: xxx is not a function"
+    // 这样的消息行，原样回传会让健康度/UI 只剩 "xxx 失败（<input>:N）"，真实原因丢失。
+    // 这里保证 message 一定出现在首行（健康度统计只取首个非空行）。
+    function errText(err) {
+        if (err === undefined || err === null) return 'unknown error';
+        var name = (err && err.name) ? String(err.name) : 'Error';
+        var msg = (err && err.message !== undefined && err.message !== null) ? String(err.message) : '';
+        var stack = (err && err.stack) ? String(err.stack) : '';
+        var head = msg ? (name + ': ' + msg) : '';
+        if (!head) {
+            var plain = String(err);
+            head = (plain && plain !== '[object Object]') ? plain : 'unknown error';
+        }
+        if (stack) return (msg && stack.indexOf(msg) < 0) ? (head + '\n' + stack) : stack;
+        return head;
+    }
+
     global.__invoke = function (platform, method, argsJson, cbId) {
         var p = global.__plugins[platform];
         if (!p) { global.nativeBridge.onPluginError(cbId, 'plugin not loaded: ' + platform); return; }
@@ -133,11 +150,11 @@
                 global.nativeBridge.onPluginResult(cbId, json);
             }, function (err) {
                 popPlatform();
-                global.nativeBridge.onPluginError(cbId, String((err && err.stack) || err));
+                global.nativeBridge.onPluginError(cbId, errText(err));
             });
         } catch (e) {
             popPlatform();
-            global.nativeBridge.onPluginError(cbId, String((e && e.stack) || e));
+            global.nativeBridge.onPluginError(cbId, errText(e));
         }
     };
 
