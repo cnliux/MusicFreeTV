@@ -721,8 +721,9 @@ object PlayerManager {
     /** 循环切换倍速：0.75 → 1 → 1.25 → 1.5 → 2 → 0.75。 */
     fun cycleSpeed(): Float {
         val cur = _uiState.value.speed
-        val idx = speedSteps.indexOfFirst { kotlin.math.abs(it - cur) < 0.01f }
-        val next = speedSteps[((if (idx < 0) 1 else idx) + 1) % speedSteps.size]
+        // M2：扩大容差到 0.05f（float 精度问题：1.0f 可能存储为 0.99999994）
+        val idx = speedSteps.indexOfFirst { kotlin.math.abs(it - cur) < 0.05f }.coerceAtLeast(0)
+        val next = speedSteps[(idx + 1) % speedSteps.size]
         setSpeed(next)
         return next
     }

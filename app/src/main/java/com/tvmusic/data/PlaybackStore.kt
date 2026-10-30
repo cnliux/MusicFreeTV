@@ -305,7 +305,8 @@ class PlaybackStore(context: Context) {
         }
         lists[idx] = target.copy(items = items)
         _lists.value = lists
-        saveListsAsync(lists)
+        // M1：收藏操作高频（每次收藏/取消都触发），用防抖合并写盘避免每秒多次 IO
+        saveListsDebounced()
         publishMerged()
         return nowFav
     }

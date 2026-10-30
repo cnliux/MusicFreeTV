@@ -61,8 +61,8 @@ class SheetViewModel(private val app: TvMusicApp) : ViewModel() {
     /** 当前详情页的来源插件名（收藏条目时写入 platform 字段用）。 */
     val pluginName: String get() = plugin
 
-    /** 记录确认未实现的方法，后续翻页不再重复尝试。 */
-    private val notImplemented = mutableSetOf<String>()
+    /** 记录确认未实现的方法，后续翻页不再重复尝试。并发线程安全。 */
+    private val notImplemented = java.util.Collections.newSetFromMap<String>(java.util.concurrent.ConcurrentHashMap())
 
     /** 下一次请求的页码（RN useTopListDetail 的 pageRef 思路）。 */
     private var nextPage = 1

@@ -404,46 +404,35 @@ private fun ActionEntry(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    val primary = MaterialTheme.colorScheme.primary
-    Row(
+    GlassButton(
+        onClick = onClick,
         modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(
-                androidx.compose.ui.graphics.Brush.linearGradient(
-                    listOf(
-                        MaterialTheme.colorScheme.surface,
-                        primary.copy(alpha = 0.10f)
-                    )
-                )
-            )
-            .border(1.dp, primary.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
             .tvFocus(1.03f)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 22.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clip(CircleShape)
-                .background(
-                    androidx.compose.ui.graphics.Brush.linearGradient(
-                        listOf(primary.copy(alpha = 0.35f), primary.copy(alpha = 0.15f))
-                    )
-                ),
-            contentAlignment = Alignment.Center
+            .heightIn(min = 64.dp),
+        contentPadding = PaddingValues(horizontal = 22.dp, vertical = 12.dp)
+    ) { _ ->
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Text(icon, fontSize = 22.sp)
-        }
-        Column {
-            Text(title, fontSize = 17.sp, color = MaterialTheme.colorScheme.onSurface)
-            Text(
-                subtitle,
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 3.dp)
-            )
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(icon, fontSize = 22.sp)
+            }
+            Column {
+                Text(title, fontSize = 17.sp, color = MaterialTheme.colorScheme.onSurface)
+                Text(
+                    subtitle,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+            }
         }
     }
 }

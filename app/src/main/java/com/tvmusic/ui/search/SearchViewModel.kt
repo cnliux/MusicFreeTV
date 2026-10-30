@@ -89,7 +89,8 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
     private var sortManuallyTouched = false
 
     /** 当前可搜索的音源名称列表（用于筛选条）。 */
-    private val _searchablePlatforms = MutableStateFlow<List<String>>(emptyList())
+    @Volatile
+    private var _searchablePlatforms = MutableStateFlow<List<String>>(emptyList())
     val searchablePlatforms: StateFlow<List<String>> = _searchablePlatforms.asStateFlow()
 
     private val _phase = MutableStateFlow<SearchPhase>(SearchPhase.Idle)
@@ -174,12 +175,15 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
             runtime = app.runtimeOrNull()
             repository = app.repositoryOrNull()
             repository?.plugins?.collect {
-                _searchablePlatforms.value = repository?.listEnabled()
-                    ?.mapNotNull { it.info }
-                    ?.filter { it.supportedSearchType.isEmpty() || TYPE_MUSIC in it.supportedSearchType }
-                    ?.map { it.platform }
-                    ?.distinct() ?: emptyList()
-                if (_phase.value is SearchPhase.Ready) rebuildFromCache()
+                // StateFlow.value 必须在主线程设置，否则可能产生竞态条件
+                launch(Dispatchers.Main) {
+                    _searchablePlatforms.value = repository?.listEnabled()
+                        ?.mapNotNull { it.info }
+                        ?.filter { it.supportedSearchType.isEmpty() || TYPE_MUSIC in it.supportedSearchType }
+                        ?.map { it.platform }
+                        ?.distinct() ?: emptyList()
+                    if (_phase.value is SearchPhase.Ready) rebuildFromCache()
+                }
             }
         }
     }
@@ -436,7 +440,7 @@ class SearchViewModel(app: TvMusicApp) : ViewModel() {
                         if (idx >= SEARCH_FAST_BATCH) kotlinx.coroutines.delay(SEARCH_STAGGER_MS)
                         if (my != session) return@launch
                         val sourceStarted = android.os.SystemClock.elapsedRealtime()
-                        val plugin = byPlatform.getValue(platform)
+                        val plugin = byPlatform[platform] ?: return@launch
                         // 对齐 RN getSearchablePlugins(type)：插件声明了 supportedSearchType 时必须包含该类型
                         val supported = plugin.info?.supportedSearchType ?: emptyList()
                         val group: SearchGroup?

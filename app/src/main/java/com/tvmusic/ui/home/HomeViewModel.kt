@@ -12,7 +12,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
@@ -111,13 +110,18 @@ class HomeViewModel(private val app: TvMusicApp) : ViewModel() {
         val order = com.tvmusic.config.SearchSettings.load(appContext).sourceOrder
         val enabled = repository?.listEnabled()?.filter { it.info != null && it.loadError.isNullOrBlank() }
             ?: emptyList()
-        _availablePlugins.value = com.tvmusic.config.SearchSettings.ordered(
-            enabled,
-            order
-        ) { it.info?.platform ?: it.name }
+        // StateFlow.value 必须在主线程设置，避免与其他协程的写入产生竞态
+        viewModelScope.launch(Dispatchers.Main) {
+            _availablePlugins.value = com.tvmusic.config.SearchSettings.ordered(
+                enabled,
+                order
+            ) { it.info?.platform ?: it.name }
+        }
     }
 
     private fun pickFirst() {
+        // M4：插件可能尚未完成加载（repository.ready 未 emit true），跳过避免取到空 info
+        if ((repository?.ready?.value ?: false).not()) return
         val first = _availablePlugins.value.firstOrNull() ?: return
         _currentPlatform.value = first.info?.platform ?: return
         load()
