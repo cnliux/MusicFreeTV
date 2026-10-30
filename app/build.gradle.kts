@@ -48,8 +48,8 @@ android {
         applicationId = "com.tvmusic"
         minSdk = 24
         targetSdk = 35
-        versionCode = 36
-        versionName = "0.3.31"
+        versionCode = 37
+        versionName = "0.3.32"
 
         vectorDrawables { useSupportLibrary = true }
 
