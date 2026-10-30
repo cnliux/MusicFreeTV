@@ -30,6 +30,10 @@ AGENTS.md
 *.png
 *.jpg
 REVIEW_2026-09-27.md
+CODE_REVIEW_*.md
+TECHNICAL.md
+/_re/
+/_backup_rollback_*/
 
 .REVIEW_*.md.artifact.json
 

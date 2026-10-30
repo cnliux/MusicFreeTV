@@ -115,7 +115,6 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 | 文档 | 内容 |
 | --- | --- |
-| [TECHNICAL.md](TECHNICAL.md) | 目录结构、QuickJS 插件协议、播放器实现、远程控制台与 HTTP API、焦点体系、测试与发版踩坑记录 |
 | [开源声明 / 关于](https://github.com/cnliux/MusicFreeTV) | 许可、免责与插件来源说明 |
 
 ---
