@@ -87,9 +87,6 @@ class PluginRepository(
     /** 同步防重入原子闸门（_syncing StateFlow 的 check-then-set 非原子，不能做并发闸门）。 */
     private val syncGate = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    /** 并发下载插件 JS 的限流计数器（GitHub Pages 对单 IP 有限速，5路并发最稳）。 */
-    private val downloadSem = java.util.concurrent.atomic.AtomicInteger(0)
-
     /** 同步进度：当前已处理数/总数，null=未同步。 */
     private val _syncProgress = MutableStateFlow<Pair<Int, Int>?>(null)
     val syncProgress: StateFlow<Pair<Int, Int>?> = _syncProgress.asStateFlow()
@@ -593,12 +590,7 @@ class PluginRepository(
 
     private suspend fun importListJsonArray(arr: org.json.JSONArray, fromSync: Boolean) {
         syncSeenCount.addAndGet(arr.length())
-        val batchSize = 5
-        // 用线程安全 Map 避免并发写入竞态
-        val jsMap = java.util.concurrent.ConcurrentHashMap<String, Pair<String, String?>>()
-        val jobs = mutableListOf<kotlinx.coroutines.Job>()
-
-        // Phase 1: 并发下载所有 JS（限流避免触发 CDN 限速）
+        // 串行下载+注册：每个插件下载完再下载下一个，避免触发 CDN 限速
         for (i in 0 until arr.length()) {
             val item = arr.optJSONObject(i) ?: continue
             val name = item.optString("name")
@@ -606,34 +598,9 @@ class PluginRepository(
                 ?: continue
             val version = optStr(item, "version")
             val idx = i + 1
-            jobs.add(scope.launch(Dispatchers.IO) {
-                // 简易计数信号量：等待直到有空闲槽位
-                while (downloadSem.get() >= batchSize) {
-                    kotlinx.coroutines.yield()
-                }
-                downloadSem.incrementAndGet()
-                try {
-                    val js = fetchOk(pluginUrl)
-                    if (js != null) jsMap[name] = js to version
-                    // 更新进度
-                    _syncProgress.value = idx to arr.length()
-                } finally {
-                    downloadSem.decrementAndGet()
-                }
-            })
-        }
-        jobs.forEach { it.join() }
-        // 下载完成，进入注册阶段
-        _syncProgress.value = arr.length() to arr.length()
+            _syncProgress.value = idx to arr.length()
 
-        // Phase 2: 串行注册（保证指纹去重/看门狗安全）
-        for (i in 0 until arr.length()) {
-            val item = arr.optJSONObject(i) ?: continue
-            val name = item.optString("name")
-            val pluginUrl = optStr(item, "url") ?: optStr(item, "srcUrl") ?: optStr(item, "scriptUrl")
-                ?: continue
-            val version = optStr(item, "version") ?: jsMap[name]?.second
-            val js = jsMap[name]?.first
+            val js = fetchOk(pluginUrl)
             if (js == null) {
                 Log.w("PluginRepository", "sync $name: 下载失败（CDN限速/404）")
                 if (fromSync) installEvents.add(Triple(name, "failed", "CDN限速/404"))

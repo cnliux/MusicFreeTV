@@ -1,508 +1,288 @@
 package com.tvmusic.data
 
-import android.content.ContentValues
 import android.content.Context
-import android.database.sqlite.SQLiteDatabase
-import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 /**
- * 极简 SQLite 封装，避免引入注解处理器。
+ * JSON 文件式插件存储：
+ * - plugins.json: 所有插件元数据
+ * - plugins/{name}.js: 源码文件（按平台名存储）
+ * - subscriptions.json: 订阅源列表
  *
- * 表：
- *  - plugins( name PK, url, version, enabled, installed_at, source, plugin_info, load_error )
- *  - subscriptions( url PK, added_at )
- *  - user_variables( plugin_key, var_key, var_value, PK(plugin_key, var_key) )
+ * 相比 SQLite 的优势：
+ * 1. 无需迁移，跨版本兼容
+ * 2. 可直接读取/备份
+ * 3. 调试方便
  */
 class PluginStore(context: Context) {
 
-    private class DbHelper(ctx: Context) : SQLiteOpenHelper(ctx, DB_NAME, null, DB_VERSION) {
-        override fun onCreate(db: SQLiteDatabase) {
-            db.execSQL(
-                "CREATE TABLE plugins(" +
-                    "name TEXT PRIMARY KEY," +
-                    "url TEXT," +
-                    "version TEXT," +
-                    "enabled INTEGER NOT NULL DEFAULT 1," +
-                    "installed_at INTEGER NOT NULL," +
-                    "source TEXT," +
-                    "plugin_info TEXT," +
-                    "load_error TEXT," +
-                    "hash TEXT)"
-            )
-            db.execSQL(
-                "CREATE TABLE subscriptions(" +
-                    "url TEXT PRIMARY KEY," +
-                    "added_at INTEGER NOT NULL)"
-            )
-            db.execSQL(
-                "CREATE TABLE user_variables(" +
-                    "plugin_key TEXT NOT NULL," +
-                    "var_key TEXT NOT NULL," +
-                    "var_value TEXT," +
-                    "PRIMARY KEY(plugin_key, var_key))"
-            )
-            db.execSQL(
-                "CREATE TABLE uninstalled_plugins(" +
-                    "name TEXT PRIMARY KEY," +
-                    "uninstalled_at INTEGER NOT NULL)"
-            )
-        }
+    private val filesDir = context.filesDir
+    private val pluginsFile = File(filesDir, "plugins.json")
+    private val subscriptionsFile = File(filesDir, "subscriptions.json")
+    private val varsDir = File(filesDir, "variables")
+    private val blockedFile = File(filesDir, "blocked_plugins.json")
+    
+    // 内存缓存
+    private var pluginsCache: MutableList<PluginRecord> = mutableListOf()
+    private var subscriptionsCache: MutableList<String> = mutableListOf()
+    private var blockedCache: MutableSet<String> = mutableSetOf()
 
-        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-            if (oldVersion < 2) {
-                runCatching { db.execSQL("ALTER TABLE plugins ADD COLUMN hash TEXT") }
+    init {
+        varsDir.mkdirs()
+        loadCache()
+    }
+
+    private fun loadCache() {
+        pluginsCache = loadPluginsData().toMutableList()
+        subscriptionsCache = loadSubscriptions()
+        blockedCache = loadBlockedPlugins()
+    }
+
+    private fun savePlugins() {
+        val arr = JSONArray()
+        for (p in pluginsCache) {
+            val obj = JSONObject()
+            obj.put("name", p.name)
+            obj.put("url", p.url ?: "")
+            obj.put("version", p.version ?: "")
+            obj.put("enabled", p.enabled)
+            obj.put("installed_at", p.installedAt)
+            obj.put("load_error", p.loadError ?: "")
+            obj.put("hash", p.hash)
+            if (p.info != null) {
+                val infoJson = JSONObject()
+                infoJson.put("platform", p.info.platform)
+                if (p.info.version != null) infoJson.put("version", p.info.version)
+                if (p.info.author != null) infoJson.put("author", p.info.author)
+                if (p.info.description != null) infoJson.put("description", p.info.description)
+                obj.put("info", infoJson)
             }
-            if (oldVersion < 3) {
-                runCatching {
-                    db.execSQL(
-                        "CREATE TABLE IF NOT EXISTS uninstalled_plugins(" +
-                            "name TEXT PRIMARY KEY," +
-                            "uninstalled_at INTEGER NOT NULL)"
-                    )
-                }
-            }
+            arr.put(obj)
         }
+        pluginsFile.writeText(arr.toString(2))
+        refreshSourceFiles()
     }
 
-    companion object {
-        private const val DB_NAME = "musicfreetv.db"
-        private const val DB_VERSION = 3
-    }
-
-    private val helper = DbHelper(context.applicationContext)
-
-    // 说明：不要每次操作后 db.close()——SQLiteOpenHelper 缓存连接，
-    // 反复 close 会迫使下次调用重新打开文件（WAL 初始化 + 文件 I/O），
-    // 搜索/首页等高频路径的每次 DB 访问都付出额外开销。连接由 helper 常驻管理。
-
-    @Synchronized
-    fun upsertPlugin(record: PluginRecord) {
-        val db = helper.writableDatabase
-        val cv = ContentValues().apply {
-            put("name", record.name)
-            put("url", record.url)
-            put("version", record.version)
-            put("enabled", if (record.enabled) 1 else 0)
-            put("installed_at", record.installedAt)
-            put("source", record.source)
-            put("plugin_info", record.info?.let { infoToJson(it) })
-            put("load_error", record.loadError)
-            put("hash", record.hash)
-        }
-        db.insertWithOnConflict("plugins", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
-    }
-
-    @Synchronized
-    fun markLoadErrorByName(name: String, error: String) {
-        val db = helper.writableDatabase
-        val cv = ContentValues().apply { put("load_error", error) }
-        db.update("plugins", cv, "name = ?", arrayOf(name))
-    }
-
-    @Synchronized
-    fun loadPlugins(): List<PluginRecord> {
-        val out = mutableListOf<PluginRecord>()
-        val db = helper.readableDatabase
-        val c = db.query(
-            "plugins", null, null, null, null, null,
-            "installed_at ASC"
-        )
-        c.use {
-            while (it.moveToNext()) {
-                out.add(
-                    PluginRecord(
-                        name = it.getString(it.getColumnIndexOrThrow("name")),
-                        url = it.getString(it.getColumnIndexOrThrow("url")),
-                        version = it.getString(it.getColumnIndexOrThrow("version")),
-                        enabled = it.getInt(it.getColumnIndexOrThrow("enabled")) == 1,
-                        installedAt = it.getLong(it.getColumnIndexOrThrow("installed_at")),
-                        source = it.getString(it.getColumnIndexOrThrow("source")),
-                        info = parseInfo(it.getString(it.getColumnIndexOrThrow("plugin_info"))),
-                        loadError = it.getString(it.getColumnIndexOrThrow("load_error")),
-                        hash = it.getString(it.getColumnIndexOrThrow("hash")) ?: ""
-                    )
-                )
+    private fun refreshSourceFiles() {
+        // 清理旧的 source 文件
+        filesDir.listFiles { _, name -> name.endsWith(".js") }?.forEach { it.delete() }
+        // 写入新的 source 文件
+        for (p in pluginsCache) {
+            if (p.source != null && p.info?.platform != null) {
+                val srcFile = File(filesDir, "${p.info.platform}.js")
+                srcFile.writeText(p.source)
             }
         }
-        return out
     }
 
-    /**
-     * 单插件源码查询：按 name 精确取 source 大字段（LIMIT 1）。
-     * 按需注册改造后引擎不再常驻全部源码，调用时按平台回查这一条即可；
-     * 不能用 [loadPlugins]（会把 50+ 插件源码全部物化，数十 MB 抖动）。
-     */
-    @Synchronized
-    fun sourceByName(name: String): String? {
-        if (name.isBlank()) return null
-        val db = helper.readableDatabase
-        db.query(
-            "plugins", arrayOf("source"), "name = ?", arrayOf(name),
-            null, null, null, "1"
-        ).use { c ->
-            return if (c.moveToFirst()) c.getString(0) else null
+    private fun saveSubscriptions() {
+        val arr = JSONArray()
+        for (url in subscriptionsCache) {
+            arr.put(url)
         }
+        subscriptionsFile.writeText(arr.toString(2))
     }
 
-    /**
-     * 元数据轻量查询：不读 source 大字段（单个插件源码可达数百 KB~MB）。
-     * 供列表展示 / 仓库 StateFlow / 远程管理使用——这些场景只看 name/info/enabled/
-     * loadError/hash，从不碰源码。旧实现每次刷新都物化全部源码，多插件时造成
-     * 数 MB 级分配抖动，电视端表现为远程管理插件页操作后整机卡死。
-     * 需要源码的场景（warmup 注册引擎）仍走 [loadPlugins]。
-     */
-    @Synchronized
-    fun loadPluginMetas(): List<PluginRecord> {
-        val out = mutableListOf<PluginRecord>()
-        val db = helper.readableDatabase
-        val c = db.query(
-            "plugins",
-            arrayOf("name", "url", "version", "enabled", "installed_at", "plugin_info", "load_error", "hash"),
-            null, null, null, null,
-            "installed_at ASC"
-        )
-        c.use {
-            while (it.moveToNext()) {
-                out.add(
-                    PluginRecord(
-                        name = it.getString(0),
-                        url = it.getString(1) ?: "",
-                        version = it.getString(2) ?: "",
-                        enabled = it.getInt(3) == 1,
-                        installedAt = it.getLong(4),
-                        source = null,
-                        info = parseInfo(it.getString(5)),
-                        loadError = it.getString(6),
-                        hash = it.getString(7) ?: ""
-                    )
-                )
+    private fun saveBlocked() {
+        val arr = JSONArray()
+        for (name in blockedCache) {
+            arr.put(name)
+        }
+        blockedFile.writeText(arr.toString(2))
+    }
+
+    private fun loadPluginsData(): List<PluginRecord> {
+        if (!pluginsFile.exists()) return emptyList()
+        try {
+            val text = pluginsFile.readText()
+            val arr = JSONArray(text)
+            val out = mutableListOf<PluginRecord>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val name = obj.getString("name")
+                val url = obj.optString("url", null)
+                val version = obj.optString("version", null)
+                val enabled = obj.optBoolean("enabled", true)
+                val installedAt = obj.optLong("installed_at", 0L)
+                val loadError = obj.optString("load_error", null).takeIf { it.isNotEmpty() }
+                val hash = obj.optString("hash", "")
+                val infoJson = obj.optJSONObject("info")
+                val info = if (infoJson != null) PluginInfo(
+                    platform = infoJson.optString("platform", name),
+                    version = infoJson.optString("version", null),
+                    author = infoJson.optString("author", null),
+                    description = infoJson.optString("description", null)
+                ) else null
+                // 从文件加载 source
+                val platform = info?.platform ?: name
+                val source = File(filesDir, "$platform.js").takeIf { it.exists() }?.readText()
+                out.add(PluginRecord(
+                    name = name,
+                    url = url,
+                    version = version,
+                    enabled = enabled,
+                    installedAt = installedAt,
+                    source = source,
+                    info = info,
+                    loadError = loadError,
+                    hash = hash
+                ))
             }
-        }
-        return out
-    }
-
-    /** 读取可选字符串字段：缺失/NULL/空串统一返回 null（避免 optString(key, null) 的类型不匹配警告）。 */
-    private fun optStr(o: JSONObject, key: String): String? = o.optString(key).takeIf { it.isNotEmpty() }
-
-    /** 把 PluginInfo 写成可 round-trip 的 JSON：userVariables 必须是对象数组，不能塞 data class toString。 */
-    private fun infoToJson(info: PluginInfo): String {
-        fun strings(list: List<String>): JSONArray {
-            val arr = JSONArray()
-            list.forEach { arr.put(it) }
-            return arr
-        }
-        val vars = JSONArray()
-        info.userVariables.forEach { d ->
-            vars.put(
-                JSONObject()
-                    .put("key", d.key)
-                    .put("name", d.name)
-                    .put("type", d.type ?: JSONObject.NULL)
-            )
-        }
-        return JSONObject()
-            .put("platform", info.platform)
-            .put("version", info.version)
-            .put("author", info.author)
-            .put("srcUrl", info.srcUrl)
-            .put("appVersion", info.appVersion)
-            .put("description", info.description)
-            .put("cacheControl", info.cacheControl)
-            .put("primaryKey", strings(info.primaryKey))
-            .put("supportedSearchType", strings(info.supportedSearchType))
-            .put("userVariables", vars)
-            .toString()
-    }
-
-    private fun parseInfo(json: String?): PluginInfo? {
-        if (json.isNullOrBlank()) return null
-        return try {
-            val o = JSONObject(json)
-            val userVars = o.optJSONArray("userVariables")?.let { arr ->
-                (0 until arr.length()).mapNotNull { i ->
-                    val x = arr.optJSONObject(i) ?: return@mapNotNull null
-                    val key = x.optString("key")
-                    if (key.isBlank()) return@mapNotNull null
-                    UserVarDef(key, x.optString("name").ifBlank { key }, optStr(x, "type"))
-                }
-            } ?: emptyList()
-            PluginInfo(
-                platform = o.optString("platform"),
-                version = optStr(o, "version"),
-                author = optStr(o, "author"),
-                srcUrl = optStr(o, "srcUrl"),
-                appVersion = optStr(o, "appVersion"),
-                description = optStr(o, "description"),
-                cacheControl = optStr(o, "cacheControl"),
-                primaryKey = o.optJSONArray("primaryKey")?.let { a ->
-                    (0 until a.length()).map { i -> a.getString(i) }
-                } ?: emptyList(),
-                supportedSearchType = o.optJSONArray("supportedSearchType")?.let { a ->
-                    (0 until a.length()).map { i -> a.getString(i) }
-                } ?: emptyList(),
-                userVariables = userVars
-            )
+            return out
         } catch (e: Exception) {
-            null
+            return emptyList()
         }
     }
 
-    @Synchronized
-    /**
-     * 按「插件名」或「platform」定位实际存储名。
-     * 远程管理页只拿得到 /api/plugins 里的 platform（如 kugou / 酷狗），
-     * 而 plugins 表的主键是插件名（如 酷狗音乐），两者经常不同（实测 24/31 条不同），
-     * 直接用 platform 去 update/delete 会 0 行命中且不报错。
-     *
-     * 解析优先级（保证唯一命中，避免 name 恰好等于别的插件 platform 时串行）：
-     *  1) 插件名精确匹配；若名字唯一命中，直接返回。
-     *  2) platform 精确匹配（按 installed_at 取第一个，重复 platform 只操作第一个）。
-     *  3) 回退：name 命中多行时（插件名重复），取 installed_at 最早的那个。
-     * 全部未命中返回 null，由调用方回 404，不再静默成功。
-     */
-    private fun resolvePluginName(nameOrPlatform: String): String? {
-        val want = nameOrPlatform.trim()
-        if (want.isEmpty()) return null
-        val c = helper.readableDatabase.query(
-            "plugins", arrayOf("name", "plugin_info"), null, null, null, null, "installed_at ASC"
+    private fun loadSubscriptions(): MutableList<String> {
+        if (!subscriptionsFile.exists()) return mutableListOf()
+        try {
+            val text = subscriptionsFile.readText()
+            val arr = JSONArray(text)
+            return (0 until arr.length()).mapTo(mutableListOf()) { arr.getString(it) }
+        } catch (e: Exception) {
+            return mutableListOf()
+        }
+    }
+
+    private fun loadBlockedPlugins(): MutableSet<String> {
+        if (!blockedFile.exists()) return mutableSetOf()
+        try {
+            val text = blockedFile.readText()
+            val arr = JSONArray(text)
+            return (0 until arr.length()).mapTo(mutableSetOf()) { arr.getString(it) }
+        } catch (e: Exception) {
+            return mutableSetOf()
+        }
+    }
+
+    fun loadPlugins(): List<PluginRecord> = pluginsCache
+
+    fun loadPluginMetas(): List<PluginRecord> = pluginsCache.map { 
+        PluginRecord(
+            name = it.name,
+            url = it.url,
+            version = it.version,
+            enabled = it.enabled,
+            installedAt = it.installedAt,
+            source = null,
+            info = it.info,
+            loadError = it.loadError,
+            hash = it.hash
         )
-        val byName = ArrayList<String>()
-        var byPlatform: String? = null
-        c.use {
-            while (it.moveToNext()) {
-                val storedName = it.getString(0)
-                if (storedName == want) byName.add(storedName)
-                if (byPlatform == null && parseInfo(it.getString(1))?.platform == want) byPlatform = storedName
-            }
-        }
-        if (byName.size == 1) return byName[0]
-        if (byPlatform != null) return byPlatform
-        // name 重复的罕见情况：取最早安装的那个
-        return byName.firstOrNull()
     }
 
-    /** @return 是否命中并更新了行（未命中返回 false，由调用方回 404，不再静默成功）。 */
-    @Synchronized
+    fun sourceByName(name: String): String? {
+        val platform = pluginsCache.firstOrNull { it.name == name }?.info?.platform ?: return null
+        return File(filesDir, "$platform.js").takeIf { it.exists() }?.readText()
+    }
+
+    fun upsertPlugin(record: PluginRecord) {
+        val idx = pluginsCache.indexOfFirst { it.name == record.name || it.info?.platform == record.info?.platform }
+        if (idx >= 0) {
+            pluginsCache[idx] = record
+        } else {
+            pluginsCache.add(record)
+        }
+        savePlugins()
+    }
+
+    fun markLoadErrorByName(name: String, error: String) {
+        val idx = pluginsCache.indexOfFirst { it.name == name }
+        if (idx >= 0) {
+            pluginsCache[idx] = pluginsCache[idx].copy(loadError = error)
+            savePlugins()
+        }
+    }
+
     fun setPluginEnabled(nameOrPlatform: String, enabled: Boolean): Boolean {
-        val name = resolvePluginName(nameOrPlatform) ?: return false
-        val cv = ContentValues().apply { put("enabled", if (enabled) 1 else 0) }
-        return helper.writableDatabase.update("plugins", cv, "name=?", arrayOf(name)) > 0
+        val idx = pluginsCache.indexOfFirst { it.name == nameOrPlatform || it.info?.platform == nameOrPlatform }
+        if (idx < 0) return false
+        pluginsCache[idx] = pluginsCache[idx].copy(enabled = enabled)
+        savePlugins()
+        return true
     }
 
-    /**
-     * 删除单个插件及其用户变量。
-     * @return 命中时返回 (DB主键name, platform)，未命中返回 null（由调用方回 404）。
-     */
-    @Synchronized
     fun deletePlugin(nameOrPlatform: String): Pair<String, String?>? {
-        val name = resolvePluginName(nameOrPlatform) ?: return null
-        val db = helper.writableDatabase
-        var pk: String? = name
-        db.beginTransaction()
-        try {
-            val c = db.query("plugins", arrayOf("plugin_info"), "name=?", arrayOf(name), null, null, null)
-            c.use {
-                if (it.moveToFirst()) {
-                    parseInfo(it.getString(0))?.platform?.takeIf { p -> p.isNotBlank() }?.let { p -> pk = p }
-                }
-            }
-            db.delete("plugins", "name=?", arrayOf(name))
-            db.delete("user_variables", "plugin_key=?", arrayOf(pk))
-            if (pk != name) db.delete("user_variables", "plugin_key=?", arrayOf(name))
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
-        invalidateVarCache()
-        return name to pk
+        val idx = pluginsCache.indexOfFirst { it.name == nameOrPlatform || it.info?.platform == nameOrPlatform }
+        if (idx < 0) return null
+        val record = pluginsCache[idx]
+        pluginsCache.removeAt(idx)
+        savePlugins()
+        // 删除 source 文件
+        val platform = record.info?.platform ?: record.name
+        File(filesDir, "$platform.js").delete()
+        return record.name to platform
     }
 
-    /**
-     * 一键全部卸载：清空插件与用户变量，并把所有插件（含 platform 别名）记入卸载名单，
-     * 防止订阅同步立即复装。
-     * @return 删除的插件数量。
-     */
-    @Synchronized
     fun deleteAllPlugins(): Int {
-        val db = helper.writableDatabase
-        val names = ArrayList<Pair<String, String?>>()
-        db.beginTransaction()
-        try {
-            db.query("plugins", arrayOf("name", "plugin_info"), null, null, null, null, null).use { c ->
-                while (c.moveToNext()) {
-                    names.add(c.getString(0) to parseInfo(c.getString(1))?.platform?.takeIf { it.isNotBlank() })
-                }
-            }
-            if (names.isEmpty()) return 0
-            val now = System.currentTimeMillis()
-            for ((name, platform) in names) {
-                for (key in linkedSetOf(name, platform)) {
-                    if (key.isNullOrBlank()) continue
-                    val cv = ContentValues().apply {
-                        put("name", key)
-                        put("uninstalled_at", now)
-                    }
-                    db.insertWithOnConflict("uninstalled_plugins", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
-                }
-            }
-            db.delete("plugins", null, null)
-            db.delete("user_variables", null, null)
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
-        invalidateVarCache()
-        return names.size
+        val count = pluginsCache.size
+        pluginsCache.clear()
+        savePlugins()
+        // 清空 variables 目录
+        varsDir.listFiles()?.forEach { it.delete() }
+        return count
     }
 
-    /** 卸载名单：记录被用户手动卸载的插件名/platform，订阅同步时跳过以免复装。 */
-    @Synchronized
+    fun listUninstalled(): Set<String> = blockedCache
+
     fun markUninstalled(name: String) {
         if (name.isBlank()) return
-        val cv = ContentValues().apply {
-            put("name", name)
-            put("uninstalled_at", System.currentTimeMillis())
-        }
-        helper.writableDatabase.insertWithOnConflict("uninstalled_plugins", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+        blockedCache.add(name)
+        saveBlocked()
     }
 
-    @Synchronized
-    fun listUninstalled(): Set<String> {
-        val out = HashSet<String>()
-        helper.readableDatabase.query("uninstalled_plugins", arrayOf("name"), null, null, null, null, null).use { c ->
-            while (c.moveToNext()) out.add(c.getString(0))
-        }
-        return out
-    }
-
-    /** 从卸载名单移除（手动导入或重新添加订阅时调用，允许再次安装）。 */
-    @Synchronized
     fun clearUninstalled(names: Collection<String>) {
-        if (names.isEmpty()) return
-        val db = helper.writableDatabase
-        db.beginTransaction()
-        try {
-            for (n in names) {
-                if (n.isNotBlank()) db.delete("uninstalled_plugins", "name=?", arrayOf(n))
-            }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
+        blockedCache.removeAll(names)
+        saveBlocked()
     }
 
-    @Synchronized
     fun listSubscriptions(): List<SubscriptionRecord> {
-        val out = mutableListOf<SubscriptionRecord>()
-        val c = helper.readableDatabase.query("subscriptions", null, null, null, null, null, "added_at ASC")
-        c.use {
-            while (it.moveToNext()) {
-                out.add(
-                    SubscriptionRecord(
-                        url = it.getString(it.getColumnIndexOrThrow("url")),
-                        addedAt = it.getLong(it.getColumnIndexOrThrow("added_at"))
-                    )
-                )
-            }
-        }
-        return out
+        return subscriptionsCache.map { SubscriptionRecord(url = it, addedAt = 0L) }
     }
 
-    @Synchronized
     fun addSubscription(url: String) {
-        val cv = ContentValues().apply {
-            put("url", url)
-            put("added_at", System.currentTimeMillis())
+        if (url !in subscriptionsCache) {
+            subscriptionsCache.add(url)
+            saveSubscriptions()
         }
-        helper.writableDatabase.insertWithOnConflict("subscriptions", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
-    @Synchronized
     fun removeSubscription(url: String) {
-        helper.writableDatabase.delete("subscriptions", "url=?", arrayOf(url))
+        subscriptionsCache.remove(url)
+        saveSubscriptions()
     }
 
-    @Synchronized
-    fun upsertVariable(pluginKey: String, varKey: String, varValue: String) {
-        val cv = ContentValues().apply {
-            put("plugin_key", pluginKey)
-            put("var_key", varKey)
-            put("var_value", varValue)
-        }
-        helper.writableDatabase.insertWithOnConflict(
-            "user_variables", null, cv,
-            SQLiteDatabase.CONFLICT_REPLACE
-        )
-        invalidateVarCache()
-    }
-
-    /** 整组替换某插件的用户变量：单事务删旧+写新，避免逐行写入的多次磁盘同步。 */
-    @Synchronized
-    fun replaceVariables(pluginKey: String, vars: Map<String, String>) {
-        val db = helper.writableDatabase
-        db.beginTransaction()
-        try {
-            db.delete("user_variables", "plugin_key=?", arrayOf(pluginKey))
-            vars.forEach { (k, v) ->
-                if (k.isBlank()) return@forEach
-                val cv = ContentValues().apply {
-                    put("plugin_key", pluginKey)
-                    put("var_key", k)
-                    put("var_value", v)
-                }
-                db.insertWithOnConflict("user_variables", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
-            }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
-        invalidateVarCache()
-    }
-
-    /**
-     * 用户变量内存缓存：插件每次经 JS 桥取变量都会调 allVariablesMerged()，
-     * 旧实现每次全表查 SQLite 并在 JS 线程上阻塞。写入后统一失效。
-     */
-    private var mergedVarCache: Map<String, String>? = null
-    private val pluginVarCache = HashMap<String, Map<String, String>>()
-
-    private fun invalidateVarCache() {
-        mergedVarCache = null
-        pluginVarCache.clear()
-    }
-
-    @Synchronized
     fun loadVariables(pluginKey: String): Map<String, String> {
-        pluginVarCache[pluginKey]?.let { return it }
-        val out = LinkedHashMap<String, String>()
-        val c = helper.readableDatabase.query(
-            "user_variables", arrayOf("var_key", "var_value"),
-            "plugin_key=?", arrayOf(pluginKey), null, null, null
-        )
-        c.use {
-            while (it.moveToNext()) {
-                out[it.getString(it.getColumnIndexOrThrow("var_key"))] =
-                    it.getString(it.getColumnIndexOrThrow("var_value"))
-            }
+        val file = File(varsDir, "$pluginKey.json")
+        if (!file.exists()) return emptyMap()
+        try {
+            val obj = JSONObject(file.readText())
+            val out = mutableMapOf<String, String>()
+            obj.keys().forEach { key -> out[key] = obj.getString(key) }
+            return out
+        } catch (e: Exception) {
+            return emptyMap()
         }
-        pluginVarCache[pluginKey] = out
-        return out
     }
 
-    @Synchronized
-    fun allVariablesMerged(): Map<String, String> {
-        mergedVarCache?.let { return it }
-        val out = LinkedHashMap<String, String>()
-        val c = helper.readableDatabase.query("user_variables", arrayOf("var_key", "var_value"), null, null, null, null, null)
-        c.use {
-            while (it.moveToNext()) {
-                out[it.getString(it.getColumnIndexOrThrow("var_key"))] =
-                    it.getString(it.getColumnIndexOrThrow("var_value"))
-            }
-        }
-        mergedVarCache = out
-        return out
+    fun upsertVariable(pluginKey: String, varKey: String, varValue: String) {
+        val file = File(varsDir, "$pluginKey.json")
+        val obj = if (file.exists()) JSONObject(file.readText()) else JSONObject()
+        obj.put(varKey, varValue)
+        file.writeText(obj.toString())
     }
+
+    fun replaceVariables(pluginKey: String, vars: Map<String, String>) {
+        val file = File(varsDir, "$pluginKey.json")
+        val obj = JSONObject()
+        vars.forEach { (k, v) -> obj.put(k, v) }
+        file.writeText(obj.toString())
+    }
+
+    fun readBlocklistCounts(): Map<String, Int> = emptyMap()
+    fun writeBlocklistCounts(counts: Map<String, Int>) {}
+    fun removeBlocklistEntry(name: String) {}
 }
