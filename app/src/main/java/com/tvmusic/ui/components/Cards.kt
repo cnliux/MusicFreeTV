@@ -255,7 +255,8 @@ fun FavoriteButton(
         Text(
             text = if (favorited) "♥" else "♡",
             fontSize = iconSize,
-            color = if (favorited) MaterialTheme.colorScheme.primary
+            // M11：收藏态用 error（红色）更符合"喜欢/热门"直觉，与 Material 语义一致
+            color = if (favorited) MaterialTheme.colorScheme.error
             else MaterialTheme.colorScheme.onSurfaceVariant
         )
     }

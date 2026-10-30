@@ -47,7 +47,11 @@ data class QueueEntry(
     val title: String = raw.optString("title", ""),
     val artist: String = raw.optString("artist", ""),
     val album: String = raw.optString("album", ""),
-    val artwork: String = raw.optString("artwork", "").ifBlank { raw.optString("coverImg", "") }
+    /**
+     * 封面 URL 解析：不同插件 schema 不一致（QQ用 "artwork"，网易云用 "coverImg" 等）。
+     * 优先取 artwork，空时回退 coverImg，都不存在则返回空串（由 Artwork 组件处理 ♪ 兜底）。
+     */
+    val artwork: String = resolveArtwork(raw)
 ) {
     init {
         // 插件返回的 raw 通常不带 platform（该字段由协议层注入）。
@@ -57,6 +61,14 @@ data class QueueEntry(
         }
     }
 }
+
+/** 封面 URL 解析辅助：遍历常见字段名（不同插件 schema 不一致）。 */
+private fun resolveArtwork(raw: JSONObject): String =
+    raw.optString("artwork", "")
+        .takeIf { it.isNotBlank() }
+        ?: raw.optString("coverImg", "")
+        ?: raw.optString("pic", "")
+        ?: ""
 
 data class LrcLine(val timeMs: Long, val text: String, val translation: String? = null)
 
@@ -204,6 +216,18 @@ object PlayerManager {
 
     /** M2：歌词兜底负缓存（曲目 key -> 失败时刻 elapsedRealtime），TTL 内不再重试。 */
     private val lrcNegativeCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * 清理歌词负缓存中超时的条目（防止无限增长）。
+     * 每次写入时调用，摊销清理成本。
+     */
+    private fun pruneLrcNegativeCache() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val it = lrcNegativeCache.entries.iterator()
+        while (it.hasNext()) {
+            if (now - it.next().value > LRC_NEG_TTL_MS) it.remove()
+        }
+    }
 
     private var runtime: PluginRuntime? = null
     private var playbackStore: com.tvmusic.data.PlaybackStore? = null
@@ -367,8 +391,13 @@ object PlayerManager {
     private var preloadTriggeredFor: String? = null
 
     /** 条目稳定 key：与歌词去重同一规则（plugin + 主键 id）。 */
-    private fun entryKeyOf(e: QueueEntry): String =
-        e.plugin + ":" + e.raw.optString("id", e.raw.optString("songmid", e.raw.optString("lid", "")))
+    private fun entryKeyOf(e: QueueEntry): String = buildString {
+        append(e.plugin).append(':')
+        val id = e.raw.optString("id", "").ifEmpty {
+            e.raw.optString("songmid", "").ifEmpty { e.raw.optString("lid", "") }
+        }
+        append(id)
+    }
 
     /** 当前曲 key 缓存：同一条目在 ticker 里反复检查时不再重复拼字符串。 */
     private var preloadKeyOfCurrent: String? = null
@@ -2025,6 +2054,8 @@ object PlayerManager {
                 var n = lrcNegativeCache.size / 2
                 while (it.hasNext() && n > 0) { it.next(); it.remove(); n-- }
             }
+            // 定期清理 TTL 过期条目，防止无限增长
+            pruneLrcNegativeCache()
             return null
         }
         return emptyList()

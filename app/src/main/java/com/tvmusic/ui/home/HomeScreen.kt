@@ -281,7 +281,7 @@ private fun NowPlayingPanel(onOpenPlayer: () -> Unit) {
                 modifier = Modifier
                     .clip(RoundedCornerShape(16.dp))
                     .graphicsLayer { shadowElevation = 18f }
-                    .tvFocus(1.03f)
+                    .tvFocus(1.03f, shapeOverride = RoundedCornerShape(16.dp))
                     .clickable(onClick = onOpenPlayer)
             ) {
                 Artwork(entry.artwork, Modifier.size(200.dp))
@@ -357,46 +357,6 @@ private fun NowPlayingLive() {
     }
 }
 
-@Composable
-private fun HomeTopBar(loading: Boolean, count: Int, onRefresh: () -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 28.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            "发现",
-            fontSize = 24.sp,
-            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onBackground,
-            modifier = Modifier.weight(1f)
-        )
-        Text(
-            if (loading) "加载中…" else "$count 个板块",
-            fontSize = 13.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Box(
-            modifier = Modifier
-                .padding(start = 16.dp)
-                .clip(CircleShape)
-                .background(
-                    androidx.compose.ui.graphics.Brush.linearGradient(
-                        listOf(
-                            MaterialTheme.colorScheme.primary.copy(alpha = 0.28f),
-                            MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-                        )
-                    )
-                )
-                .tvFocus(circle = true)
-                .clickable(onClick = onRefresh)
-                .padding(horizontal = 18.dp, vertical = 7.dp)
-        ) {
-            Text("⟳ 刷新", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
-        }
-    }
-}
-
 /** 对齐 RN homeBody/Operations：推荐歌单 / 排行榜 / 我的列表，右侧附状态与刷新。 */
 @Composable
 private fun OperationsRow(
@@ -415,7 +375,19 @@ private fun OperationsRow(
         ActionEntry("🔥", "推荐歌单", "按标签发现好歌单", Modifier.weight(1f).heightIn(min = 64.dp), onOpenRecommend)
         ActionEntry("🏆", "排行榜", "各平台权威榜单", Modifier.weight(1f).heightIn(min = 64.dp), onOpenTopList)
         ActionEntry("📻", "我的歌单", "历史 / 收藏", Modifier.weight(1f).heightIn(min = 64.dp), onOpenMyList)
-        // 板块数（原「发现」标题行右移至此；刷新按钮已删）
+        // 刷新按钮：使用 GlassButton 统一风格
+        GlassButton(
+            onClick = onRefresh,
+            modifier = Modifier.heightIn(min = 48.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+        ) { _ ->
+            Text(
+                if (loading) "⟳ 刷新…" else "⟳ 刷新",
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 14.sp
+            )
+        }
+        // 板块数
         Text(
             if (loading) "加载中…" else "$count 个板块",
             fontSize = 13.sp,

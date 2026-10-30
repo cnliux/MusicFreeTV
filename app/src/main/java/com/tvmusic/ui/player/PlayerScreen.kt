@@ -177,7 +177,9 @@ fun PlayerScreen(onBack: () -> Unit) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .shadow(12.dp, coverShapeShape)
+                                    // M12：封面阴影强度跟随主题 token（focusGlow 大的主题阴影也更强）
+                                    // 基础 8dp + 主题 glow 的一半，使玻璃/霓虹主题的悬浮感更强
+                                    .shadow((8f + tokens.focusGlow.value * 0.5f).dp, coverShapeShape)
                                     .clip(coverShapeShape)
                                     .graphicsLayer {
                                         rotationZ = if (spinEnabled && state.isPlaying) rotation.floatValue else 0f
@@ -301,7 +303,8 @@ fun PlayerScreen(onBack: () -> Unit) {
                     ) {
                         PlayerManager.cyclePlayMode()
                     }
-                    Spacer(Modifier.width(24.dp))
+                    // 组间分隔线：半透明主题线色，视觉层次更清晰
+                    Box(Modifier.width(12.dp).height(36.dp).background(MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)))
                     // 主控组
                     RoundCtrlButton("⏪", size = 40.dp, iconSize = 18.sp, filled = false, desc = "快退30秒") {
                         PlayerManager.seekRelative(-30_000)
@@ -317,7 +320,7 @@ fun PlayerScreen(onBack: () -> Unit) {
                     RoundCtrlButton("⏩", size = 40.dp, iconSize = 18.sp, filled = false, desc = "快进30秒") {
                         PlayerManager.seekRelative(30_000)
                     }
-                    Spacer(Modifier.width(24.dp))
+                    Box(Modifier.width(12.dp).height(36.dp).background(MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)))
                     // 功能组
                     // 倍速：点击循环 0.75/1/1.25/1.5/2.0，非 1x 时高亮
                     RoundCtrlButton(
@@ -405,8 +408,8 @@ private fun NoticePill(text: String?) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
                 .clip(RoundedCornerShape(8.dp))
-                // 半透明黑装饰底色，与主题无关故不走 ThemeTokens（toast 背景希望任何主题下都是压暗层）
-                .background(Color(0xB3000000))
+                // 半透明主题 surface 作为底色，跟随主题变化（玻璃主题下更协调）
+                .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.7f))
                 .padding(horizontal = 8.dp, vertical = 3.dp)
         )
     }
@@ -444,8 +447,18 @@ private fun PlayerLyricLines(modifier: Modifier = Modifier) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 6.dp)
-                    .graphicsLayer { alpha = if (isCurrent) 1f else 0.6f }
+                    // M12：行间距从 6dp 增至 10dp（TV 远距离阅读更舒适），当前行放大+全不透明，
+                    // 非当前行降低透明度至 0.5（原 0.6 偏亮，对比度不够）
+                    .padding(vertical = 10.dp)
+                    .graphicsLayer {
+                        if (isCurrent) {
+                            alpha = 1f
+                            scaleX = 1.05f
+                            scaleY = 1.05f
+                        } else {
+                            alpha = 0.5f
+                        }
+                    }
             ) {
                 // 主文案 + 译文统一走 LyricLineBlock 渲染
                 LyricLineBlock(line, isCurrent, lrcColor, cfg.fontSizeSp.toFloat())
@@ -795,7 +808,8 @@ private fun SeekBar(
 }
 
 private fun playModeIcon(mode: PlayMode): String = when (mode) {
-    PlayMode.ORDER -> "🔁"
-    PlayMode.LOOP_ONE -> "🔂"
-    PlayMode.SHUFFLE -> "🔀"
+    // M11：改用更简洁的纯符号，emoji 在不同字体下渲染差异大，TV 远距离读符号更稳定
+    PlayMode.ORDER -> "↺"
+    PlayMode.LOOP_ONE -> "↻"
+    PlayMode.SHUFFLE -> "⇄"
 }
