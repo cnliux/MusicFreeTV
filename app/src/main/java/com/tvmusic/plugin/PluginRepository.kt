@@ -7,6 +7,7 @@ import com.tvmusic.model.PluginRecord
 import com.tvmusic.data.PluginStore
 import com.tvmusic.model.UserVarDef
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -85,6 +86,9 @@ class PluginRepository(
 
     /** 同步防重入原子闸门（_syncing StateFlow 的 check-then-set 非原子，不能做并发闸门）。 */
     private val syncGate = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 并发下载插件 JS 的限流计数器（GitHub Pages 对单 IP 有限速，5路并发最稳）。 */
+    private val downloadSem = java.util.concurrent.atomic.AtomicInteger(0)
 
     /** DB 中已有插件已全部注册进引擎（warmup 完成）。 */
     private val _ready = MutableStateFlow(false)
@@ -585,16 +589,53 @@ class PluginRepository(
 
     private suspend fun importListJsonArray(arr: org.json.JSONArray, fromSync: Boolean) {
         syncSeenCount.addAndGet(arr.length())
+        val batchSize = 5
+        val jsMap = mutableMapOf<String, Pair<String, String?>>() // name -> (js, version)
+        val jobs = mutableListOf<kotlinx.coroutines.Job>()
+
+        // Phase 1: 并发下载所有 JS（限流避免触发 CDN 限速）
         for (i in 0 until arr.length()) {
             val item = arr.optJSONObject(i) ?: continue
             val name = item.optString("name")
             val pluginUrl = optStr(item, "url") ?: optStr(item, "srcUrl") ?: optStr(item, "scriptUrl")
+                ?: continue
             val version = optStr(item, "version")
-            if (pluginUrl.isNullOrEmpty()) continue
+            jobs.add(scope.launch(Dispatchers.IO) {
+                // 简易计数信号量：等待直到有空闲槽位
+                while (downloadSem.get() >= batchSize) {
+                    kotlinx.coroutines.yield()
+                }
+                downloadSem.incrementAndGet()
+                try {
+                    val js = fetchOk(pluginUrl)
+                    if (js != null) jsMap[name] = js to version
+                } finally {
+                    downloadSem.decrementAndGet()
+                }
+            })
+        }
+        jobs.forEach { it.join() }
+
+        // Phase 2: 串行注册（保证指纹去重/看门狗安全）
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            val name = item.optString("name")
+            val pluginUrl = optStr(item, "url") ?: optStr(item, "srcUrl") ?: optStr(item, "scriptUrl")
+                ?: continue
+            val version = optStr(item, "version") ?: jsMap[name]?.second
+            val js = jsMap[name]?.first
+            if (js == null) {
+                Log.w("PluginRepository", "sync $name: 下载失败（CDN限速/404）")
+                if (fromSync) installEvents.add(Triple(name, "failed", "CDN限速/404"))
+                continue
+            }
             // 不再使用白名单限制，否则订阅里绝大多数音源都会被静默丢弃，
             // 表现为"首页只装上一个插件"。崩溃防护由看门狗 + 永久黑名单负责。
-            val err = install(name, pluginUrl, version = version, fromSync = fromSync)
-            if (err != null) Log.w("PluginRepository", "install $name: $err")
+            val err = install(name, pluginUrl, version = version, source = js, fromSync = fromSync)
+            if (err != null) {
+                Log.w("PluginRepository", "install $name: $err")
+                if (fromSync) installEvents.add(Triple(name, "failed", err))
+            }
         }
     }
 
