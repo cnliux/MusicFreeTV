@@ -144,8 +144,11 @@ class PluginRepository(
      */
     fun warmup() {
         scope.launch(Dispatchers.IO) {
-            // 崩溃看门狗：若上次启动在加载某个插件时 native crash，
-            // 标记文件会残留；连续 3 次才永久封禁，期间每次启动重试，允许偶发崩溃恢复。
+            // 崩溃看门狗**只做诊断，不再封禁插件**（用户明确要求「不应该封禁」）：
+            // 标记文件残留说明上次启动在加载某个插件时 native crash；
+            // 这里只累计次数并打日志，方便定位坏插件，下次启动仍然重试它——
+            // 旧实现累计到 3 次就永久跳过 + 写 load_error，一次瞬时问题（内存紧张、
+            // 引擎忙）会让插件永久"消失"，用户只能卸载重装配件才能恢复。
             val marker = File(appContext.filesDir, "plugin_load_marker")
             if (marker.exists()) {
                 val crashedName = runCatching { marker.readText().trim() }.getOrNull()
@@ -155,16 +158,14 @@ class PluginRepository(
                     val bumped = (counts[crashedName] ?: 0) + 1
                     counts[crashedName] = bumped
                     writeBlocklistCounts(counts)
-                    if (bumped >= BLOCK_THRESHOLD) {
-                        store.markLoadErrorByName(crashedName, "native crash during load (blocked)")
-                        Log.w("PluginRepository", "plugin '$crashedName' crashed $bumped times, blocked")
-                    } else {
-                        Log.w("PluginRepository", "plugin '$crashedName' crashed x$bumped/$BLOCK_THRESHOLD, will retry next launch")
-                    }
+                    Log.w(
+                        "PluginRepository",
+                        "plugin '$crashedName' crashed during load x$bumped (diagnostic only, retrying)"
+                    )
                 }
             }
-            val blocked = blockedPlugins()
-            val records = store.loadPlugins().filter { it.source != null && it.loadError == null && it.name !in blocked }
+            // 不按崩溃次数/历史 load_error 过滤：每次启动都重新尝试所有带源码的插件。
+            val records = store.loadPlugins().filter { it.source != null }
             var okCount = 0
             for (p in records) {
                 val platform = p.info?.platform ?: detectPlatformSafe(p.source ?: "")
@@ -176,12 +177,15 @@ class PluginRepository(
                 marker.delete()
                 if (loaded) {
                     removeBlocklistEntry(p.name)
+                    // 上次失败留下的 load_error 只作诊断，成功一次即清掉
+                    if (p.loadError != null) store.clearLoadErrorByName(p.name)
                     okCount++
                     // 每注册成功一个就刷新列表：首页/搜索侧插件渐进可见，不必等全部完成
                     refreshFromDb()
                 } else {
+                    // 失败只记录诊断，不再把它当"永久封禁"——下次启动继续重试
                     store.markLoadErrorByName(p.name, "register failed")
-                    Log.w("PluginRepository", "register failed: ${p.id}")
+                    Log.w("PluginRepository", "register failed: ${p.name}")
                 }
             }
             Log.i("PluginRepository", "warmup done: $okCount/${records.size} plugins loaded")
@@ -218,10 +222,6 @@ class PluginRepository(
         val counts = readBlocklistCounts()
         if (counts.remove(name) != null) writeBlocklistCounts(counts)
     }
-
-    /** 读取已封禁插件（崩溃计数达到阈值的）。 */
-    private fun blockedPlugins(): Set<String> =
-        readBlocklistCounts().entries.filter { it.value >= BLOCK_THRESHOLD }.map { it.key }.toSet()
 
     /** 从 DB 未解析源码时临时探测 platform 的兜底。 */
     private fun detectPlatformSafe(source: String): String? = detectPlatform(source)
@@ -372,17 +372,43 @@ class PluginRepository(
         return true
     }
 
-    /** 下载 url 内容，失败返回 null。HTML 响应（如 404 错误页）也返回 null。 */
-    private fun fetchOk(url: String): String? = try {
-        okHttp.newCall(Request.Builder().url(url).build()).execute().use { resp ->
-            if (!resp.isSuccessful) return null
-            val body = resp.body?.string() ?: return null
-            // CDN/源站返回 HTML 错误页时 body 不含 JS 特征，直接拒绝避免误安装
-            if (body.contains("<!DOCTYPE") || body.contains("<html") || body.contains("<head>")) return null
-            body
+    /**
+     * 下载 url 内容，失败返回 null。HTML 响应（如 404 错误页）也返回 null。
+     *
+     * 重试：GitHub Pages / 图床类 CDN 在短时间内被连续请求数十个文件时会返回 429/5xx
+     * 或直接断连。旧实现一次失败即放弃，实测订阅里「汽水音乐」（484KB）、「聚合」（2.9MB）
+     * 两个插件在每次同步都装不上（报告 CDN限速/404），重试后即可成功。
+     * 只对网络异常与 429/5xx 重试；404/403 是确定性错误，重试无意义。
+     */
+    private fun fetchOk(url: String, retries: Int = 2): String? {
+        var attempt = 0
+        while (true) {
+            try {
+                okHttp.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val body = resp.body?.string() ?: return null
+                        // CDN/源站返回 HTML 错误页时 body 不含 JS 特征，直接拒绝避免误安装
+                        if (body.contains("<!DOCTYPE") || body.contains("<html") || body.contains("<head>")) return null
+                        return body
+                    }
+                    val code = resp.code
+                    if (code != 429 && code !in 500..599) {
+                        Log.w("PluginRepository", "fetch $url -> HTTP $code")
+                        return null
+                    }
+                    Log.w("PluginRepository", "fetch $url -> HTTP $code, will retry (#${attempt + 1})")
+                }
+            } catch (e: Exception) {
+                Log.w("PluginRepository", "fetch $url failed: ${e.message}, will retry (#${attempt + 1})")
+            }
+            if (attempt >= retries) return null
+            attempt++
+            try {
+                Thread.sleep(800L * attempt)
+            } catch (_: InterruptedException) {
+                return null
+            }
         }
-    } catch (e: Exception) {
-        null
     }
 
     /** 内容识别安装：plugins.json 列表 → 逐个安装；否则按单个 .js 插件安装。 */
@@ -503,11 +529,8 @@ class PluginRepository(
         keepEnabled: Boolean = true,
         fromSync: Boolean = false
     ): String? = withContext(Dispatchers.IO) {
-        // 崩溃黑名单：连续 3 次加载时 native crash 后禁止自动/订阅同步再尝试，
-        // 防止每次同步都崩一次进程。解除途径：卸载该插件后重新添加订阅即可全新重装。
-        if (name in blockedPlugins()) {
-            return@withContext "插件在黑名单中（曾连续 3 次载入时崩溃，请卸载后重新订阅）"
-        }
+        // 旧实现在这里查崩溃黑名单直接拒绝安装（「连续 3 次载入崩溃 → 永久禁止」）。
+        // 用户明确要求不封禁插件：任何插件都应允许重新安装/更新，崩溃只记日志与诊断数据。
         // 卸载名单：订阅同步不把用户手动卸载过的插件装回（手动导入视为恢复，清除名单）
         val blockedNames = if (fromSync) store.listUninstalled() else emptySet()
         if (fromSync && name in blockedNames) {
@@ -551,7 +574,12 @@ class PluginRepository(
             marker.writeText(name.ifBlank { platform })
             val loaded = runCatching { runtime.registerPrimary(platform, jsSource) }.getOrDefault(false)
             marker.delete()
-            if (!loaded) return@withContext "插件注册失败: $platform"
+            if (!loaded) {
+                // 带上源码长度：用于区分「下载被截断」（长度与订阅源不符）
+                // 与「引擎/插件语法不兼容」（长度正常但 QuickJS 编译失败）。
+                Log.w("PluginRepository", "register failed: $name platform=$platform sourceLen=${jsSource.length}")
+                return@withContext "插件注册失败: $platform（源码 ${jsSource.length} 字符）"
+            }
             val infoRaw = runtime.readInfo(platform) ?: return@withContext "读取插件信息失败: $platform"
             val info = parseInfo(infoRaw)
             // 引擎读回的真实 platform 才是权威值：detectPlatform 只有字面量写法才可靠，

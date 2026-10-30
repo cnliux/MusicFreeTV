@@ -1383,8 +1383,20 @@ object PlayerManager {
                     }
                 }
             }
-            // staggered / allParallel 走整链硬上限 + winner.await
-            val first = withTimeoutOrNull(FALLBACK_RACE_MS) { winner.await() }
+            // staggered / allParallel 走整链硬上限 + winner.await。
+            // allSettled：所有 racer 都以 null 收场时提前结束——旧实现「无人能换源」也要
+            // 空等满 12s（实测 total=12002ms），用户体感是"卡十几秒才跳下一首"。
+            val allSettled = CompletableDeferred<Unit>()
+            launch(Dispatchers.Default) {
+                racers.forEach { it.join() }
+                allSettled.complete(Unit)
+            }
+            val first = withTimeoutOrNull(FALLBACK_RACE_MS) {
+                kotlinx.coroutines.selects.select<FallbackSource?> {
+                    winner.onAwait { it }
+                    allSettled.onAwait { null }
+                }
+            }
             android.util.Log.i(
                 "PerfFallback",
                 "strategy=$strategy silent=$silent winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${raceCandidates.size}/${ranked.size}"

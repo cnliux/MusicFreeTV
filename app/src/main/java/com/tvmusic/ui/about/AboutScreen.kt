@@ -307,9 +307,15 @@ private fun UpdateChecker.downloadApkAsync(
                 launchInstaller(context, version)
             } else {
                 // 区分安全校验失败与网络失败：校验失败给出更明确的提示
-                val msg = if (UpdateChecker.lastVerifyFailed)
-                    "安全校验未通过（文件可能被篡改），已取消安装"
-                else "网络异常或下载中断，请重试"
+                val msg = when {
+                    // 不是"被篡改"：设备装的是另一种签名的包（如 debug 调试包），
+                    // 换任何线路结果都一样，重试无用，必须卸载后手动安装正式版
+                    UpdateChecker.lastSignatureMismatch ->
+                        "当前安装的是其他签名的版本（如调试包），与正式版签名不兼容。请先卸载本应用，再安装正式版 APK"
+                    UpdateChecker.lastVerifyFailed ->
+                        "安全校验未通过（下载文件与官方摘要不符），已取消安装"
+                    else -> "网络异常或下载中断，请重试"
+                }
                 onState(UpdateState.DownloadFailed(version, msg))
             }
         } catch (e: Exception) {
@@ -352,6 +358,14 @@ private object UpdateChecker {
     /** 校验失败标记：区分"安全校验未通过"与"网络失败"，供 UI 给出准确提示。 */
     @Volatile
     var lastVerifyFailed: Boolean = false
+        private set
+
+    /**
+     * 签名不一致标记：下载包与当前已装包签名不同（调试签名 vs 生产签名互斥），
+     * 换任何下载线路结果都一样，重试无意义——必须卸载当前版本后手动安装。
+     */
+    @Volatile
+    var lastSignatureMismatch: Boolean = false
         private set
 
     private val client = OkHttpClient.Builder()
@@ -465,6 +479,7 @@ private object UpdateChecker {
     /** 下载 release APK；progress 按百分比回调。失败返回 null。 */
     fun downloadApk(context: Context, version: String, onProgress: (Int) -> Unit): File? {
         lastVerifyFailed = false
+        lastSignatureMismatch = false
         val githubUrl = "https://github.com/$REPO/releases/download/v$version/app-release.apk"
         val dir = context.getExternalFilesDir("update") ?: File(context.filesDir, "update")
         if (!dir.exists()) dir.mkdirs()
@@ -477,6 +492,11 @@ private object UpdateChecker {
         val fastest = probeFastestPrefix(githubUrl)
         val ordered = if (fastest == null) dlPrefixes
         else listOf(fastest) + dlPrefixes.filter { it != fastest }
+
+        // 官方摘要整轮只取一次：逐线路各取一遍会白耗 GitHub API 匿名配额（60 次/小时）。
+        // 取不到（api.github.com 不可达）时为 null，降级为只校验签名，不阻断升级。
+        val official = fetchOfficialSha256(version)
+        var checksumMismatch = false
 
         for (prefix in ordered) {
             try {
@@ -518,22 +538,25 @@ private object UpdateChecker {
                         tmp.delete()
                     }
                     // 安全校验（H3）：下载产物必须过完整性 + 签名两道关才允许安装
-                    // 1. SHA-256 与 GitHub Release 官方摘要比对（取不到官方摘要则跳过该项，不阻断）
-                    val official = fetchOfficialSha256(version)
+                    // 1. SHA-256 与 GitHub Release 官方摘要比对（取不到官方摘要则跳过该项，不阻断）。
+                    //    不匹配只说明这条镜像给了坏文件/半截文件——删掉后换下一条线路重试，
+                    //    不能直接判定"被篡改"终止升级（真机实测个别线路会返回内容不同的文件）。
                     if (official != null) {
                         val actual = sha256Of(target)
                         if (!actual.equals(official, ignoreCase = true)) {
-                            android.util.Log.w("AboutScreen", "apk sha256 mismatch: official=$official actual=$actual")
+                            android.util.Log.w("AboutScreen", "apk sha256 mismatch on $prefix: official=$official actual=$actual")
                             target.delete()
-                            lastVerifyFailed = true
-                            return null
+                            checksumMismatch = true
+                            return@use
                         }
                     }
-                    // 2. 签名与当前包一致性（防替换为不同签名的包）
+                    // 2. 签名与当前包一致性（防替换为不同签名的包）。
+                    //    签名不一致换线路没用，直接终止并单独标记，给用户准确的处置指引。
                     if (!signatureMatches(context, target)) {
                         android.util.Log.w("AboutScreen", "apk signature mismatch")
                         target.delete()
                         lastVerifyFailed = true
+                        lastSignatureMismatch = true
                         return null
                     }
                     return target
@@ -543,6 +566,8 @@ private object UpdateChecker {
             }
         }
         tmp.delete()
+        // 所有线路都拿不到与官方摘要一致的文件，才算真正的完整性失败
+        if (checksumMismatch) lastVerifyFailed = true
         return null
     }
 

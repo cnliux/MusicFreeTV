@@ -1,6 +1,8 @@
 package com.tvmusic.data
 
 import android.content.Context
+import com.tvmusic.model.PluginInfo
+import com.tvmusic.model.PluginRecord
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -193,6 +195,15 @@ class PluginStore(context: Context) {
         val idx = pluginsCache.indexOfFirst { it.name == name }
         if (idx >= 0) {
             pluginsCache[idx] = pluginsCache[idx].copy(loadError = error)
+            savePlugins()
+        }
+    }
+
+    /** 注册成功时清掉历史 load_error：否则一次瞬时失败会让 UI 永远显示“加载失败”。 */
+    fun clearLoadErrorByName(name: String) {
+        val idx = pluginsCache.indexOfFirst { it.name == name }
+        if (idx >= 0 && pluginsCache[idx].loadError != null) {
+            pluginsCache[idx] = pluginsCache[idx].copy(loadError = null)
             savePlugins()
         }
     }

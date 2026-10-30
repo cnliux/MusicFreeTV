@@ -289,6 +289,12 @@ class RemoteConfigService : Service() {
             method == "GET" && path == "/api/plugins" -> {
                 respond(socket, 200, pluginsJson().toString())
             }
+            // 插件健康度诊断：每个插件的调用次数/失败次数/最近耗时/最近错误，
+            // 用于区分「插件本身坏了」和「引擎排队/网络慢」——排查前先看它，
+            // 不要凭"有没有搜到结果"下结论。
+            method == "GET" && path == "/api/plugins/health" -> {
+                respond(socket, 200, pluginsHealthJson().toString())
+            }
             method == "POST" && path == "/api/plugins/toggle" -> {
                 val body = readBody(input, headers)
                 val json = runCatching { JSONObject(body) }.getOrNull()
@@ -1545,6 +1551,40 @@ class RemoteConfigService : Service() {
                 )
             }
         return JSONObject().put("ok", true).put("plugins", arr)
+    }
+
+    /**
+     * 插件健康度快照（诊断用，不含插件源码，开销可忽略）：
+     * 每个插件 → 调用次数 / 失败次数 / 最近一次耗时 / 最近一次错误 / 最近成功距今。
+     *
+     * 用途：排查「某个音源搜不到/不能换源」时先看这里，判断是
+     *   - 插件本身报错（lastError 明确，calls>0 fails>0）
+     *   - 还是根本没被调用（calls=0，说明可用性探测判定它没实现方法或没注册上）
+     *   - 还是只是排队慢（lastLatencyMs 很大但成功）。
+     * 与 /api/plugins 不同，这里不过滤 info 为空的记录——注册失败/信息读废的插件也要暴露。
+     */
+    private fun pluginsHealthJson(): JSONObject {
+        val health = app().runtime.healthSnapshot().associateBy { it.platform }
+        val now = android.os.SystemClock.elapsedRealtime()
+        val arr = JSONArray()
+        app().store.loadPluginMetas().forEach { p ->
+            val platform = p.info?.platform?.takeIf { it.isNotBlank() } ?: p.name
+            val h = health[platform]
+            arr.put(
+                JSONObject()
+                    .put("name", p.name)
+                    .put("platform", platform)
+                    .put("enabled", p.enabled)
+                    .put("hasInfo", p.info != null)
+                    .put("loadError", p.loadError ?: "")
+                    .put("calls", h?.calls ?: 0)
+                    .put("fails", h?.fails ?: 0)
+                    .put("lastLatencyMs", h?.lastLatencyMs ?: 0)
+                    .put("lastError", h?.lastError ?: "")
+                    .put("lastSuccessAgoMs", h?.lastSuccessAtElapsed?.let { now - it } ?: -1)
+            )
+        }
+        return JSONObject().put("ok", true).put("count", arr.length()).put("items", arr)
     }
 
     /**
