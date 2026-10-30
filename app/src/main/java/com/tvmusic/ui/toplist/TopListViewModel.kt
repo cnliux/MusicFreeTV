@@ -58,8 +58,11 @@ class TopListViewModel(
             // P0-6：awaitEngineReady 返回 false 立即降级为错误态，
             // 否则下面直接取 lateinit 的 app.runtime 会抛异常把开屏打崩。
             if (!app.awaitEngineReady() || app.runtimeOrNull() == null) {
-                _error.value = "引擎初始化失败，请重试或重启应用"
-                _loading.value = false
+                // StateFlow.value 必须在主线程设置，避免与其他协程的写入产生竞态
+                viewModelScope.launch(Dispatchers.Main) {
+                    _error.value = "引擎初始化失败，请重试或重启应用"
+                    _loading.value = false
+                }
                 return@launch
             }
             runtime = app.runtimeOrNull()
@@ -84,8 +87,10 @@ class TopListViewModel(
         ) { it.info?.platform ?: "" }
         _plugins.value = able
         if (able.isEmpty()) {
-            _loading.value = false
-            _error.value = "已启用的插件均不提供排行榜"
+            viewModelScope.launch(Dispatchers.Main) {
+                _loading.value = false
+                _error.value = "已启用的插件均不提供排行榜"
+            }
             return
         }
         val current = _selectedPlatform.value
@@ -111,18 +116,21 @@ class TopListViewModel(
 
     private fun loadBoards(platform: String, mySession: Int) {
         viewModelScope.launch(Dispatchers.Default) {
-            _loading.value = true
-            _error.value = null
-            _groups.value = emptyList()
             try {
                 val res = runtime?.callParallel(platform, PluginMethod.TOP_LISTS)
                 if (mySession != session) return@launch
+                // All StateFlow writes must be on Main dispatcher
+                viewModelScope.launch(Dispatchers.Main) {
+                    _loading.value = true
+                    _error.value = null
+                    _groups.value = emptyList()
+                }
                 if (res is NotImplementedError) {
-                    _error.value = "该插件不提供排行榜"
+                    viewModelScope.launch(Dispatchers.Main) { _error.value = "该插件不提供排行榜" }
                 } else {
                     val arr = res as? JSONArray
                     if (arr == null) {
-                        _error.value = "排行榜数据格式异常"
+                        viewModelScope.launch(Dispatchers.Main) { _error.value = "排行榜数据格式异常" }
                     } else {
                         val groups = mutableListOf<BoardGroup>()
                         for (i in 0 until arr.length()) {
@@ -137,14 +145,22 @@ class TopListViewModel(
                                 groups += BoardGroup(g.optString("title", "排行榜"), boards)
                             }
                         }
-                        _groups.value = groups
-                        if (groups.isEmpty()) _error.value = "暂无排行榜数据"
+                        viewModelScope.launch(Dispatchers.Main) {
+                            _groups.value = groups
+                            if (groups.isEmpty()) _error.value = "暂无排行榜数据"
+                        }
                     }
                 }
             } catch (e: Exception) {
-                if (mySession == session) _error.value = "排行榜加载失败: ${e.message}"
+                if (mySession == session) {
+                    viewModelScope.launch(Dispatchers.Main) {
+                        _error.value = "排行榜加载失败: ${e.message}"
+                    }
+                }
             } finally {
-                if (mySession == session) _loading.value = false
+                if (mySession == session) {
+                    viewModelScope.launch(Dispatchers.Main) { _loading.value = false }
+                }
             }
         }
     }

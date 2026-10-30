@@ -72,7 +72,10 @@ class SettingsViewModel(app: TvMusicApp) : ViewModel() {
     /** 读取 PluginRuntime 的平台健康度快照（运行时未初始化时静默跳过）。 */
     private fun refreshHealth() {
         val runtime = runCatching { PluginRuntime.get() }.getOrNull() ?: return
-        _health.value = runtime.healthSnapshot()
+        // StateFlow.value 必须在主线程设置
+        viewModelScope.launch(Dispatchers.Main) {
+            _health.value = runtime.healthSnapshot()
+        }
     }
 
     /** 手机/电脑浏览器直接打开的【管理页】地址 */

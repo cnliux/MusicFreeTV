@@ -72,8 +72,11 @@ class SheetViewModel(private val app: TvMusicApp) : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             // P0-6：等待失败/未就绪时降级为错误态（原来直接取 lateinit 的 app.runtime 会崩）
             if (!app.awaitEngineReady() || app.runtimeOrNull() == null) {
-                _loading.value = false
-                _error.value = "引擎初始化失败，请重试或重启应用"
+                // StateFlow.value 必须在主线程设置
+                viewModelScope.launch(Dispatchers.Main) {
+                    _loading.value = false
+                    _error.value = "引擎初始化失败，请重试或重启应用"
+                }
                 return@launch
             }
             runtime = app.runtimeOrNull()
@@ -83,8 +86,10 @@ class SheetViewModel(private val app: TvMusicApp) : ViewModel() {
 
     private fun load() {
         val target = SheetTarget.consume() ?: run {
-            _loading.value = false
-            _error.value = "缺少详情数据"
+            viewModelScope.launch(Dispatchers.Main) {
+                _loading.value = false
+                _error.value = "缺少详情数据"
+            }
             return
         }
         plugin = target.plugin
@@ -97,8 +102,10 @@ class SheetViewModel(private val app: TvMusicApp) : ViewModel() {
     /** 首次加载/重试共用：SheetTarget 是一次性的，重试不能再读它（否则失败后永远"缺少详情数据"）。 */
     private fun loadInitial() {
         if (plugin.isBlank()) {
-            _loading.value = false
-            _error.value = "缺少详情数据"
+            viewModelScope.launch(Dispatchers.Main) {
+                _loading.value = false
+                _error.value = "缺少详情数据"
+            }
             return
         }
         nextPage = 1

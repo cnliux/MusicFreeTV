@@ -66,8 +66,11 @@ class HomeViewModel(private val app: TvMusicApp) : ViewModel() {
         // P0-6：awaitEngineReady 的返回值原来被忽略，初始化失败时下面直接取
         // app.runtime（lateinit 未赋值）→ UninitializedPropertyAccessException 开屏即崩。
         if (!app.awaitEngineReady() || app.runtimeOrNull() == null || app.repositoryOrNull() == null) {
-            _error.value = "引擎初始化失败，请重试或重启应用"
-            _loading.value = false
+            // StateFlow.value 必须在主线程设置，避免与其他协程的写入产生竞态
+            viewModelScope.launch(Dispatchers.Main) {
+                _error.value = "引擎初始化失败，请重试或重启应用"
+                _loading.value = false
+            }
             return
         }
         runtime = app.runtimeOrNull()
@@ -87,9 +90,9 @@ class HomeViewModel(private val app: TvMusicApp) : ViewModel() {
         repository?.ready?.collect { isReady ->
             if (!isReady) return@collect
             refreshPlugins()
-            // 首次选定第一个可用插件
+            // 首次选定第一个可用插件（StateFlow 写必须在主线程）
             if (_currentPlatform.value == null) {
-                pickFirst()
+                viewModelScope.launch(Dispatchers.Main) { pickFirst() }
             }
         }
     }
