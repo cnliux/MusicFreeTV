@@ -337,10 +337,14 @@ class PluginRepository(
         return true
     }
 
-    /** 下载 url 内容，失败返回 null。 */
+    /** 下载 url 内容，失败返回 null。HTML 响应（如 404 错误页）也返回 null。 */
     private fun fetchOk(url: String): String? = try {
         okHttp.newCall(Request.Builder().url(url).build()).execute().use { resp ->
-            if (resp.isSuccessful) resp.body?.string() else null
+            if (!resp.isSuccessful) return null
+            val body = resp.body?.string() ?: return null
+            // CDN/源站返回 HTML 错误页时 body 不含 JS 特征，直接拒绝避免误安装
+            if (body.contains("<!DOCTYPE") || body.contains("<html") || body.contains("<head>")) return null
+            body
         }
     } catch (e: Exception) {
         null
@@ -498,7 +502,9 @@ class PluginRepository(
             val rawPlatform = detectPlatform(js)
             // detectPlatform 对 Parcel/webpack 混淆产物可能返回 null（platform 值被加密为函数调用），
             // 此时回退使用订阅条目中的 name 作为 platform（内部标识一致即可，readInfo 会覆盖为实际值）。
-            val platform = rawPlatform?.takeIf { it.isNotEmpty() } ?: name.ifEmpty { null }
+            val platform = rawPlatform?.takeIf { it.isNotEmpty() }
+                ?: detectPlatformFromUrl(url, js)?.takeIf { it.isNotEmpty() }
+                ?: name.ifEmpty { null }
             if (platform == null) return@withContext "无法解析插件 platform"
             val jsSource = js
             if (fromSync && platform in blockedNames) {
@@ -607,7 +613,7 @@ class PluginRepository(
         // 1) 字面量形式（优先）。键可能带引号：混淆产物常写成 'platform':'qq' / "platform":"x"
         val literal = Regex("""["']?platform["']?\s*[:=]\s*["']([^"']*)["']""").findAll(source).toList()
             .map { it.groupValues[1].trim() }
-            .filter { it.isNotEmpty() && it != "pc" && it != "web" && it != "WebFilter" && it != "H5" && it != "h5" && !it.endsWith(".json") }
+            .filter { it.isNotEmpty() && !isNoisePlatform(it) }
         if (literal.isNotEmpty()) return literal.last()
 
         // 2) 变量引用形式：先收集 var/let/const X = 'xxx' 映射，
@@ -619,9 +625,49 @@ class PluginRepository(
         val refs = Regex("""["']?platform["']?\s*[:=]\s*([A-Za-z_$][\w$]*)""").findAll(source).toList()
         for (m in refs.reversed()) {
             val v = vars[m.groupValues[1]] ?: continue
-            if (v.isNotEmpty() && v != "pc" && v != "web" && v != "WebFilter" && v != "H5" && v != "h5" && !v.endsWith(".json")) return v
+            if (v.isNotEmpty() && !isNoisePlatform(v)) return v
         }
+
+        // 3) 混淆产物：平台名以对象字面量值出现，如 {'netease':0x1} / {'kuwo':searchKuwo}
+        //    匹配 'string':<非字符串值> 模式。混淆代码中会混杂大量随机标识符（如 'aUiUA':_0x1(...)），
+        //    平台名通常出现在 SOURCE_WEIGHT 等特定变量附近（偏后）。因此取所有合法匹配，
+        //    优先选最后一个字母数字混合型候选（真实平台名如 netease/qq 更可能是字母数字混合，
+        //    而非纯大写字母随机串）。
+        val obfuscated = Regex(
+            """'([^'\s]{2,20})'\s*:\s*(?!["'])(?!['"])(?:0x[0-9a-fA-F]+|[a-zA-Z_$][\w$]*\s*\(|async\s|function\b|true|false|null|undefined)"""
+        ).findAll(source).toList()
+            .map { it.groupValues[1].trim() }
+            .filter { it.isNotEmpty() && !isNoisePlatform(it) }
+        if (obfuscated.isNotEmpty()) {
+            // 优先选字母数字混合候选（真实平台名），退而求其次取最后一个
+            val mixed = obfuscated.filter { it.any { c -> c in '0'..'9' } || it.any { c -> c in 'a'..'z' } && it.any { c -> c in 'A'..'Z' } }
+            return if (mixed.isNotEmpty()) mixed.last() else obfuscated.last()
+        }
+
         return null
+    }
+
+    /** 过滤掉噪音词：协议标识、非平台值等。 */
+    private fun isNoisePlatform(s: String): Boolean =
+        s in setOf("pc", "web", "WebFilter", "H5", "h5") ||
+            s.endsWith(".json") ||
+            s.length > 30  // 混淆字符串通常很短
+
+    /**
+     * 从插件 URL 文件名推断平台名：如 netease-source.plugin.v1.9.27.js → "netease"。
+     * 作为 detectPlatform 失败时的最后兜底——文件名是订阅源提供的明确标识，
+     * 且在源码中验证存在该字符串即可确认有效性，避免误匹配。
+     */
+    private fun detectPlatformFromUrl(url: String, source: String): String? {
+        val fileName = url.substringAfterLast("/")
+            .substringBefore(".js")
+            .substringBefore("-source")
+            .substringBefore("-plugin")
+            .trim()
+        if (fileName.isEmpty() || fileName.length > 30) return null
+        // 验证：源码中确实包含该字符串（避免文件名与平台名完全无关的极端情况）
+        if (!source.contains("\"$fileName\"") && !source.contains("'$fileName'")) return null
+        return fileName
     }
 
     /** 读取可选字符串字段：缺失/NULL/空串统一返回 null（避免 optString(key, null) 的类型不匹配警告）。 */
