@@ -308,7 +308,7 @@ object PlayerManager {
     private const val LRC_NEG_TTL_MS = 10 * 60_000L
 
     /** 换源扫描中单个候选插件单次调用（search/getMediaSource）的超时：慢平台快速跳过。 */
-    private const val FALLBACK_CALL_TIMEOUT_MS = 5_000L
+    private const val FALLBACK_CALL_TIMEOUT_MS = 3_000L
 
     /**
      * 聚合搜索结果缓存（进程内静态，重启清零）：归一化「搜索词」→ 平台 → 命中条目 raw。
@@ -356,8 +356,11 @@ object PlayerManager {
         return out.takeIf { it.isNotEmpty() }
     }
 
-    /** 换源竞速整链硬上限：到点仍无人产出可播 URL 即放弃本轮。 */
-    private const val FALLBACK_RACE_MS = 8_000L
+    /** 换源竞速整链硬上限：到点仍无人产出可播 URL 即放弃本轮。
+     *  加长到 12s：给并行 spec 更多时间找到备选，避免 8s 超时后白做串行二次搜索。 */
+    private const val FALLBACK_RACE_MS = 12_000L
+    /** 主音源解析超时：版权限制（插件抛错）应在 ~10s 内判定失败，而非 45s。 */
+    private const val PRIMARY_RESOLVE_TIMEOUT_MS = 10_000L
 
     /** 换源扫描每平台最多尝试的搜索命中条数：第一条可能是翻唱/伴奏，解析不可播时继续试后面的。 */
     private const val FALLBACK_MAX_MATCHES = 2
@@ -411,7 +414,10 @@ object PlayerManager {
     private fun maybePreloadNext() {
         val st = _uiState.value
         val dur = st.durationMs
-        if (dur <= 0L || st.positionMs < dur / 2) return
+        // 时长已知时：后半段触发预加载；时长未知时（版权歌曲常为 0）：播放 15s 后触发。
+        // 后者确保即使插件不返回 duration，下一首也能在适当时候被预解析。
+        val shouldPreload = if (dur > 0L) st.positionMs >= dur / 2 else st.positionMs >= 15_000L
+        if (!shouldPreload) return
         if (st.playMode != PlayMode.ORDER || st.queue.size <= 1) return
         val cur = st.current ?: return
         // 引用判同避免每 tick 重建 key；切歌后 current 是新的对象才重算
@@ -1194,7 +1200,7 @@ object PlayerManager {
      */
     private suspend fun resolveMediaSource(
         rt: PluginRuntime, plugin: String, raw: JSONObject,
-        timeoutMs: Long = 45_000L
+        timeoutMs: Long = PRIMARY_RESOLVE_TIMEOUT_MS
     ): JSONObject? = try {
         when (val result = rt.callParallel(plugin, PluginMethod.MEDIA_SOURCE, listOf(raw.toString(), quality), timeoutMs = timeoutMs)) {
             is JSONObject -> result
@@ -1434,11 +1440,13 @@ object PlayerManager {
         val spec = specDeferred
         val key = entryKeyOf(item)
         if (spec != null && specKey == key && exclude.isEmpty()) {
+            // 等待并行竞速结果（最长 12s）：不要取消，避免超时后白做一遍串行搜索。
+            // 若结果在超时内到达则直接返回；超时则降级为串行重试。
             val early = runCatching { withTimeout(FALLBACK_RACE_MS) { spec.await() } }.getOrNull()
             if (early != null && my == playSession.get()) return early
+            // 等待期间 spec 仍在运行，不要取消——让它在后台继续完成，
+            // 后续请求可能复用其结果（通过 preloadCache 或 fallbackSearchCache）。
         }
-        specDeferred?.cancel()
-        specDeferred = null
         return tryFallbackSource(rt, item, my, exclude = exclude, includeSelf = includeSelf)
     }
 
