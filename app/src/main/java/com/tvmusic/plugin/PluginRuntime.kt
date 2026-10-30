@@ -436,6 +436,25 @@ class PluginRuntime private constructor(
         true
     }
 
+    /**
+     * 只在主引擎注册插件（warmup 专用）：并行引擎（lane≥1）与懒扩容引擎一样，
+     * 首次调用时经 [ensureRegistered] 从 [platformSources] 缓存补注册。
+     * 54 个插件全量 × 3 台引擎串行注册要 7 分钟以上（低配 TV 上每个 2~9s），
+     * 是"冷启动后很久首页/排行榜都读不出数据"的直接原因；改为主引擎单台注册
+     * 后 warmup 时间降为 1/3，其余引擎用到时才补（并行搜索首个请求稍慢一次）。
+     */
+    suspend fun registerPrimary(platform: String, source: String): Boolean = withContext(Dispatchers.IO) {
+        val engine = healthyLaneOrNull(0) ?: return@withContext false
+        val ok = runCatching { engine.registerPlugin(platform, source) }.getOrDefault(false)
+        if (!ok) return@withContext false
+        synchronized(laneLock) {
+            laneRegistered.getOrNull(0)?.add(platform)
+            platformSources[platform] = source
+        }
+        methodCache.keys.removeAll { it.startsWith("$platform::") }
+        true
+    }
+
     suspend fun hasPlugin(platform: String): Boolean = withContext(Dispatchers.IO) {
         // 逐 lane 探测（0 号即主引擎）：某台引擎 poisoned 时先重建再试，
         // 避免"主引擎坏过一次就永远报插件没装上"。
@@ -459,11 +478,15 @@ class PluginRuntime private constructor(
         val key = "$platform::$method"
         methodCache[key]?.let { return it }
         return withContext(Dispatchers.IO) {
-            // 多 lane 探测（与 hasPlugin 同构）：推荐/排行调用经 callParallel 走平台
-            // home 引擎（lane≥1），若只在 primary 上探测，primary 注册失败/未注册
-            // （懒扩容引擎、poisoned 重建）时真实可用的插件会被误判「不支持」，
-            // 整页显示「已启用的插件均不支持…」。任一 lane 报 true 即缓存 true；
-            // 全 false 不缓存——可能是补注册尚未完成，下次调用重新探测。
+            // 主引擎优先：warmup 保证所有可用插件都注册在主引擎上，方法集由它说了算。
+            // 只有主引擎上没有该插件（注册失败/引擎被重建）才逐台按需补注册再探——
+            // 全量探测（caps/首页/排行榜/推荐页签）若对每个"不支持"的插件都在
+            // 所有并行引擎上懒注册一遍（每个 3~9s），会把探测队列拖成几分钟，
+            // 表现为「启动早期插件明明在、推荐/排行榜全显示未提供」。
+            val primary = healthyLaneOrNull(0)
+            if (primary != null && runCatching { primary.hasPlugin(platform) }.getOrDefault(false)) {
+                return@withContext runCatching { primary.hasMethod(platform, method) }.getOrDefault(false)
+            }
             for (i in lanes.indices) {
                 ensureRegistered(i, platform)
                 val yes = runCatching {

@@ -65,6 +65,10 @@ class RecommendViewModel(
     @Volatile
     private var switchSession = 0
 
+    /** warmup 竞态自动重探：任务与次数（成功路径归零）。 */
+    private var autoProbeJob: kotlinx.coroutines.Job? = null
+    private var probeRetries = 0
+
     init {
         viewModelScope.launch(Dispatchers.IO) {
             // P0-6：等待失败/未就绪要降级为错误态，不能直接取 lateinit 的 app.runtime 崩掉
@@ -95,9 +99,21 @@ class RecommendViewModel(
             cfg.sourceOrder
         ) { it.info?.platform ?: it.name }
         _plugins.value = able
+        if (able.isNotEmpty()) probeRetries = 0
         if (able.isEmpty()) {
             _loading.value = false
             _error.value = "已启用的插件均不支持「推荐歌单」"
+            // warmup 期间 JS 线程被插件注册占满，hasMethod 探测撞 busy 误判 false；
+            // 探测失败不缓存，稍后自动重探（上限 10 次），避免启动早期进本页
+            // 永远停在「已启用的插件均不支持推荐歌单」，必须退出重进。
+            if (probeRetries < 10) {
+                probeRetries++
+                autoProbeJob?.cancel()
+                autoProbeJob = viewModelScope.launch(Dispatchers.IO) {
+                    kotlinx.coroutines.delay(6_000)
+                    probePlugins(keepSelection = false)
+                }
+            }
             return
         }
         val current = _selectedPlatform.value
@@ -194,7 +210,7 @@ class RecommendViewModel(
     }
 
     private fun sheetKey(e: SheetEntry): String =
-        e.plugin + " " + (e.raw.optString("id").ifBlank { e.raw.optString("title") })
+        e.plugin + "\u0000" + (e.raw.optString("id").ifBlank { e.raw.optString("title") })
 
     private suspend fun fetchPage(
         platform: String,

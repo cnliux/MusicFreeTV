@@ -83,7 +83,7 @@ fun TopListScreen(
                                 title = board.title,
                                 subtitle = selectedPlatform,
                                 artwork = board.artwork,
-                                modifier = Modifier.width(148.dp),
+                                modifier = Modifier.width(168.dp),
                                 onClick = {
                                     onOpenDetail(
                                         DetailTarget.stamped(

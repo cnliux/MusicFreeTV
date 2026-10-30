@@ -307,8 +307,10 @@ object PlayerManager {
     /** M2：歌词兜底负缓存 TTL——同一曲目失败后 10 分钟内不再重试。 */
     private const val LRC_NEG_TTL_MS = 10 * 60_000L
 
-    /** 换源扫描中单个候选插件单次调用（search/getMediaSource）的超时：慢平台快速跳过。 */
-    private const val FALLBACK_CALL_TIMEOUT_MS = 3_000L
+    /** 换源扫描中单个候选插件单次调用（search/getMediaSource）的超时。
+     *  3s 在 QuickJS 排队下必然截断正常搜索（典型 2~5s），导致换源恒失败直接跳歌；
+     *  与候选链注释「统一 8s 超时」对齐（此前常量与注释漂移是换源失效根因）。 */
+    private const val FALLBACK_CALL_TIMEOUT_MS = 8_000L
 
     /**
      * 聚合搜索结果缓存（进程内静态，重启清零）：归一化「搜索词」→ 平台 → 命中条目 raw。
@@ -364,6 +366,29 @@ object PlayerManager {
 
     /** 换源扫描每平台最多尝试的搜索命中条数：第一条可能是翻唱/伴奏，解析不可播时继续试后面的。 */
     private const val FALLBACK_MAX_MATCHES = 2
+
+    /**
+     * 投机换源（起播时预热的备选地址）延迟启动的毫秒数。
+     * 插件数 50+ 时全量竞速会打满 QuickJS lane，把主源解析挤到排队 = 切歌卡顿。
+     * 延迟到主源快有结果时再启动，并在启动前检查主源是否已成功：
+     * 主源可播（绝大多数情况）根本不跑投机，lane 完全不占用；
+     * 主源失败则投机已并行跑起来，与剩余的主源等待时间重叠。
+     */
+    private const val SPEC_FALLBACK_DELAY_MS = 1_200L
+
+    /**
+     * 静默投机换源（起播预热 / 下一首预取）最多候选数。
+     * 只有 3 条 QuickJS lane，投机只是"顺手捡个更快的源"，不该抢主源的引擎时间。
+     */
+    private const val SILENT_SPEC_MAX_CANDIDATES = 4
+
+    /**
+     * 真换源（主源确认不可播时）最多候选数。
+     * 太少（如 8）会漏掉健康度靠后的 DJ 平台（实测 53 候选中唯一能换到的是第 33 位的
+     * 清风DJ）；太多（53 全量）会把 3 条 lane 挤成 "plugin engine busy"，连本来可用的
+     * 插件也搜不动，整链必然拖满 12s 上限。12 是两者的折中。
+     */
+    private const val FALLBACK_MAX_CANDIDATES = 12
 
     /** 分批竞速：首批覆盖三条 QuickJS lane，其余候选错峰启动，避免低配 TV 瞬时争抢。 */
     private const val FALLBACK_FAST_BATCH = 2
@@ -1109,7 +1134,9 @@ object PlayerManager {
                                 when {
                                     flv -> "该音源为 FLV 直链，当前设备暂不支持播放"
                                     forceFallback -> "播放失败：其他音源也没有该歌曲的可播放地址"
-                                    primaryFailed -> "音源解析失败：可能是该歌曲有版权/会员限制，或插件需要更新"
+                                    primaryFailed -> if (com.tvmusic.config.MetaSettings.fallbackOtherSource)
+                                        "音源解析失败：已尝试其他音源仍不可播（可能版权/会员限制或插件需更新）"
+                                    else "音源解析失败：可能是该歌曲有版权/会员限制，或插件需要更新"
                                     else -> "该音源未返回可播放地址（可能需配置用户变量或 VIP）"
                                 },
                                 autoSkip = !flv
@@ -1152,6 +1179,9 @@ object PlayerManager {
                     // 否则旧地址 setMediaItem 会覆盖新歌（"点新歌放旧歌"）
                     if (my != playSession.get()) return@withContext
                     // 每个音源可能带不同请求头：更新 DataSourceFactory（同一 DefaultMediaSourceFactory 实例）
+                    // 主源可播：标记给投机换源让路（它还在 1.2s 延迟期或尚未启动，
+                    // 看到该标记就不再消耗 JS lane 去扫全插件）
+                    if (viaPlugin == item.plugin) primaryOkSession = my
                     val p = requirePlayer()
                     // 首次提交前拉起 PlaybackService 并连接会话（P0-1）：
                     // 否则播放态下没有 MediaSession/通知/前台服务，回桌面即被 LMK 回收
@@ -1256,13 +1286,19 @@ object PlayerManager {
                 .sortedByDescending { it.second }
                 .map { it.first }
         if (ranked.isEmpty()) return null
+        // 竞速只取健康度前 N（静默投机更少）：50+ 插件全量并发会把 3 条 QuickJS lane
+        // 挤成 busy（实测 53 候选中 bilibili/kugou/qq 等大量返回 "plugin engine busy"），
+        // 连本来可用的插件也搜不动，既换不到源又把整链拖满 12s。取前 N 让每个候选
+        // 真正跑起来；DJ 类曲目仍能覆盖靠前的 DJ 平台，静默投机则只用极少数。
+        val raceCandidates =
+            ranked.take(if (silent) SILENT_SPEC_MAX_CANDIDATES else FALLBACK_MAX_CANDIDATES)
         if (!silent) showSourceNotice("正在尝试其他音源…")
         val artist = item.artist
         val cacheKeyPrefix = normalizeName(item.title) + "|" + normalizeName(artist) + "|"
         // 按 fallbackStrategy 分发到 4 种竞速策略。所有策略共享整链硬上限 FALLBACK_RACE_MS，
         // 到点仍未有 winner 就返回 null（不再分钟级空等）。
         val raceStarted = android.os.SystemClock.elapsedRealtime()
-        val fastBatch = minOf(com.tvmusic.config.MetaSettings.fallbackFastBatch, ranked.size)
+        val fastBatch = minOf(com.tvmusic.config.MetaSettings.fallbackFastBatch, raceCandidates.size)
         val strategy = com.tvmusic.config.MetaSettings.fallbackStrategy
         return coroutineScope {
             val winner = CompletableDeferred<FallbackSource>()
@@ -1270,7 +1306,7 @@ object PlayerManager {
             when (strategy) {
                 com.tvmusic.config.MetaSettings.STRATEGY_ALL_PARALLEL -> {
                     // 全候选同时启动：候选数少时最快，多时可能瞬时占满 QuickJS lane
-                    racers = ranked.map { platform ->
+                    racers = raceCandidates.map { platform ->
                         launch(Dispatchers.Default) {
                             val started = android.os.SystemClock.elapsedRealtime()
                             probeFallbackPlatform(rt, item, platform, cacheKeyPrefix, artist, my)?.let {
@@ -1286,7 +1322,7 @@ object PlayerManager {
                 com.tvmusic.config.MetaSettings.STRATEGY_SEQUENTIAL -> {
                     // 严格顺序：按健康度排序依次尝试，前一候选成功即返回，节省引擎串行队列
                     val sequential = async(Dispatchers.Default) {
-                        for (platform in ranked) {
+                        for (platform in raceCandidates) {
                             if (my != playSession.get()) return@async null
                             val started = android.os.SystemClock.elapsedRealtime()
                             probeFallbackPlatform(rt, item, platform, cacheKeyPrefix, artist, my)?.let {
@@ -1302,16 +1338,16 @@ object PlayerManager {
                     val first = withTimeoutOrNull(FALLBACK_RACE_MS) { sequential.await() }
                     android.util.Log.i(
                         "PerfFallback",
-                        "strategy=sequential winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${ranked.size}"
+                        "strategy=sequential winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${raceCandidates.size}/${ranked.size}"
                     )
                     sequential.cancel()
                     return@coroutineScope first
                 }
                 com.tvmusic.config.MetaSettings.STRATEGY_PREFER_FIRST -> {
                     // 只跑健康度第 1 名：极致低延迟，容忍换源失败率升高
-                    if (ranked.isNotEmpty()) {
+                    if (raceCandidates.isNotEmpty()) {
                         val only = async(Dispatchers.Default) {
-                            val platform = ranked.first()
+                            val platform = raceCandidates.first()
                             val started = android.os.SystemClock.elapsedRealtime()
                             probeFallbackPlatform(rt, item, platform, cacheKeyPrefix, artist, my)?.let {
                                 android.util.Log.i(
@@ -1324,7 +1360,7 @@ object PlayerManager {
                         val first = withTimeoutOrNull(FALLBACK_RACE_MS) { only.await() }
                         android.util.Log.i(
                             "PerfFallback",
-                            "strategy=preferFirst winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${ranked.size}"
+                            "strategy=preferFirst winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${raceCandidates.size}/${ranked.size}"
                         )
                         only.cancel()
                         return@coroutineScope first
@@ -1332,7 +1368,7 @@ object PlayerManager {
                 }
                 else -> {
                     // staggered（默认）：健康度前 fastBatch 名立即启动，其余错峰启动
-                    racers = ranked.mapIndexed { index, platform ->
+                    racers = raceCandidates.mapIndexed { index, platform ->
                         launch(Dispatchers.Default) {
                             if (index >= fastBatch) kotlinx.coroutines.delay((index - fastBatch) * FALLBACK_STAGGER_MS)
                             val started = android.os.SystemClock.elapsedRealtime()
@@ -1351,7 +1387,7 @@ object PlayerManager {
             val first = withTimeoutOrNull(FALLBACK_RACE_MS) { winner.await() }
             android.util.Log.i(
                 "PerfFallback",
-                "strategy=$strategy winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${ranked.size}"
+                "strategy=$strategy silent=$silent winner=${first?.plugin ?: "none"} total=${android.os.SystemClock.elapsedRealtime() - raceStarted}ms candidates=${raceCandidates.size}/${ranked.size}"
             )
             racers.forEach { it.cancel() }
             first
@@ -1406,6 +1442,10 @@ object PlayerManager {
     @Volatile
     private var specKey: String? = null
 
+    /** 已由主源成功起播的会话号：投机换源启动前检查，避免给"本来就能播"的歌白烧 JS lane。 */
+    @Volatile
+    private var primaryOkSession: Int = -1
+
     private fun specFallback(
         rt: PluginRuntime, item: QueueEntry, my: Int,
         includeSelf: Boolean = false
@@ -1414,6 +1454,10 @@ object PlayerManager {
         val key = entryKeyOf(item)
         specKey = key
         specDeferred = scope.async(Dispatchers.Default) {
+            // 延迟启动 + 主源成功即放弃：50+ 插件全量竞速会打满 QuickJS lane，
+            // 主源解析（10s 上限）被挤到排队，用户看到的就是「切歌卡顿」。
+            kotlinx.coroutines.delay(SPEC_FALLBACK_DELAY_MS)
+            if (primaryOkSession == my || my != playSession.get()) return@async null
             val fb = tryFallbackSource(rt, item, my, silent = true, includeSelf = includeSelf)
             if (fb != null && my == playSession.get() && key == specKey) {
                 synchronized(preloadCache) {
@@ -1444,6 +1488,10 @@ object PlayerManager {
             // 若结果在超时内到达则直接返回；超时则降级为串行重试。
             val early = runCatching { withTimeout(FALLBACK_RACE_MS) { spec.await() } }.getOrNull()
             if (early != null && my == playSession.get()) return early
+            // 投机竞速已完整跑完且确认无备选：候选都扫过了，再全量重扫一遍等于让用户
+            // 多等一个 12s 窗口（旧实现单曲等待最长 24s，"卡顿"体感的主要来源）。
+            // 只有仍未跑完（超时/被取消）时才现场重扫。
+            if (spec.isCompleted && !spec.isCancelled && my == playSession.get()) return null
             // 等待期间 spec 仍在运行，不要取消——让它在后台继续完成，
             // 后续请求可能复用其结果（通过 preloadCache 或 fallbackSearchCache）。
         }

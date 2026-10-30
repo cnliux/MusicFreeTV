@@ -119,6 +119,24 @@ class HomeViewModel(private val app: TvMusicApp) : ViewModel() {
                 enabled,
                 order
             ) { it.info?.platform ?: it.name }
+            scheduleAutoReload()
+        }
+    }
+
+    /** 自动补载：warmup 期间每次注册成功都会触发 refreshPlugins；若当前页仍是空/错误态，
+     *  防抖 5s 后重试 load——否则启动早期 hasMethod 探测撞上"引擎正忙"误判无数据后，
+     *  页面永远停在「该插件未提供首页推荐/排行榜数据」，必须手动切页签才能恢复。 */
+    private var autoReloadJob: kotlinx.coroutines.Job? = null
+    private fun scheduleAutoReload() {
+        val hasData = _sections.value.any { it is HomeSection.Ranking || it is HomeSection.Recommend }
+        if (hasData || _currentPlatform.value == null) return
+        autoReloadJob?.cancel()
+        autoReloadJob = viewModelScope.launch(Dispatchers.Default) {
+            kotlinx.coroutines.delay(5_000)
+            if (_currentPlatform.value != null) {
+                val has = _sections.value.any { it is HomeSection.Ranking || it is HomeSection.Recommend }
+                if (!has) load()
+            }
         }
     }
 
@@ -179,9 +197,61 @@ class HomeViewModel(private val app: TvMusicApp) : ViewModel() {
                 fresh += HomeSection.Error(plugin.name, "排行榜失败: ${e.message}")
             }
 
-            // getRecommendSheetTags：同走并行引擎池，避免主引擎队列空闲等待
+            // 推荐歌单：优先走新版（getRecommendSheetTags + getRecommendSheetsByTag）适配多数插件，
+            // 兜底走旧版（tags 直接带歌单）保持兼容
             try {
-                if (runtime?.hasMethod(pf, PluginMethod.RECOMMEND_TAGS) == true) {
+                val hasTags = runtime?.hasMethod(pf, PluginMethod.RECOMMEND_TAGS) == true
+                val hasSheetsByTag = runtime?.hasMethod(pf, PluginMethod.RECOMMEND_SHEETS) == true
+                if (hasSheetsByTag) {
+                    // 新版：先拿分类
+                    val tagList = mutableListOf<JSONObject>()
+                    if (hasTags) {
+                        val tagsRes = runCatching {
+                            runtime?.callParallel(pf, PluginMethod.RECOMMEND_TAGS, timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
+                        }.getOrNull()
+                        if (tagsRes !is NotImplementedError && tagsRes != null) {
+                            val groups = (tagsRes as? JSONObject)?.optJSONArray("data") ?: (tagsRes as? JSONArray)
+                            if (groups != null) {
+                                for (i in 0 until groups.length()) {
+                                    val g = groups.optJSONObject(i) ?: continue
+                                    tagList.add(g)
+                                }
+                            } else if (tagsRes is JSONObject) {
+                                tagList.add(tagsRes)
+                            }
+                        }
+                    }
+                    if (tagList.isEmpty()) {
+                        tagList.add(JSONObject().put("id", "").put("title", "推荐"))
+                    }
+                    // 每个分类取前几张歌单填充首页（限制数量避免首页过长）
+                    for (tag in tagList) {
+                        val tagJson = JSONObject().apply {
+                            put("id", tag.optString("id", ""))
+                            put("title", tag.optString("title", "推荐"))
+                        }
+                        val sheetsRes = runCatching {
+                            runtime?.callParallel(
+                                pf,
+                                PluginMethod.RECOMMEND_SHEETS,
+                                listOf(tagJson.toString(), "1"),
+                                timeoutMs = PLUGIN_CALL_TIMEOUT_MS
+                            )
+                        }.getOrNull()
+                        if (sheetsRes is NotImplementedError || sheetsRes == null) continue
+                        val obj = sheetsRes as? JSONObject
+                        val arr = obj?.optJSONArray("data") ?: (sheetsRes as? JSONArray) ?: continue
+                        val sheets = (0 until arr.length()).mapNotNull { j ->
+                            val s = arr.optJSONObject(j) ?: return@mapNotNull null
+                            s.optString("title").takeIf { it.isNotBlank() }?.let { SheetEntry(pf, s) }
+                        }
+                        if (sheets.isEmpty()) continue
+                        fresh += HomeSection.Recommend(plugin.name, tagJson.optString("title", "推荐"), sheets)
+                        if (fresh.count { it is HomeSection.Recommend } >= 3) break
+                    }
+                }
+                if (hasTags && fresh.none { it is HomeSection.Recommend }) {
+                    // 兜底旧版：tags 里直接带歌单
                     val tags = runtime?.callParallel(pf, PluginMethod.RECOMMEND_TAGS, timeoutMs = PLUGIN_CALL_TIMEOUT_MS)
                     if (tags !is NotImplementedError) {
                         val groups: JSONArray? = (tags as? JSONObject)?.optJSONArray("data")
@@ -206,7 +276,9 @@ class HomeViewModel(private val app: TvMusicApp) : ViewModel() {
                     }
                 }
             } catch (e: Exception) {
-                fresh += HomeSection.Error(plugin.name, "推荐歌单失败: ${e.message}")
+                if (fresh.none { it is HomeSection.Recommend }) {
+                    fresh += HomeSection.Error(plugin.name, "推荐歌单失败: ${e.message}")
+                }
             }
 
             if (fresh.isEmpty()) {

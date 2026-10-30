@@ -103,10 +103,39 @@ class PluginRepository(
         // 元数据轻量查询：StateFlow 常驻内存，不放源码（warmup 注册用全量查询，互不影响）
         _plugins.value = store.loadPluginMetas()
         _subscribed.value = store.listSubscriptions().map { it.url }
+        // 同步进行中不裁剪（插件正逐个安装，尚未落库的音源会被误删并打乱用户排序）
+        if (!_syncing.value) pruneSourceOrder()
         // 插件集合的任何变化（安装/卸载/启停）都会让引擎侧可用性探测结果过期，
         // 必须立刻失效缓存；否则新装/重新启用的插件最长 30s 不出现在搜索与换源候选里，
         // 表现为"插件明明装上了却搜不到/换不到它"。
         runtime.invalidateAvailability()
+    }
+
+    /**
+     * 自愈清理音源优先级（sourceOrder）中的「幽灵项」：只保留仍存在于插件库的
+     * platform/name。
+     *
+     * 历史 bug：旧 [detectPlatform] 对混淆后的插件 JS 会把方法名（supportedQualities /
+     * getMusicSheetInfo）或随机标识符（OTpDp / gNEyM）误认成 platform，
+     * [appendToSourceOrder] 把它写进配置。这些项没有对应的插件，远程管理「音源」页与
+     * TV 端都会渲染成「已卸载 / 订阅已移除」灰行，用户误以为订阅文件里有脏数据。
+     */
+    private fun pruneSourceOrder(): Int {
+        val valid = _plugins.value
+            .mapNotNull { (it.info?.platform ?: it.name).takeIf { s -> s.isNotBlank() } }
+            .toSet()
+        // 插件库为空（全新安装、尚未同步完成）时不动配置，避免把待安装的顺序清空
+        if (valid.isEmpty()) return 0
+        val prefs = appContext.getSharedPreferences("search_config", Context.MODE_PRIVATE)
+        val cur = readSourceOrder(prefs)
+        if (cur.isEmpty()) return 0
+        val kept = cur.filter { it in valid }
+        if (kept.size == cur.size) return 0
+        prefs.edit()
+            .putString("sourceOrder", org.json.JSONArray().apply { kept.forEach { put(it) } }.toString())
+            .apply()
+        Log.i("PluginRepository", "pruneSourceOrder: removed ${cur.size - kept.size} ghost entries")
+        return cur.size - kept.size
     }
 
     /**
@@ -142,7 +171,8 @@ class PluginRepository(
                 if (platform.isNullOrBlank()) continue
                 val marker = File(appContext.filesDir, "plugin_load_marker")
                 marker.writeText(p.name)
-                val loaded = runCatching { runtime.loadPlugin(platform, p.source!!) }.getOrDefault(false)
+                // 只注册主引擎（warmup 提速 3 倍）：并行引擎经 ensureRegistered 按需补注册
+                val loaded = runCatching { runtime.registerPrimary(platform, p.source!!) }.getOrDefault(false)
                 marker.delete()
                 if (loaded) {
                     removeBlocklistEntry(p.name)
@@ -507,7 +537,7 @@ class PluginRepository(
             val rawPlatform = detectPlatform(js)
             // detectPlatform 对 Parcel/webpack 混淆产物可能返回 null（platform 值被加密为函数调用），
             // 此时回退使用订阅条目中的 name 作为 platform（内部标识一致即可，readInfo 会覆盖为实际值）。
-            val platform = rawPlatform?.takeIf { it.isNotEmpty() }
+            var platform = rawPlatform?.takeIf { it.isNotEmpty() }
                 ?: detectPlatformFromUrl(url, js)?.takeIf { it.isNotEmpty() }
                 ?: name.ifEmpty { null }
             if (platform == null) return@withContext "无法解析插件 platform"
@@ -516,17 +546,31 @@ class PluginRepository(
                 Log.i("PluginRepository", "skip uninstalled plugin: $platform")
                 return@withContext null
             }
-            if (!fromSync) {
-                store.clearUninstalled(listOf(name, platform))
-            }
             // 崩溃看门狗：写标记，若注册时 native crash，下次启动跳过该插件
             val marker = File(appContext.filesDir, "plugin_load_marker")
             marker.writeText(name.ifBlank { platform })
-            val loaded = runCatching { runtime.loadPlugin(platform, jsSource) }.getOrDefault(false)
+            val loaded = runCatching { runtime.registerPrimary(platform, jsSource) }.getOrDefault(false)
             marker.delete()
             if (!loaded) return@withContext "插件注册失败: $platform"
             val infoRaw = runtime.readInfo(platform) ?: return@withContext "读取插件信息失败: $platform"
             val info = parseInfo(infoRaw)
+            // 引擎读回的真实 platform 才是权威值：detectPlatform 只有字面量写法才可靠，
+            // 混淆产物会被误取成方法名（supportedQualities/getMusicSheetInfo）或随机标识符
+            // （OTpDp/gNEyM）。若继续拿这个猜测值当注册 key，同进程内所有用真实 platform
+            // 发起的调用都会查不到插件（表现为"装上了却不可用"），且会污染音源优先级。
+            val realPlatform = info.platform.trim()
+            if (realPlatform.isNotEmpty() && realPlatform != platform) {
+                Log.i("PluginRepository", "platform corrected: $platform -> $realPlatform ($name)")
+                runCatching { runtime.registerPrimary(realPlatform, jsSource) }.getOrDefault(false)
+                platform = realPlatform
+            }
+            if (fromSync && platform in blockedNames) {
+                Log.i("PluginRepository", "skip uninstalled plugin (real platform): $platform")
+                return@withContext null
+            }
+            if (!fromSync) {
+                store.clearUninstalled(listOf(name, platform))
+            }
             if (oldRecord != null) {
                 Log.i("PluginRepository", "update plugin $name ${oldRecord.hash.take(6)} -> ${hash.take(6)}")
             }
@@ -543,7 +587,10 @@ class PluginRepository(
                     hash = hash
                 )
             )
-            appendToSourceOrder(platform)
+            // 必须用引擎读出的真实 platform：detectPlatform 对混淆产物可能返回
+            // 随机标识符/方法名（如 'getMediaSource':function 形态被误取），
+            // 直接入列会污染音源优先级，导致搜索/换源候选大面积丢失。
+            appendToSourceOrder(info.platform.ifBlank { platform })
             installEvents.add(
                 Triple(name.ifBlank { info.platform }, if (oldRecord != null) "updated" else "installed", null)
             )

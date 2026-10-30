@@ -53,6 +53,10 @@ class TopListViewModel(
     @Volatile
     private var session = 0
 
+    /** warmup 竞态自动重探：任务与次数（成功路径归零）。 */
+    private var autoProbeJob: kotlinx.coroutines.Job? = null
+    private var probeRetries = 0
+
     init {
         viewModelScope.launch(Dispatchers.IO) {
             // P0-6：awaitEngineReady 返回 false 立即降级为错误态，
@@ -86,10 +90,24 @@ class TopListViewModel(
             cfg.sourceOrder
         ) { it.info?.platform ?: "" }
         _plugins.value = able
+        if (able.isNotEmpty()) probeRetries = 0
         if (able.isEmpty()) {
             viewModelScope.launch(Dispatchers.Main) {
                 _loading.value = false
                 _error.value = "已启用的插件均不提供排行榜"
+            }
+            // warmup 期间插件在 JS 线程上逐个注册（每台引擎都要跑几秒大脚本），
+            // hasMethod 的 jsBlock 探测会撞 "js engine busy" 被误判 false。
+            // 探测失败不缓存，稍后自动重探一次即可恢复——否则启动早期进本页
+            // 会永远停在「已启用的插件均不提供排行榜」，必须退出重进。
+            // 上限 10 次（约 1 分钟）：真的没有排行榜插件时不做无限轮询。
+            if (probeRetries < 10) {
+                probeRetries++
+                autoProbeJob?.cancel()
+                autoProbeJob = viewModelScope.launch(Dispatchers.IO) {
+                    kotlinx.coroutines.delay(6_000)
+                    probePlugins(keepSelection = false)
+                }
             }
             return
         }
