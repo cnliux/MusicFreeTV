@@ -152,11 +152,11 @@ internal val PAGE_HTML = """<!DOCTYPE html>
     pointer-events: none; z-index: 999; max-width: 90vw; box-shadow: 0 8px 32px rgba(0,0,0,.6);
   }
   #toast.show { opacity: 1; }
-  #favModal, #collectModal {
+  #favModal, #collectModal, #syncModal {
     position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 40;
     display: none; align-items: flex-end; justify-content: center;
   }
-  #favModal.show, #collectModal.show { display: flex; }
+  #favModal.show, #collectModal.show, #syncModal.show { display: flex; }
   #favModal .sheet, #collectModal .sheet {
     width: 100%; max-width: 520px; background: var(--card); border-radius: 18px 18px 0 0;
     padding: 18px 18px calc(18px + env(safe-area-inset-bottom)); max-height: 70vh; overflow-y: auto;
@@ -567,6 +567,20 @@ internal val PAGE_HTML = """<!DOCTYPE html>
       <button class="small" onclick="createCollectAndAdd()">新建并收藏</button>
     </div>
     <div class="newrow"><button class="ghost small" style="flex:1;" onclick="closeCollectAll()">关闭</button></div>
+  </div>
+</div>
+
+<div id="syncModal" onclick="if(event.target===this)closeSyncModal()">
+  <div class="sheet">
+    <h3 id="syncModalTitle">同步中…</h3>
+    <div style="margin:12px 0;">
+      <div style="height:8px;background:var(--card2);border-radius:4px;overflow:hidden;">
+        <div id="syncBar" style="height:100%;width:0%;background:var(--accent);border-radius:4px;transition:width .3s;"></div>
+      </div>
+      <div id="syncStatus" class="muted" style="margin-top:6px;font-size:13px;text-align:center;">等待中…</div>
+    </div>
+    <div id="syncResult" class="muted" style="font-size:12px;max-height:160px;overflow-y:auto;display:none;"></div>
+    <div class="newrow"><button class="ghost small" style="flex:1;" onclick="closeSyncModal()">关闭</button></div>
   </div>
 </div>
 
@@ -1529,9 +1543,58 @@ function removeSub(btn) {
 }
 function syncAll() {
   api('/api/sync', { method: 'POST' }).then(function (d) {
-    toast(d.message || '开始同步');
-    setTimeout(loadSearchCfg, 4000);
+    openSyncModal();
+    pollSyncStatus();
   }).catch(function () { toast('同步失败'); });
+}
+var _syncPollTimer = null;
+function openSyncModal() {
+  el('syncModal').className = 'show';
+  el('syncBar').style.width = '0%';
+  el('syncStatus').textContent = '开始同步…';
+  el('syncResult').style.display = 'none';
+}
+function closeSyncModal() {
+  el('syncModal').className = '';
+  clearInterval(_syncPollTimer);
+  _syncPollTimer = null;
+}
+function pollSyncStatus() {
+  clearInterval(_syncPollTimer);
+  function tick() {
+    api('/api/sync/status').then(function (d) {
+      if (!d || !d.ok) { clearInterval(_syncPollTimer); return; }
+      if (d.syncing) {
+        var p = d.progress;
+        if (p) {
+          var pct = Math.round(p.current / p.total * 100);
+          el('syncBar').style.width = pct + '%';
+          el('syncStatus').textContent = '正在同步 ' + p.current + '/' + p.total + '（下载阶段）';
+        } else {
+          el('syncStatus').textContent = '正在注册插件…';
+        }
+        _syncPollTimer = setTimeout(tick, 1500);
+      } else {
+        // 同步结束，显示结果
+        el('syncBar').style.width = '100%';
+        el('syncStatus').textContent = '同步完成';
+        var r = d.report;
+        if (r) {
+          var lines = [];
+          if (r.installed && r.installed.length) lines.push('✓ 新装：' + r.installed.join(', '));
+          if (r.updated && r.updated.length) lines.push('↑ 更新：' + r.updated.join(', '));
+          if (r.failed && r.failed.length) lines.push('✕ 失败：' + r.failed.join(', '));
+          if (!lines.length) lines.push('全部已是最新，无需操作');
+          el('syncResult').innerHTML = lines.join('<br>');
+          el('syncResult').style.display = 'block';
+        }
+        clearInterval(_syncPollTimer);
+        setTimeout(loadSearchCfg, 1000);
+      }
+    }).catch(function () { clearInterval(_syncPollTimer); });
+  }
+  _syncPollTimer = setInterval(tick, 1500);
+  tick();
 }
 
 /* ---------------- 主题 ---------------- */

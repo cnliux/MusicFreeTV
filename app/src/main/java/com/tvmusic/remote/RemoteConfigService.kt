@@ -583,6 +583,23 @@ class RemoteConfigService : Service() {
                 app().repository.syncAll(force = true)
                 respond(socket, 200, JSONObject().put("ok", true).put("message", "开始同步订阅").toString())
             }
+            method == "GET" && path == "/api/sync/status" -> {
+                val repo = app().repository
+                val prog = repo.syncProgress.value
+                val syncing = repo.syncing.value
+                val report = repo.syncReport.value
+                val obj = JSONObject()
+                    .put("ok", true)
+                    .put("syncing", syncing)
+                    .put("progress", if (prog != null) JSONObject().put("current", prog.first).put("total", prog.second) else null)
+                    .put("report", if (report != null) JSONObject()
+                        .put("updated", JSONArray(report.updated))
+                        .put("installed", JSONArray(report.installed))
+                        .put("failed", JSONArray(report.failed))
+                        .put("totalSeen", report.totalSeen)
+                    else null)
+                respond(socket, 200, obj.toString())
+            }
             method == "GET" && path == "/api/search/config" -> {
                 val s = com.tvmusic.config.SearchSettings.load(app())
                 respond(

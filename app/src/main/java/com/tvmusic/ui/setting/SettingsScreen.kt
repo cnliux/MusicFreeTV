@@ -12,12 +12,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -59,6 +61,7 @@ fun SettingsScreen(
     val drafts by viewModel.drafts.collectAsState()
     val health by viewModel.health.collectAsState()
     val syncReport by viewModel.syncReport.collectAsState()
+    val syncProgress by viewModel.syncProgress.collectAsState()
     val healthByPlatform = remember(health) { health.associateBy { it.platform } }
 
     // 进入/离开设置页时切换健康度轮询可见性标志：页面不可见时暂停轮询，避免后台空转
@@ -222,6 +225,22 @@ Box(
                 Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     ActionButton("添加订阅并同步") { viewModel.addSubscription(subUrl) }
                     ActionButton(if (syncing) "检查中…" else "检查插件更新") { viewModel.sync() }
+                }
+                // 同步进度条
+                if (syncing || syncProgress != null) {
+                    val (cur, total) = syncProgress ?: (0 to 0)
+                    Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                        LinearProgressIndicator(
+                            progress = if (total > 0) cur.toFloat() / total else 0f,
+                            modifier = Modifier.fillMaxWidth().height(6.dp)
+                        )
+                        Text(
+                            if (syncing) "正在同步 $cur/$total …" else "已同步 $cur/$total",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
                 }
                 // 手动"检查更新"的结果汇总：新装 / 更新 / 失败分组列出
                 val report = syncReport

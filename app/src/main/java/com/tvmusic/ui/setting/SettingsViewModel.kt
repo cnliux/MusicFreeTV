@@ -25,6 +25,9 @@ class SettingsViewModel(app: TvMusicApp) : ViewModel() {
     val subscribed: StateFlow<List<String>> = repo.subscribed
     val syncing: StateFlow<Boolean> = repo.syncing
 
+    /** 同步进度（当前/总数），null=未同步中。 */
+    val syncProgress: StateFlow<Pair<Int, Int>?> = repo.syncProgress
+
     /** 最近一次手动"检查更新"的结果（null 表示还未手动同步过）。 */
     val syncReport: StateFlow<PluginRepository.SyncReport?> = repo.syncReport
 
