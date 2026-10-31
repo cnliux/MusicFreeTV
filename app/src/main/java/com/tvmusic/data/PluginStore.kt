@@ -191,6 +191,19 @@ class PluginStore(context: Context) {
         savePlugins()
     }
 
+    /**
+     * 修改插件展示名（历史脏名自愈用）：只改 name，不动 info.platform 与源码文件。
+     * @return 是否命中并写盘
+     */
+    fun renamePlugin(oldName: String, newName: String): Boolean {
+        if (oldName.isBlank() || newName.isBlank() || oldName == newName) return false
+        val idx = pluginsCache.indexOfFirst { it.name == oldName }
+        if (idx < 0) return false
+        pluginsCache[idx] = pluginsCache[idx].copy(name = newName)
+        savePlugins()
+        return true
+    }
+
     fun markLoadErrorByName(name: String, error: String) {
         val idx = pluginsCache.indexOfFirst { it.name == name }
         if (idx >= 0) {

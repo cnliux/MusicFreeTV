@@ -48,6 +48,23 @@ class PluginRepository(
 
         /** 崩溃封禁阈值：连续这么多次"加载时 native crash"才永久禁止该插件。 */
         const val BLOCK_THRESHOLD = 3
+
+        /**
+         * 插件元信息字段/方法名：混淆产物的 `'xxx':_0xFn(...)` 会被旧 [detectPlatform]
+         * 误当成 platform（如 supportedQualities / getMusicSheetInfo）。
+         * 前缀 `platform` 等键在字段匹配阶段也会出现，一并当作噪音。
+         */
+        val METADATA_KEY_NAMES = setOf(
+            "platform", "name", "version", "author", "srcUrl", "appVersion", "description",
+            "cacheControl", "primaryKey", "supportedSearchType", "defaultSearchType",
+            "supportedQualities", "supportedVideoQualities", "userVariables", "hints", "key", "hint",
+            "search", "getMediaSource", "getMusicInfo", "getMusicDetailPageUrl", "getAlbumInfo",
+            "importMusicItem", "importMusicSheet", "getMusicComments", "getTopLists",
+            "getTopListDetail", "getLyric"
+        )
+
+        /** protocol 标识与非平台值。 */
+        val NOISE_PLATFORMS = setOf("pc", "web", "WebFilter", "H5", "h5") + METADATA_KEY_NAMES
     }
 
     private val _plugins = MutableStateFlow<List<PluginRecord>>(emptyList())
@@ -101,7 +118,10 @@ class PluginRepository(
 
     fun refreshFromDb() {
         // 元数据轻量查询：StateFlow 常驻内存，不放源码（warmup 注册用全量查询，互不影响）
-        _plugins.value = store.loadPluginMetas()
+        val metas = store.loadPluginMetas()
+        // 自愈历史脏展示名（见 repairGuessedNames）：直链安装的混淆插件曾把
+        // detectPlatform 猜到的元信息字段（如 supportedQualities）当插件名入库。
+        _plugins.value = if (repairGuessedNames(metas)) store.loadPluginMetas() else metas
         _subscribed.value = store.listSubscriptions().map { it.url }
         // 同步进行中不裁剪（插件正逐个安装，尚未落库的音源会被误删并打乱用户排序）
         if (!_syncing.value) pruneSourceOrder()
@@ -136,6 +156,33 @@ class PluginRepository(
             .apply()
         Log.i("PluginRepository", "pruneSourceOrder: removed ${cur.size - kept.size} ghost entries")
         return cur.size - kept.size
+    }
+
+    /**
+     * 修复历史脏展示名：直链安装混淆插件时，旧 [installFromBody] 把 detectPlatform 的
+     * 猜测值直接当插件名入库；猜测值常是插件元信息字段/方法名（supportedQualities /
+     * cacheControl / getMusicSheetInfo…），TV 端插件列表因此显示成「别的名称」。
+     * 引擎读回的 info.platform 是权威值，命中噪音字段时直接改回真实 platform。
+     *
+     * @return 是否有记录被改名（调用方需要重新读取插件列表）
+     */
+    private fun repairGuessedNames(metas: List<PluginRecord>): Boolean {
+        var changed = false
+        metas.forEach { m ->
+            val real = m.info?.platform?.trim().orEmpty()
+            val display = m.name.trim()
+            // 元信息字段/方法名，或 detectPlatform 在混淆产物里误取到的纯数字字面量
+            val guessed = display in METADATA_KEY_NAMES || display.all { it.isDigit() }
+            if (real.isNotEmpty() && display.isNotEmpty() &&
+                display != real && guessed
+            ) {
+                if (store.renamePlugin(display, real)) {
+                    changed = true
+                    Log.i("PluginRepository", "rename guessed plugin name: $display -> $real")
+                }
+            }
+        }
+        return changed
     }
 
     /**
@@ -436,8 +483,11 @@ class PluginRepository(
 
     /** 单个插件源码安装入口（探测 platform 后交给 install）。 */
     private suspend fun installFromBody(url: String, body: String, fromSync: Boolean): String? {
-        val platform = detectPlatform(body) ?: return "无法解析插件 platform"
-        return install(platform, url, source = body, fromSync = fromSync)
+        // 直链安装没有订阅条目里的展示名。此前把 detectPlatform 的猜测值当 name 传入，
+        // 混淆产物被猜成 supportedQualities 之类的元信息字段，TV 端插件列表就显示成
+        // 「别的名称」（Web 端按真实 platform 渲染所以正常）。这里不传 name，
+        // 由 install 用引擎 readInfo 读回的真实 platform 作展示名。
+        return install("", url, source = body, fromSync = fromSync)
     }
 
     /**
@@ -520,6 +570,8 @@ class PluginRepository(
     }
 
     /** 安装/更新：注册到引擎 -> 读元信息 -> 入库。
+     *  @param name 展示名；传空串表示没有外部展示名（单 js 直链安装），
+     *              入库时使用引擎读回的真实 platform。
      *  @param fromSync true=订阅自动同步（命中卸载名单则静默跳过）；false=手动导入（清除名单允许恢复） */
     suspend fun install(
         name: String,
@@ -556,7 +608,8 @@ class PluginRepository(
             }
             // 同名插件：指纹不同说明订阅源发布了更新，走更新路径（重新注册 + upsert，
             // 保留原启用状态与安装时间）。旧实现此处静默 return，订阅插件更新永远无法下发
-            val oldRecord = existing.firstOrNull { it.name == name }
+            val oldRecord = name.takeIf { it.isNotBlank() }
+                ?.let { n -> existing.firstOrNull { it.name == n } }
             val rawPlatform = detectPlatform(js)
             // detectPlatform 对 Parcel/webpack 混淆产物可能返回 null（platform 值被加密为函数调用），
             // 此时回退使用订阅条目中的 name 作为 platform（内部标识一致即可，readInfo 会覆盖为实际值）。
@@ -592,23 +645,28 @@ class PluginRepository(
                 runCatching { runtime.registerPrimary(realPlatform, jsSource) }.getOrDefault(false)
                 platform = realPlatform
             }
+            // 直链安装（name 为空）按真实 platform 展示；订阅安装保留条目里的展示名。
+            // 更新判定同时兼容「按 platform 入库」的记录，避免直链更新时重置启用状态/安装时间。
+            val displayName = name.ifBlank { realPlatform.ifBlank { platform } }
+            val effectiveOld = oldRecord
+                ?: existing.firstOrNull { it.info?.platform == displayName || it.name == displayName }
             if (fromSync && platform in blockedNames) {
                 Log.i("PluginRepository", "skip uninstalled plugin (real platform): $platform")
                 return@withContext null
             }
             if (!fromSync) {
-                store.clearUninstalled(listOf(name, platform))
+                store.clearUninstalled(listOf(displayName, platform))
             }
-            if (oldRecord != null) {
-                Log.i("PluginRepository", "update plugin $name ${oldRecord.hash.take(6)} -> ${hash.take(6)}")
+            if (effectiveOld != null) {
+                Log.i("PluginRepository", "update plugin $displayName ${effectiveOld.hash.take(6)} -> ${hash.take(6)}")
             }
             store.upsertPlugin(
                 PluginRecord(
-                    name = name.ifBlank { info.platform },
+                    name = displayName,
                     url = url,
                     version = version ?: info.version,
-                    enabled = oldRecord?.enabled ?: keepEnabled,
-                    installedAt = oldRecord?.installedAt ?: System.currentTimeMillis(),
+                    enabled = effectiveOld?.enabled ?: keepEnabled,
+                    installedAt = effectiveOld?.installedAt ?: System.currentTimeMillis(),
                     source = jsSource,
                     info = info,
                     loadError = null,
@@ -620,7 +678,7 @@ class PluginRepository(
             // 直接入列会污染音源优先级，导致搜索/换源候选大面积丢失。
             appendToSourceOrder(info.platform.ifBlank { platform })
             installEvents.add(
-                Triple(name.ifBlank { info.platform }, if (oldRecord != null) "updated" else "installed", null)
+                Triple(displayName, if (effectiveOld != null) "updated" else "installed", null)
             )
             refreshFromDb()
             null
@@ -744,7 +802,7 @@ class PluginRepository(
 
     /** 过滤掉噪音词：协议标识、非平台值等。 */
     private fun isNoisePlatform(s: String): Boolean =
-        s in setOf("pc", "web", "WebFilter", "H5", "h5") ||
+        s in NOISE_PLATFORMS ||
             s.endsWith(".json") ||
             s.length > 30  // 混淆字符串通常很短
 

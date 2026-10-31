@@ -16,6 +16,8 @@ local.properties
 /annotations.zip
 /classes.jar
 /proguard.txt
+# 本地构建/调试日志（命令重定向产物，不入库）
+/_b*.txt
 
 # release signing (never commit)
 /keystore.properties
